@@ -80,7 +80,7 @@ pub const Vm = struct {
                     offset = token2.loc.end;
                     switch (token2.tag) {
                         .equal => {
-                            const value = try vm.eval(text, token2.loc.end);
+                            const value = try vm.eval(allocator, out_err, text, token2.loc.end);
                             const symbol = text[token.loc.start..token.loc.end];
                             const entry = vm.symbol_table.getOrPut(allocator, symbol) catch |e| return out_err.setOom(e);
                             if (entry.found_existing) {
@@ -104,11 +104,26 @@ pub const Vm = struct {
         }
     }
 
-    fn eval(vm: *Vm, text: []const u8, start: usize) error{Vm}!Value {
+    fn eval(
+        vm: *Vm,
+        allocator: std.mem.Allocator,
+        out_err: *VmError,
+        text: []const u8,
+        start: usize,
+    ) error{Vm}!Value {
+        const first_token = lex(text, start);
+        _ = allocator;
         _ = vm;
-        _ = text;
-        _ = start;
-        @panic("todo: implement eval");
+        // _ = vm;
+        // _ = text;
+        // _ = start;
+        // @panic("todo: implement eval");
+        switch (first_token.tag) {
+            else => return out_err.set(.{ .unexpected_token = .{
+                .expected = "an expression",
+                .token = first_token,
+            } }),
+        }
     }
 };
 

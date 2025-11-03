@@ -2,8 +2,6 @@ const global = struct {
     var mutex: Mutex = .{};
     var localappdata_resolved: bool = false;
     var localappdata: ?[]const u16 = null;
-    // var arena_instance: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // var modified_affinities: std.AutoHashMapUnmanaged(win32.HWND, ModifiedAffinity) = .{};
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 };
@@ -286,9 +284,9 @@ fn openLog(localappdata: []const u16) ?std.fs.File {
 
 fn rollLog(localappdata: []const u16) void {
     var src_buf: [max_log_path]u16 = undefined;
-    const src = makeLocalAppDataPath(&src_buf, localappdata, win32.L("tuple\\TupleVeil.log")) orelse return;
+    const src = makeLocalAppDataPath(&src_buf, localappdata, win32.L("marlermod\\log.txt")) orelse return;
     var dst_buf: [max_log_path + 2]u16 = undefined;
-    const dst = makeLocalAppDataPath(&dst_buf, localappdata, win32.L("tuple\\TupleVeil.1.log")) orelse return;
+    const dst = makeLocalAppDataPath(&dst_buf, localappdata, win32.L("marlermod\\log.1.txt")) orelse return;
     _ = win32.MoveFileExW(src, dst, .{ .REPLACE_EXISTING = 1 });
 }
 
@@ -337,7 +335,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     //    f.writer().writeAll("fatal: ") catch { };
     //    f.writer().print(fmt, args) catch { };
     //}
-    _ = msgbox(.{}, "TupleVeil.dll: Fatal Error", fmt, args);
+    _ = msgbox(.{}, "MarlerMod.dll: Fatal Error", fmt, args);
     win32.ExitProcess(0xff);
 }
 

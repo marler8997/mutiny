@@ -55,29 +55,6 @@ pub export fn _DllMainCRTStartup(
                 return 1; // fail
             };
             win32.closeHandle(thread);
-
-            // if (true) {
-            //     win32.OutputDebugStringW(win32.L("MarlerMod: testing error\n"));
-            //     return 0; // fail
-            // }
-
-            // var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            // const dll_path = try getDllPath(&dll_path_buf);
-            // std.log.info("DLL loaded from: {s}", .{dll_path});
-
-            // At this point we're running inside the game process
-            // But we can't directly call Unity APIs yet - we need to hook into
-            // the game's main thread
-
-            // For now, just log success and prepare for the C# side to take over
-            // In a full implementation, we would:
-            // 1. Find the Mono/IL2CPP runtime
-            // 2. Load our managed DLL (ScriptEngine.dll)
-            // 3. Call into C# to set up the rest
-
-            // std.log.info("Native initialization complete", .{});
-            // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
-
         },
         win32.DLL_THREAD_ATTACH => {},
         win32.DLL_THREAD_DETACH => {},
@@ -95,49 +72,43 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
-    // {
-    //     {
-    //         {
-    //             global.mutex.lock();
-    //             defer global.mutex.unlock();
-    //             if (!global.localappdata_resolved) {
-    //                 global.localappdata = std.process.getenvW(win32.L("localappdata"));
-    //                 global.localappdata_resolved = true;
-    //             }
-    //         }
+    loadMods();
 
-    //         // break :blk global.localappdata;
-    //         var path_buf: [max_log_path]u16 = undefined;
-    //         if (makeLocalAppDataPath(&path_buf, global.localappdata.?, win32.L("marlermod\\log"))) |p| {
-    //             std.log.info("localappdata path '{f}'", .{std.unicode.fmtUtf16Le(std.mem.span(p))});
-    //         }
-    //     }
-    // }
+    // TODO: how do we call .NET methods?
+
+    // At this point we're running inside the game process
+    // But we can't directly call Unity APIs yet - we need to hook into
+    // the game's main thread
+
+    // For now, just log success and prepare for the C# side to take over
+    // In a full implementation, we would:
+    // 1. Find the Mono/IL2CPP runtime
+    // 2. Load our managed DLL (ScriptEngine.dll)
+    // 3. Call into C# to set up the rest
+
+    // std.log.info("Native initialization complete", .{});
+    // std.log.info("TODO: Hook into Mono runtime and load managed DLL", .{});
 
     // _ = msgbox(.{}, "MarlerMod Init Thread", "InitThread running!", .{});
     return 0;
 }
 
-// fn getDllPath(buf: []u8) ![]const u8 {
-//     var path_buf_w: [std.fs.max_path_bytes]u16 = undefined;
-
-//     // Get the path of this DLL
-//     // Pass null as hModule to get the path of the current module (our DLL)
-//     const len = win32.GetModuleFileNameW(
-//         null,
-//         &path_buf_w,
-//         path_buf_w.len,
-//     );
-
-//     if (len == 0) {
-//         return error.GetModuleFileNameFailed;
-//     }
-
-//     // Convert from UTF-16 to UTF-8 without allocator
-//     const path_w = path_buf_w[0..len :0];
-//     const utf8_len = std.unicode.utf16LeToUtf8(buf, path_w) catch return error.Utf16ToUtf8Failed;
-//     return buf[0..utf8_len];
-// }
+fn loadMods() void {
+    const mod_path = "C:\\temp\\marlermods";
+    std.log.info("loading mods from '{s}'...", .{mod_path});
+    var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
+        std.log.err("open mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
+        return;
+    };
+    defer dir.close();
+    var it = dir.iterate();
+    while (it.next() catch |err| {
+        std.log.err("iterate mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
+        return;
+    }) |entry| {
+        std.log.info("todo: load mod '{s}'", .{entry.name});
+    }
+}
 
 // Export a function that the C# managed code can call
 // This allows us to bridge between native and managed

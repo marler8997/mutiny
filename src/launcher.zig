@@ -2,13 +2,16 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_instance.deinit();
+    const gpa = gpa_instance.allocator();
+
+    const all_args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, all_args);
 
     std.log.info("=== Mod Framework Launcher ===", .{});
-    const game_exe = try findGameExecutable(allocator);
-    defer allocator.free(game_exe);
+    const game_exe = try findGameExecutable(gpa);
+    defer gpa.free(game_exe);
 
     std.log.info("Game: {s}", .{game_exe});
 
@@ -32,12 +35,12 @@ pub fn main() !void {
 
     // Launch and inject
     std.log.info("Launching game...", .{});
-    try launchAndInject(allocator, game_exe, framework_dll);
+    try launchAndInject(gpa, game_exe, framework_dll);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
 }
 
-fn findGameExecutable(allocator: std.mem.Allocator) ![]const u8 {
+fn findGameExecutable(gpa: std.mem.Allocator) ![]const u8 {
     // const stdin = std.io.getStdIn().reader();
 
     // // Try to read from config file
@@ -60,7 +63,7 @@ fn findGameExecutable(allocator: std.mem.Allocator) ![]const u8 {
     //             const path = std.mem.trim(u8, trimmed[10..], " \r\n\t");
     //             if (path.len > 0) {
     //                 std.fs.accessAbsolute(path, .{}) catch continue;
-    //                 return try allocator.dupe(u8, path);
+    //                 return try gpa.dupe(u8, path);
     //             }
     //         }
     //     }
@@ -75,7 +78,7 @@ fn findGameExecutable(allocator: std.mem.Allocator) ![]const u8 {
 
     for (common_paths) |path| {
         std.fs.accessAbsolute(path, .{}) catch continue;
-        return try allocator.dupe(u8, path);
+        return try gpa.dupe(u8, path);
     }
 
     std.log.err("could not find game executable (todo: maybe make a way to configure this?)", .{});
@@ -97,28 +100,28 @@ fn findGameExecutable(allocator: std.mem.Allocator) ![]const u8 {
     //     defer file.close();
     //     try file.writer().print("game_path={s}\n", .{trimmed});
 
-    //     return try allocator.dupe(u8, trimmed);
+    //     return try gpa.dupe(u8, trimmed);
     // }
 
     return error.NoGameFound;
 }
 
 fn launchAndInject(
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     game_exe: []const u8,
     dll_path: []const u8,
 ) !void {
     // Convert paths to UTF-16 (need allocator for this)
-    const game_exe_w = try std.unicode.wtf8ToWtf16LeAllocZ(allocator, game_exe);
-    defer allocator.free(game_exe_w);
+    const game_exe_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, game_exe);
+    defer gpa.free(game_exe_w);
 
-    const dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(allocator, dll_path);
-    defer allocator.free(dll_path_w);
+    const dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, dll_path);
+    defer gpa.free(dll_path_w);
 
     // Get game directory without allocator
     const game_dir = std.fs.path.dirname(game_exe) orelse return error.InvalidPath;
-    const game_dir_w = try std.unicode.wtf8ToWtf16LeAllocZ(allocator, game_dir);
-    defer allocator.free(game_dir_w);
+    const game_dir_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, game_dir);
+    defer gpa.free(game_dir_w);
 
     // Setup process creation structures
     var si: win32.STARTUPINFOW = .{

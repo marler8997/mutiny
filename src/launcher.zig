@@ -23,7 +23,7 @@ pub fn main() !void {
     const game_exe = try findGameExecutable(gpa);
     defer gpa.free(game_exe);
 
-    std.log.info("Game: {s}", .{game_exe});
+    std.log.info("Game: {f}", .{std.unicode.fmtUtf16Le(game_exe)});
 
     // Find framework DLL
     // var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -49,7 +49,10 @@ pub fn main() !void {
     std.log.info("Check logs/ folder for framework output.", .{});
 }
 
-fn findGameExecutable(gpa: std.mem.Allocator) ![]const u8 {
+fn findGameExecutable(gpa: std.mem.Allocator) ![:0]const u16 {
+    if (true) return gpa.dupeZ(u16, win32.L(
+        "C:\\git\\zigwin32gen\\.zig-cache\\o\\247ea82740ecc3c00d8fb32f7a7a098d\\helloworld-window.exe",
+    ));
     // const stdin = std.io.getStdIn().reader();
 
     // // Try to read from config file
@@ -115,24 +118,24 @@ fn findGameExecutable(gpa: std.mem.Allocator) ![]const u8 {
     return error.NoGameFound;
 }
 
+fn getDirname(path: []const u16) ?[]const u16 {
+    for (1..path.len) |i| {
+        if (path[path.len - i] == '\\')
+            return path[0 .. path.len - i];
+    }
+    return null;
+}
+
 fn launchAndInject(
     gpa: std.mem.Allocator,
-    game_exe: []const u8,
+    game_exe: [:0]const u16,
     dll_path: []const u8,
 ) !void {
-    // Convert paths to UTF-16 (need allocator for this)
-    const game_exe_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, game_exe);
-    defer gpa.free(game_exe_w);
-
     const dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, dll_path);
     defer gpa.free(dll_path_w);
 
-    // Get game directory without allocator
-    const game_dir = std.fs.path.dirname(game_exe) orelse return error.InvalidPath;
-    const game_dir_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, game_dir);
-    defer gpa.free(game_dir_w);
+    // const game_dir: []const u16 = getDirname(game_exe) orelse win32.L(".");
 
-    // Setup process creation structures
     var si: win32.STARTUPINFOW = .{
         .cb = @sizeOf(win32.STARTUPINFOW),
         .lpReserved = null,
@@ -158,14 +161,15 @@ fn launchAndInject(
 
     // Create process in suspended state
     const result = win32.CreateProcessW(
-        game_exe_w.ptr,
+        game_exe.ptr,
         null,
         null,
         null,
         0,
         win32.CREATE_SUSPENDED,
         null,
-        game_dir_w.ptr,
+        // game_dir_w.ptr,
+        null,
         &si,
         &pi,
     );
@@ -190,13 +194,12 @@ fn launchAndInject(
 
 fn injectDLL(
     process: win32.HANDLE,
-    dll_path_w: [*:0]const u16,
+    dll_path: [:0]const u16,
 ) !void {
     // Calculate size needed for DLL path (in bytes, including null terminator)
-    const path_len = std.mem.indexOfSentinel(u16, 0, dll_path_w);
-    const path_size = (path_len + 1) * @sizeOf(u16);
+    // const path_len = std.mem.indexOfSentinel(u16, 0, dll_path_w);
+    const path_size = (dll_path.len + 1) * @sizeOf(u16);
 
-    // Allocate memory in target process
     const remote_mem = win32.VirtualAllocEx(
         process,
         null,
@@ -209,33 +212,25 @@ fn injectDLL(
         return error.AllocFailed;
     };
 
-    const dll_path_bytes = @as([*]const u8, @ptrCast(dll_path_w))[0..path_size];
-    const write_result = win32.WriteProcessMemory(
+    const dll_path_bytes = @as([*]const u8, @ptrCast(dll_path))[0..path_size];
+    if (0 == win32.WriteProcessMemory(
         process,
         remote_mem,
         dll_path_bytes.ptr,
         path_size,
         null,
+    )) std.debug.panic(
+        "WriteProcessMemory for dll path ({} bytes) failed, error={f}",
+        .{ path_size, win32.GetLastError() },
     );
-
-    if (write_result == 0) {
-        const err = win32.GetLastError();
-        std.log.err("WriteProcessMemory failed. Error code: {}", .{@intFromEnum(err)});
-        return error.WriteFailed;
-    }
-
-    // Get address of LoadLibraryW
-    const kernel32 = win32.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll")) orelse {
-        std.log.err("GetModuleHandleW failed", .{});
-        return error.GetModuleFailed;
-    };
-
-    const load_library_addr = win32.GetProcAddress(kernel32, "LoadLibraryW") orelse {
-        std.log.err("GetProcAddress failed", .{});
-        return error.GetProcAddressFailed;
-    };
-
-    // Create remote thread to call LoadLibraryW
+    const kernel32 = win32.GetModuleHandleW(win32.L("kernel32.dll")) orelse win32.panicWin32(
+        "GetModuleHandle(kernel32)",
+        win32.GetLastError(),
+    );
+    const load_library_addr = win32.GetProcAddress(kernel32, "LoadLibraryW") orelse win32.panicWin32(
+        "GetProcAddress(LoadLibrary)",
+        win32.GetLastError(),
+    );
     const thread = win32.CreateRemoteThread(
         process,
         null,
@@ -244,11 +239,10 @@ fn injectDLL(
         remote_mem,
         0,
         null,
-    ) orelse {
-        const err = win32.GetLastError();
-        std.log.err("CreateRemoteThread failed. Error code: {}", .{@intFromEnum(err)});
-        return error.CreateThreadFailed;
-    };
+    ) orelse win32.panicWin32(
+        "CreateRemoteThread",
+        win32.GetLastError(),
+    );
 
     // Wait for LoadLibrary to complete
     _ = win32.WaitForSingleObject(thread, win32.INFINITE);

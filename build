@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import zipfile
+import urllib.request
+from pathlib import Path
+
+
+# === CONFIGURATION - EDIT THESE PATHS ===
+GAME_DIR = r"C:\Program Files (x86)\Steam\steamapps\common\REPO"
+GAME_MANAGED = os.path.join(GAME_DIR, "REPO_Data", "Managed")
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOADS_DIR = os.path.join(SCRIPT_DIR, "downloads")
+
+# === BepInEx Setup ===
+BEPINEX_ZIP = "BepInEx.zip"
+BEPINEX_DIR = "BepInEx_Extract"
+BEPINEX_CORE = os.path.join(BEPINEX_DIR, "BepInEx", "core")
+
+def main():
+    bepinex_dll = os.path.join(BEPINEX_CORE, "BepInEx.dll")
+    if os.path.exists(bepinex_dll):
+        log(f"{bepinex_dll}: already exists")
+    else:
+        install_bepinex(bepinex_dll)
+
+    csc = find_csc()
+    log(f"csc = '{csc}'")
+    if compile_mod(csc):
+        copy_to_game()
+
+    print("\n")
+
+def log(msg):
+    print(f"build: {msg}", file=sys.stderr)
+
+def find_csc():
+    CSC_PATHS = [
+        r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe",
+    ]
+
+    for path in CSC_PATHS:
+        if os.path.exists(path):
+            return path
+
+    # Try to find it in PATH
+    try:
+        result = subprocess.run(["where", "csc"], capture_output=True, text=True, check=True)
+        return result.stdout.strip().split('\n')[0]
+    except:
+        pass
+
+    print("ERROR: Could not find csc.exe")
+    print("Searched paths:")
+    for path in CSC_PATHS:
+        print(f"  - {path}")
+    sys.exit(1)
+
+def fetch_extract_archive(url, out_dir, archive_format=None, archive_unique_name=None):
+    archive_unique_name = archive_unique_name if archive_unique_name else os.path.basename(url)
+    tuplebuild.log("installing '{}'...".format(archive_unique_name))
+    tuplebuild.makedirs(DOWNLOADS_DIR)
+
+    archive_file = os.path.join(DOWNLOADS_DIR, archive_unique_name)
+    if not os.path.exists(archive_file):
+        tuplebuild.download(url, archive_file)
+    tuplebuild.makedirs(out_dir)
+    tuplebuild.extract(archive_file, out_dir, archive_format)
+
+
+def fetch(url, filename):
+    basename = os.path.basename(filename)
+    if os.path.exists(filename):
+        log(f"download '{basename}': already done")
+        return
+    log(f"download '{basename}': executing...")
+    makedirs(os.path.dirname(filename))
+    tmp_filename = filename + ".downloading"
+    remove(tmp_filename)
+    run(None, ["curl", "--location", url, "--output", tmp_filename])
+    os.rename(tmp_filename, filename)
+
+def run(extra_env, *args, **kwargs):
+    if not 'check' in kwargs:
+        kwargs['check'] = True
+
+    cmd_prefix = ''
+    cmd_suffix = ''
+
+    cd_prefix = ''
+    if 'cwd' in kwargs:
+        if IS_WINDOWS:
+            cmd_prefix = 'cmd /c "'
+            cmd_suffix = '"'
+        else:
+            cmd_prefix = '('
+            cmd_suffix = ')'
+        # TODO: should we use & or &&?
+        cd_prefix = f"cd {kwargs['cwd']} && "
+
+    env_prefix = ''
+    if extra_env:
+        kwargs['env'] = {**os.environ, **extra_env}
+        if IS_WINDOWS:
+            cmd_prefix = 'cmd /c "'
+            cmd_suffix = '"'
+            for e in extra_env:
+                env_prefix += f"set {e}={extra_env[e]} && "
+        else:
+            for e in extra_env:
+                env_prefix += f"{e}={extra_env[e]} "
+    log("[RUN] "
+        + cmd_prefix + cd_prefix + env_prefix
+        + subprocess.list2cmdline(*args)
+        + cmd_suffix)
+    sys.stdout.flush()
+    return subprocess.run(*args, **kwargs)
+
+def makedirs(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+def remove(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+def install_bepinex(bepinex_dll):
+    url = "https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.4/BepInEx_win_x64_5.4.23.4.zip"
+    archive = os.path.join(DOWNLOADS_DIR, os.path.basename(url))
+    fetch(url, archive)
+
+
+    sys.exit("todo")
+
+    try:
+        urllib.request.urlretrieve(BEPINEX_URL, BEPINEX_ZIP)
+        print("Downloaded BepInEx successfully!")
+    except Exception as e:
+        print(f"ERROR: Failed to download BepInEx: {e}")
+        sys.exit(1)
+    print("Extracting BepInEx...")
+    try:
+        with zipfile.ZipFile(BEPINEX_ZIP, 'r') as zip_ref:
+            zip_ref.extractall(BEPINEX_DIR)
+        print("BepInEx extracted successfully!")
+    except Exception as e:
+        print(f"ERROR: Failed to extract BepInEx: {e}")
+        sys.exit(1)
+    if not os.path.exists(bepinex_dll):
+        print(f"ERROR: BepInEx.dll not found at {bepinex_dll}")
+        sys.exit(1)
+
+def compile_mod(csc):
+    bepinex_dll = os.path.join(BEPINEX_CORE, "BepInEx.dll")
+    unity_core_dll = os.path.join(GAME_MANAGED, "UnityEngine.CoreModule.dll")
+    unity_dll = os.path.join(GAME_MANAGED, "UnityEngine.dll")
+    netstandard_dll = os.path.join(GAME_MANAGED, "netstandard.dll")  # Add this
+
+    print("\nCompiling MarlerMod.dll...")
+    print(f"Using CSC: {csc}")
+
+    if not os.path.exists(unity_core_dll):
+        print(f"WARNING: Unity CoreModule DLL not found at {unity_core_dll}")
+
+    if not os.path.exists(unity_dll):
+        print(f"WARNING: Unity DLL not found at {unity_dll}")
+
+    if not os.path.exists(netstandard_dll):
+        print(f"WARNING: netstandard DLL not found at {netstandard_dll}")
+        print("Please update GAME_DIR in the script")
+
+    cmd = [
+        csc,
+        "/target:library",
+        "/out:MarlerMod.dll",
+        f"/reference:{bepinex_dll}",
+        f"/reference:{unity_dll}",
+        f"/reference:{unity_core_dll}",
+        f"/reference:{netstandard_dll}",  # Add this reference
+        "MarlerMod.cs"
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print("\n=== SUCCESS! ===")
+        print("MarlerMod.dll compiled successfully\n")
+        return True
+    except subprocess.CalledProcessError as e:
+        print("\n=== COMPILATION FAILED ===")
+        print(e.stdout)
+        print(e.stderr)
+        return False
+
+def copy_to_game():
+    """Optionally copy mod to game plugins folder"""
+    plugins_dir = os.path.join(GAME_DIR, "BepInEx", "plugins")
+
+    if not os.path.exists(plugins_dir):
+        print("\nBepInEx plugins folder not found in game directory.")
+        print("Please install BepInEx to your game first:")
+        print(f"  1. Extract {BEPINEX_ZIP} to: {GAME_DIR}")
+        print(f"  2. Run the game once to initialize BepInEx")
+        print(f"  3. Copy MarlerMod.dll to: {plugins_dir}")
+        return
+
+    print(f"\nBepInEx plugins folder detected!")
+    response = input("Copy mod to game now? (y/n): ").lower().strip()
+
+    if response == 'y':
+        import shutil
+        dest = os.path.join(plugins_dir, "MarlerMod.dll")
+        shutil.copy2("MarlerMod.dll", dest)
+        print(f"Mod copied to: {dest}")
+        print("Launch the game to test!")
+    else:
+        print(f"Manual copy: copy MarlerMod.dll to {plugins_dir}")
+
+if __name__ == "__main__":
+    main()

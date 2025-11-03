@@ -281,7 +281,7 @@ fn updateMods(scratch: std.mem.Allocator) void {
             .initial => {},
             .err => {},
             .text_loaded => |t| {
-                std.log.err("TODO: interpret module source '{f}'", .{std.zig.fmtString(t.text)});
+                @import("interpret.zig").go(t.text);
             },
         }
     }

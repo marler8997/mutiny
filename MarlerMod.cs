@@ -212,37 +212,82 @@ namespace MarlerMod
 
         private static string GetLocalPlayerSteamID()
         {
-            // Method 1: Check what keys PunManager actually has
+            // Method 0: Inspect PunManager structure
             try
             {
-                logger.LogInfo("Checking PunManager for player keys...");
-                System.Reflection.FieldInfo[] punFields = typeof(PunManager).GetFields(
+                logger.LogInfo("=== Inspecting PunManager ===");
+
+                // Check all fields
+                System.Reflection.FieldInfo[] allFields = typeof(PunManager).GetFields(
                     System.Reflection.BindingFlags.Public |
                     System.Reflection.BindingFlags.NonPublic |
-                    System.Reflection.BindingFlags.Instance);
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Static);
 
-                foreach (var field in punFields)
+                logger.LogInfo("PunManager fields:");
+                foreach (var field in allFields)
                 {
-                    if (field.FieldType.IsGenericType &&
-                        field.FieldType.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>))
+                    logger.LogInfo("  " + field.FieldType.Name + " " + field.Name);
+
+                    // If it's a dictionary or list, try to get its contents
+                    if (PunManager.instance != null)
                     {
-                        logger.LogInfo("Found dictionary field: " + field.Name);
-                        object dict = field.GetValue(PunManager.instance);
-                        if (dict != null)
+                        object value = field.GetValue(PunManager.instance);
+                        if (value != null)
                         {
-                            System.Collections.IEnumerable keys = (System.Collections.IEnumerable)dict.GetType().GetProperty("Keys").GetValue(dict, null);
-                            logger.LogInfo("  Keys in dictionary:");
-                            foreach (var key in keys)
-                            {
-                                logger.LogInfo("    - " + key.ToString());
-                            }
+                            logger.LogInfo("    Value: " + value.ToString());
+                        }
+                    }
+                }
+
+                // Check all properties
+                System.Reflection.PropertyInfo[] allProps = typeof(PunManager).GetProperties(
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Static);
+
+                logger.LogInfo("PunManager properties:");
+                foreach (var prop in allProps)
+                {
+                    logger.LogInfo("  " + prop.PropertyType.Name + " " + prop.Name);
+                }
+            }
+            catch (Exception e)
+            {
+                logger.LogError("Inspection failed: " + e.Message);
+                logger.LogError(e.StackTrace);
+            }
+
+            // Method 1: Try to get local player's Photon view owner
+            try
+            {
+                PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
+                logger.LogInfo("Found " + players.Length + " PlayerControllers");
+
+                foreach (PlayerController player in players)
+                {
+                    // Check if this player has a PhotonView
+                    Photon.Pun.PhotonView photonView = player.GetComponent<Photon.Pun.PhotonView>();
+                    if (photonView != null)
+                    {
+                        logger.LogInfo("Found PhotonView on player");
+                        logger.LogInfo("  IsMine: " + photonView.IsMine);
+                        logger.LogInfo("  Owner: " + (photonView.Owner != null ? photonView.Owner.NickName : "null"));
+
+                        if (photonView.IsMine && photonView.Owner != null)
+                        {
+                            logger.LogInfo("  Owner UserId: " + photonView.Owner.UserId);
+
+                            // The UserId might be the Steam ID
+                            return photonView.Owner.UserId;
                         }
                     }
                 }
             }
             catch (Exception e)
             {
-                logger.LogInfo("PunManager check failed: " + e.Message);
+                logger.LogInfo("PhotonView method failed: " + e.Message);
             }
 
             // Method 2: From SteamManager using reflection
@@ -267,69 +312,8 @@ namespace MarlerMod
                 logger.LogInfo("SteamManager method failed: " + e.Message);
             }
 
-            // Method 3: Find player controller - be more specific
-            try
-            {
-                PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
-                logger.LogInfo("Found " + players.Length + " PlayerControllers");
-
-                foreach (PlayerController player in players)
-                {
-                    // Try common property/field names
-                    string[] possibleNames = new string[] { "steamID", "steamId", "SteamID", "playerId", "PlayerID", "userID" };
-
-                    foreach (string propName in possibleNames)
-                    {
-                        // Try property first
-                        System.Reflection.PropertyInfo prop = player.GetType().GetProperty(propName,
-                            System.Reflection.BindingFlags.Public |
-                            System.Reflection.BindingFlags.NonPublic |
-                            System.Reflection.BindingFlags.Instance);
-
-                        if (prop != null)
-                        {
-                            object val = prop.GetValue(player, null);
-                            if (val != null && val.GetType() == typeof(string))
-                            {
-                                string strVal = (string)val;
-                                if (!string.IsNullOrEmpty(strVal) && strVal != "0")
-                                {
-                                    logger.LogInfo("Found Steam ID in property " + propName + ": " + strVal);
-                                    return strVal;
-                                }
-                            }
-                        }
-
-                        // Try field
-                        System.Reflection.FieldInfo field = player.GetType().GetField(propName,
-                            System.Reflection.BindingFlags.Public |
-                            System.Reflection.BindingFlags.NonPublic |
-                            System.Reflection.BindingFlags.Instance);
-
-                        if (field != null && field.FieldType == typeof(string))
-                        {
-                            object val = field.GetValue(player);
-                            if (val != null)
-                            {
-                                string strVal = (string)val;
-                                if (!string.IsNullOrEmpty(strVal) && strVal != "0")
-                                {
-                                    logger.LogInfo("Found Steam ID in field " + propName + ": " + strVal);
-                                    return strVal;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                logger.LogInfo("PlayerController method failed: " + e.Message);
-            }
-
             logger.LogWarning("All methods failed to get Steam ID");
             return "";
         }
-
     }
 }

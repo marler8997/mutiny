@@ -10,13 +10,13 @@ namespace MarlerMod
     public class Plugin : BaseUnityPlugin
     {
         private static ManualLogSource logger;
+        private static bool commandsRegistered = false;  // Prevent duplicate registration
 
         private void Awake()
         {
             logger = Logger;
             Logger.LogInfo("=== MARLER UPGRADE MOD LOADED ===");
 
-            // Apply Harmony patches
             try
             {
                 Logger.LogInfo("Applying Harmony patches...");
@@ -31,18 +31,24 @@ namespace MarlerMod
             }
         }
 
-        // Patch the DebugCommandHandler.Awake to register our commands after it initializes
         [HarmonyPatch(typeof(DebugCommandHandler))]
         [HarmonyPatch("Awake")]
         public class DebugCommandHandler_Awake_Patch
         {
             static void Postfix()
             {
+                if (commandsRegistered)
+                {
+                    logger.LogInfo("Commands already registered, skipping...");
+                    return;
+                }
+
                 logger.LogInfo("DebugCommandHandler.Awake() called - registering our commands!");
 
                 try
                 {
                     RegisterUpgradeCommands();
+                    commandsRegistered = true;
                 }
                 catch (Exception e)
                 {
@@ -58,28 +64,20 @@ namespace MarlerMod
 
             try
             {
-                logger.LogInfo("Creating sprint command...");
                 DebugCommandHandler.ChatCommand sprintCmd = new DebugCommandHandler.ChatCommand(
                     "sprint",
                     "Set sprint upgrade level. Usage: sprint <level>",
                     new Action<bool, string[]>(ExecuteSprintCommand),
-                    null,
-                    null,
-                    false
+                    null, null, false
                 );
-
-                logger.LogInfo("Registering sprint command...");
                 DebugCommandHandler.instance.Register(sprintCmd);
                 logger.LogInfo("Sprint command registered!");
 
-                // Add more commands
                 DebugCommandHandler.ChatCommand energyCmd = new DebugCommandHandler.ChatCommand(
                     "energy",
                     "Set energy upgrade level. Usage: energy <level>",
                     new Action<bool, string[]>(ExecuteEnergyCommand),
-                    null,
-                    null,
-                    false
+                    null, null, false
                 );
                 DebugCommandHandler.instance.Register(energyCmd);
                 logger.LogInfo("Energy command registered!");
@@ -88,9 +86,7 @@ namespace MarlerMod
                     "health",
                     "Set health upgrade level. Usage: health <level>",
                     new Action<bool, string[]>(ExecuteHealthCommand),
-                    null,
-                    null,
-                    false
+                    null, null, false
                 );
                 DebugCommandHandler.instance.Register(healthCmd);
                 logger.LogInfo("Health command registered!");
@@ -125,6 +121,13 @@ namespace MarlerMod
             {
                 string steamID = GetLocalPlayerSteamID();
                 logger.LogInfo("Using Steam ID: " + steamID);
+
+                if (string.IsNullOrEmpty(steamID))
+                {
+                    logger.LogError("Could not get Steam ID!");
+                    return;
+                }
+
                 int result = PunManager.instance.UpgradePlayerSprintSpeed(steamID, level);
                 logger.LogInfo(string.Format("Sprint upgraded to level {0} (result: {1})", level, result));
             }
@@ -155,6 +158,12 @@ namespace MarlerMod
             try
             {
                 string steamID = GetLocalPlayerSteamID();
+                if (string.IsNullOrEmpty(steamID))
+                {
+                    logger.LogError("Could not get Steam ID!");
+                    return;
+                }
+
                 int result = PunManager.instance.UpgradePlayerEnergy(steamID, level);
                 logger.LogInfo(string.Format("Energy upgraded to level {0} (result: {1})", level, result));
             }
@@ -185,6 +194,12 @@ namespace MarlerMod
             try
             {
                 string steamID = GetLocalPlayerSteamID();
+                if (string.IsNullOrEmpty(steamID))
+                {
+                    logger.LogError("Could not get Steam ID!");
+                    return;
+                }
+
                 int result = PunManager.instance.UpgradePlayerHealth(steamID, level);
                 logger.LogInfo(string.Format("Health upgraded to level {0} (result: {1})", level, result));
             }
@@ -197,24 +212,124 @@ namespace MarlerMod
 
         private static string GetLocalPlayerSteamID()
         {
+            // Method 1: Check what keys PunManager actually has
             try
             {
-                System.Type steamManagerType = System.Type.GetType("Steamworks.SteamManager");
+                logger.LogInfo("Checking PunManager for player keys...");
+                System.Reflection.FieldInfo[] punFields = typeof(PunManager).GetFields(
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance);
+
+                foreach (var field in punFields)
+                {
+                    if (field.FieldType.IsGenericType &&
+                        field.FieldType.GetGenericTypeDefinition() == typeof(System.Collections.Generic.Dictionary<,>))
+                    {
+                        logger.LogInfo("Found dictionary field: " + field.Name);
+                        object dict = field.GetValue(PunManager.instance);
+                        if (dict != null)
+                        {
+                            System.Collections.IEnumerable keys = (System.Collections.IEnumerable)dict.GetType().GetProperty("Keys").GetValue(dict, null);
+                            logger.LogInfo("  Keys in dictionary:");
+                            foreach (var key in keys)
+                            {
+                                logger.LogInfo("    - " + key.ToString());
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                logger.LogInfo("PunManager check failed: " + e.Message);
+            }
+
+            // Method 2: From SteamManager using reflection
+            try
+            {
+                System.Type steamManagerType = System.Type.GetType("Steamworks.SteamManager, Assembly-CSharp");
                 if (steamManagerType != null)
                 {
                     object initialized = steamManagerType.GetProperty("Initialized").GetValue(null, null);
                     if ((bool)initialized)
                     {
-                        System.Type steamUserType = System.Type.GetType("Steamworks.SteamUser");
+                        System.Type steamUserType = System.Type.GetType("Steamworks.SteamUser, Assembly-CSharp");
                         object steamID = steamUserType.GetMethod("GetSteamID").Invoke(null, null);
-                        return steamID.ToString();
+                        string id = steamID.ToString();
+                        logger.LogInfo("Got Steam ID from SteamManager: " + id);
+                        return id;
                     }
                 }
             }
-            catch { }
+            catch (Exception e)
+            {
+                logger.LogInfo("SteamManager method failed: " + e.Message);
+            }
 
-            logger.LogWarning("Using empty Steam ID");
+            // Method 3: Find player controller - be more specific
+            try
+            {
+                PlayerController[] players = UnityEngine.Object.FindObjectsOfType<PlayerController>();
+                logger.LogInfo("Found " + players.Length + " PlayerControllers");
+
+                foreach (PlayerController player in players)
+                {
+                    // Try common property/field names
+                    string[] possibleNames = new string[] { "steamID", "steamId", "SteamID", "playerId", "PlayerID", "userID" };
+
+                    foreach (string propName in possibleNames)
+                    {
+                        // Try property first
+                        System.Reflection.PropertyInfo prop = player.GetType().GetProperty(propName,
+                            System.Reflection.BindingFlags.Public |
+                            System.Reflection.BindingFlags.NonPublic |
+                            System.Reflection.BindingFlags.Instance);
+
+                        if (prop != null)
+                        {
+                            object val = prop.GetValue(player, null);
+                            if (val != null && val.GetType() == typeof(string))
+                            {
+                                string strVal = (string)val;
+                                if (!string.IsNullOrEmpty(strVal) && strVal != "0")
+                                {
+                                    logger.LogInfo("Found Steam ID in property " + propName + ": " + strVal);
+                                    return strVal;
+                                }
+                            }
+                        }
+
+                        // Try field
+                        System.Reflection.FieldInfo field = player.GetType().GetField(propName,
+                            System.Reflection.BindingFlags.Public |
+                            System.Reflection.BindingFlags.NonPublic |
+                            System.Reflection.BindingFlags.Instance);
+
+                        if (field != null && field.FieldType == typeof(string))
+                        {
+                            object val = field.GetValue(player);
+                            if (val != null)
+                            {
+                                string strVal = (string)val;
+                                if (!string.IsNullOrEmpty(strVal) && strVal != "0")
+                                {
+                                    logger.LogInfo("Found Steam ID in field " + propName + ": " + strVal);
+                                    return strVal;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                logger.LogInfo("PlayerController method failed: " + e.Message);
+            }
+
+            logger.LogWarning("All methods failed to get Steam ID");
             return "";
         }
+
     }
 }

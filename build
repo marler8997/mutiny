@@ -147,17 +147,26 @@ def compile_mod(csc, bepinex, game_dir, dll):
     harmony_dll = os.path.join(bepinex, "BepInEx", "core", "0Harmony.dll")
 
     managed = os.path.join(game_dir, "REPO_Data", "Managed")
-    unity_core_dll = os.path.join(managed, "UnityEngine.CoreModule.dll")
-    unity_dll = os.path.join(managed, "UnityEngine.dll")
     netstandard_dll = os.path.join(managed, "netstandard.dll")  # Add this
     assembly_csharp_dll = os.path.join(managed, "Assembly-CSharp.dll")
+
+    unity_dll = os.path.join(managed, "UnityEngine.dll")
+    unity_core_dll = os.path.join(managed, "UnityEngine.CoreModule.dll")
+
+    photon_unity = os.path.join(managed, "Photon3Unity3D.dll")
+    photon_realtime = os.path.join(managed, "PhotonRealtime.dll")
+    photon_pun = os.path.join(managed, "PhotonUnityNetworking.dll")
+
     references = [
         bepinex_dll,
         harmony_dll,
-        unity_dll,
-        unity_core_dll,
         netstandard_dll,
         assembly_csharp_dll,
+        unity_dll,
+        unity_core_dll,
+        photon_unity,
+        photon_realtime,
+        photon_pun,
     ]
     missing_count = 0
     for ref in references:

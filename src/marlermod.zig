@@ -4,6 +4,8 @@ const global = struct {
     var localappdata: ?[]const u16 = null;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
+
+    var mods: std.DoublyLinkedList = .{};
 };
 
 pub fn panic(
@@ -72,7 +74,11 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
-    loadMods();
+    // TODO: do this in a loop
+    while (true) {
+        updateMods();
+        std.Thread.sleep(std.time.ns_per_s * 5);
+    }
 
     // TODO: how do we call .NET methods?
 
@@ -93,7 +99,16 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     return 0;
 }
 
-fn loadMods() void {
+const Mod = struct {
+    list_node: std.DoublyLinkedList.Node,
+    name_len: u8,
+    name_buf: [255]u8,
+    pub fn name(self: *const Mod) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+};
+
+fn updateMods() void {
     const mod_path = "C:\\temp\\marlermods";
     std.log.info("loading mods from '{s}'...", .{mod_path});
     var dir = std.fs.cwd().openDir(mod_path, .{ .iterate = true }) catch |err| {
@@ -106,8 +121,44 @@ fn loadMods() void {
         std.log.err("iterate mod directory '{s}' failed with {s}", .{ mod_path, @errorName(err) });
         return;
     }) |entry| {
-        std.log.info("todo: load mod '{s}'", .{entry.name});
+        if (entry.kind != .file) continue;
+        const mod_name_len: u8 = std.math.cast(u8, entry.name.len) orelse {
+            std.log.err("mod name ({}) is too log (max is 255)", .{entry.name.len});
+            continue;
+        };
+
+        const mod: *Mod = blk: {
+            {
+                var maybe_mod = global.mods.first;
+                while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
+                    const mod: *Mod = @fieldParentPtr("list_node", list_node);
+                    if (std.mem.eql(u8, mod.name(), entry.name)) break :blk mod;
+                }
+            }
+
+            const mod = newMod(entry.name, mod_name_len) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    std.log.err("can't load new mod '{s}' (out of memory)", .{entry.name});
+                    continue;
+                },
+            };
+            global.mods.append(&mod.list_node);
+            break :blk mod;
+        };
+        std.log.info("todo: update mod '{s}'", .{mod.name()});
     }
+}
+
+fn newMod(name: []const u8, name_len: u8) error{OutOfMemory}!*Mod {
+    const mod = try std.heap.page_allocator.create(Mod);
+    errdefer std.heap.page_allocator.destroy(mod);
+    mod.* = .{
+        .list_node = .{},
+        .name_len = name_len,
+        .name_buf = undefined,
+    };
+    @memcpy(mod.name_buf[0..name_len], name);
+    return mod;
 }
 
 // Export a function that the C# managed code can call

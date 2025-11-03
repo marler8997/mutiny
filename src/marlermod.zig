@@ -19,9 +19,9 @@ pub fn panic(
     if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
         var buf: [200]u8 = undefined;
         if (std.fmt.bufPrintZ(&buf, "{s}", .{msg})) |msg_z| {
-            _ = win32.MessageBoxA(null, msg_z, "Tuple Veil Panic", .{});
+            _ = win32.MessageBoxA(null, msg_z, "MarlerMod Panic", .{});
         } else |_| {
-            _ = win32.MessageBoxA(null, "message too long", "Tuple Veil Panic", .{});
+            _ = win32.MessageBoxA(null, "message too long", "MarlerMod Panic", .{});
         }
     }
     // can't call this, results in:
@@ -230,7 +230,7 @@ fn makeLocalAppDataPath(
 
 fn openLog(localappdata: []const u16) ?std.fs.File {
     var path_buf: [max_log_path]u16 = undefined;
-    const path = makeLocalAppDataPath(&path_buf, localappdata, win32.L("tuple\\TupleVeil.log")) orelse return null;
+    const path = makeLocalAppDataPath(&path_buf, localappdata, win32.L("marlermod\\log")) orelse return null;
 
     var attempt: u32 = 1;
     while (true) : (attempt += 1) {

@@ -9,33 +9,42 @@ pub fn main() !void {
     const all_args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, all_args);
 
-    std.log.info("=== Mod Framework Launcher ===", .{});
+    if (all_args.len <= 1) {
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_DLL\n");
+        std.process.exit(0xff);
+    }
+    const args = all_args[1..];
+    if (args.len != 1) {
+        std.log.err("expected 1 cmdline argument but got {}", .{args.len});
+        std.process.exit(0xff);
+    }
+    const marler_mod_dll = args[0];
+
     const game_exe = try findGameExecutable(gpa);
     defer gpa.free(game_exe);
 
     std.log.info("Game: {s}", .{game_exe});
 
     // Find framework DLL
-    var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_dir = try std.fs.selfExeDirPath(&exe_path_buf);
-
-    var framework_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const framework_dll = try std.fmt.bufPrint(&framework_path_buf, "{s}{c}framework.dll", .{ exe_dir, std.fs.path.sep });
+    // var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // const exe_dir = try std.fs.selfExeDirPath(&exe_path_buf);
+    // var framework_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // const framework_dll = try std.fmt.bufPrint(&framework_path_buf, "{s}{c}framework.dll", .{ exe_dir, std.fs.path.sep });
 
     // Check if framework DLL exists
-    std.fs.accessAbsolute(framework_dll, .{}) catch {
-        std.log.err("framework.dll not found at: {s}", .{framework_dll});
+    std.fs.accessAbsolute(marler_mod_dll, .{}) catch {
+        std.log.err("framework.dll not found at: {s}", .{marler_mod_dll});
         std.process.exit(0xff);
         // std.log.info("Press Enter to exit...", .{});
         // _ = try std.io.getStdIn().reader().readByte();
         // return;
     };
 
-    std.log.info("Framework: {s}", .{framework_dll});
+    // std.log.info("Framework: {s}", .{marler_mod_dll});
 
     // Launch and inject
     std.log.info("Launching game...", .{});
-    try launchAndInject(gpa, game_exe, framework_dll);
+    try launchAndInject(gpa, game_exe, marler_mod_dll);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
 }

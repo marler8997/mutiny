@@ -6,31 +6,41 @@ import zipfile
 import shutil
 from pathlib import Path
 
-
-# === CONFIGURATION - EDIT THESE PATHS ===
-GAME_DIR = r"C:\Program Files (x86)\Steam\steamapps\common\REPO"
-GAME_MANAGED = os.path.join(GAME_DIR, "REPO_Data", "Managed")
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOADS_DIR = os.path.join(SCRIPT_DIR, "downloads")
 
 def main():
     bepinex_installed, bepinex_dll = install_bepinex()
+
     csc = find_csc()
     log(f"csc = '{csc}'")
-    compile_mod(csc, bepinex_dll)
+
+    game_dir = find_game_dir()
+
+    dll = Path(SCRIPT_DIR, "out", "MarlerMod.dll")
+    compile_mod(csc, bepinex_dll, game_dir, dll)
 
     log("copying game...")
     local_copy = os.path.join(SCRIPT_DIR, "REPO")
-    shutil.rmtree(local_copy)
-    shutil.copytree(GAME_DIR, local_copy)
+    if os.path.exists(local_copy):
+        shutil.rmtree(local_copy)
+    shutil.copytree(game_dir, local_copy)
 
-    log("installing bepinx mod...")
-    # shutil.copytree(bepinex_installed, local_copy)
+    log("installing bepinx...")
+    install_mod(bepinex_installed, local_copy, "")
 
+    log("installing marlermod...")
+    dll_installed = Path(local_copy, "BepInEx", "plugins", "MarlerMod.dll")
+    if dll_installed.exists():
+        sys.exit("our mod is already installed?")
+    dll_installed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dll, dll_installed)
 
 def log(msg):
     print(f"build: {msg}", file=sys.stderr)
+
+def find_game_dir():
+    return r"C:\Program Files (x86)\Steam\steamapps\common\REPO"
 
 def find_csc():
     CSC_PATHS = [
@@ -54,18 +64,6 @@ def find_csc():
     for path in CSC_PATHS:
         log(f"  - {path}")
     sys.exit(1)
-
-def fetch_extract_archive(url, out_dir, archive_format=None, archive_unique_name=None):
-    archive_unique_name = archive_unique_name if archive_unique_name else os.path.basename(url)
-    tuplebuild.log("installing '{}'...".format(archive_unique_name))
-    tuplebuild.makedirs(DOWNLOADS_DIR)
-
-    archive_file = os.path.join(DOWNLOADS_DIR, archive_unique_name)
-    if not os.path.exists(archive_file):
-        tuplebuild.download(url, archive_file)
-    tuplebuild.makedirs(out_dir)
-    tuplebuild.extract(archive_file, out_dir, archive_format)
-
 
 def fetch(url, filename):
     basename = os.path.basename(filename)
@@ -148,28 +146,38 @@ def install_bepinex():
     return (installed, dll)
 
 
-def compile_mod(csc, bepinex_dll):
-    unity_core_dll = os.path.join(GAME_MANAGED, "UnityEngine.CoreModule.dll")
-    unity_dll = os.path.join(GAME_MANAGED, "UnityEngine.dll")
-    netstandard_dll = os.path.join(GAME_MANAGED, "netstandard.dll")  # Add this
-    if not os.path.exists(unity_core_dll):
-        sys.exit(f"WARNING: Unity CoreModule DLL not found at {unity_core_dll}")
-    if not os.path.exists(unity_dll):
-        sys.exit(f"WARNING: Unity DLL not found at {unity_dll}")
-    if not os.path.exists(netstandard_dll):
-        sys.exit(f"WARNING: netstandard DLL not found at {netstandard_dll}")
+def compile_mod(csc, bepinex_dll, game_dir, dll):
+    managed = os.path.join(game_dir, "REPO_Data", "Managed")
+    unity_core_dll = os.path.join(managed, "UnityEngine.CoreModule.dll")
+    unity_dll = os.path.join(managed, "UnityEngine.dll")
+    netstandard_dll = os.path.join(managed, "netstandard.dll")  # Add this
+    assembly_csharp_dll = os.path.join(managed, "Assembly-CSharp.dll")
+    references = [
+        bepinex_dll,
+        unity_dll,
+        unity_core_dll,
+        netstandard_dll,
+        assembly_csharp_dll,
+    ]
+    missing_count = 0
+    for ref in references:
+        if not os.path.exists(ref):
+            log(f"ERROR: DLL '{ref}' does not exist")
+            missing_count += 1
+    if missing_count > 0:
+        sys.exit("missing {missing_count} DLLS")
+    makedirs(os.path.dirname(dll))
     cmd = [
         csc,
         "/target:library",
-        "/out:MarlerMod.dll",
-        f"/reference:{bepinex_dll}",
-        f"/reference:{unity_dll}",
-        f"/reference:{unity_core_dll}",
-        f"/reference:{netstandard_dll}",  # Add this reference
+        "/out:" + str(dll),
+    ] + [f"/reference:{ref}" for ref in references] + [
         "MarlerMod.cs"
     ]
     log(subprocess.list2cmdline(cmd))
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
 
 def copy_to_game(bepinex_installed):
     """Optionally copy mod to game plugins folder"""
@@ -194,6 +202,23 @@ def copy_to_game(bepinex_installed):
         log("Launch the game to test!")
     else:
         log(f"Manual copy: copy MarlerMod.dll to {plugins_dir}")
+
+def install_mod(mod_source, game_out, prefix):
+    for basename in os.listdir(mod_source):
+        path_source = Path(mod_source, basename)
+        path_out = Path(game_out, basename)
+        entry_relative = prefix + basename
+        if path_out.exists():
+            sys.exit("duplicate file '{entry_relative}'")
+        if path_source.is_dir():
+            log(f"mkdir '{entry_relative}'")
+            os.mkdir(path_out)
+            install_mod(path_source, path_out, entry_relative + os.path.sep)
+        elif path_source.is_file():
+            log(f"copy '{entry_relative}'")
+            shutil.copy2(path_source, path_out)
+        else:
+            sys.exit(f"unsupported file type {path_source}")
 
 if __name__ == "__main__":
     main()

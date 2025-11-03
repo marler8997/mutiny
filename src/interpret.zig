@@ -39,7 +39,7 @@ const Token = struct {
         // pipe,
         // pipe_pipe,
         // pipe_equal,
-        // equal,
+        equal,
         // equal_equal,
         // equal_angle_bracket_right,
         // bang_equal,
@@ -201,7 +201,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .saw_at_sign = index };
                         index += 1;
                     },
-                    // '=' => continue :state .equal,
+                    '=' => return .{ .tag = .equal, .loc = .{ .start = index, .end = index + 1 } },
                     // '!' => continue :state .bang,
                     // '|' => continue :state .pipe,
                     '(' => return .{ .tag = .l_paren, .loc = .{ .start = index, .end = index + 1 } },
@@ -1007,101 +1007,84 @@ fn lex(text: []const u8, lex_start: usize) Token {
     // return result;
 }
 
-const TestToken = struct {
-    tag: Token.Tag,
-    str: []const u8,
-};
-fn testLex(text: []const u8, expected_tokens: []const TestToken) !void {
-    var expected_index: usize = 0;
-    var text_offset: usize = 0;
-    while (true) : (expected_index += 1) {
-        const token = lex(text, text_offset);
-        // const token_str = text[token.loc.start..token.loc.end];
-        // std.debug.print("  [{}] '{s}' {}\n", .{ expected_index, token_str, token });
-        if (expected_index == expected_tokens.len) {
-            try std.testing.expectEqual(.eof, token.tag);
-            // if (token.tag != .eof) {
-            //     std.debug.print("expected no more tokens but got {t} '{s}'\n", .{ token.tag, token_str });
-            //     return error.TextExpectedEqual;
-            // }
-            break;
-        }
-        const expected = expected_tokens[expected_index];
-        // if (expected.tag != token.tag or !std.mem.eql(u8, expected.str, token_str)) {
-        //     std.debug.print(
-        //         "expected token {t} '{s}' but got {t} '{s}'\n",
-        //         .{ expected.tag, expected.str, token.tag, token_str },
-        //     );
-        //     return error.TextExpectedEqual;
-        // }
-        try std.testing.expectEqual(expected.tag, token.tag);
-        try std.testing.expectEqualSlices(u8, expected.str, text[token.loc.start..token.loc.end]);
-        text_offset = token.loc.end;
+const TokenIterator = struct {
+    text: []const u8,
+    offset: usize = 0,
+    pub fn next(it: *TokenIterator) Token {
+        const token = lex(it.text, it.offset);
+        it.offset = token.loc.end;
+        return token;
     }
-}
+    pub fn expect(it: *TokenIterator, tag: Token.Tag, str: []const u8) !void {
+        const token = it.next();
+        try std.testing.expectEqual(tag, token.tag);
+        try std.testing.expectEqualSlices(u8, str, it.text[token.loc.start..token.loc.end]);
+    }
+};
 
 test "lex" {
-    try testLex("", &.{});
-    try testLex("hello\n", &.{
-        .{ .tag = .identifier, .str = "hello" },
-    });
-    try testLex(
-        \\set cs @LoadAssembly("Assembly-CSharp")
-        \\
-        \\fn void ExecuteSprintCommand(bool fromServer, string[] args) {
-        \\    print("test")
-        \\}
-        \\
-        \\set cmd cs.DebugCommandHandler.ChatCommand(
-        \\    "sprint",
-        \\    ExecuteSprintCommand,
-        \\    null,
-        \\    false,
-        \\)
-        \\
-    , &.{
-        .{ .tag = .keyword_set, .str = "set" },
-        .{ .tag = .identifier, .str = "cs" },
-        .{ .tag = .builtin, .str = "@LoadAssembly" },
-        .{ .tag = .l_paren, .str = "(" },
-        .{ .tag = .string_literal, .str = "\"Assembly-CSharp\"" },
-        .{ .tag = .r_paren, .str = ")" },
-        .{ .tag = .keyword_fn, .str = "fn" },
-        .{ .tag = .identifier, .str = "void" },
-        .{ .tag = .identifier, .str = "ExecuteSprintCommand" },
-        .{ .tag = .l_paren, .str = "(" },
-        .{ .tag = .identifier, .str = "bool" },
-        .{ .tag = .identifier, .str = "fromServer" },
-        .{ .tag = .comma, .str = "," },
-        .{ .tag = .identifier, .str = "string" },
-        .{ .tag = .l_bracket, .str = "[" },
-        .{ .tag = .r_bracket, .str = "]" },
-        .{ .tag = .identifier, .str = "args" },
-        .{ .tag = .r_paren, .str = ")" },
-        .{ .tag = .l_brace, .str = "{" },
-        .{ .tag = .identifier, .str = "print" },
-        .{ .tag = .l_paren, .str = "(" },
-        .{ .tag = .string_literal, .str = "\"test\"" },
-        .{ .tag = .r_paren, .str = ")" },
-        .{ .tag = .r_brace, .str = "}" },
-        .{ .tag = .keyword_set, .str = "set" },
-        .{ .tag = .identifier, .str = "cmd" },
-        .{ .tag = .identifier, .str = "cs" },
-        .{ .tag = .period, .str = "." },
-        .{ .tag = .identifier, .str = "DebugCommandHandler" },
-        .{ .tag = .period, .str = "." },
-        .{ .tag = .identifier, .str = "ChatCommand" },
-        .{ .tag = .l_paren, .str = "(" },
-        .{ .tag = .string_literal, .str = "\"sprint\"" },
-        .{ .tag = .comma, .str = "," },
-        .{ .tag = .identifier, .str = "ExecuteSprintCommand" },
-        .{ .tag = .comma, .str = "," },
-        .{ .tag = .identifier, .str = "null" },
-        .{ .tag = .comma, .str = "," },
-        .{ .tag = .identifier, .str = "false" },
-        .{ .tag = .comma, .str = "," },
-        .{ .tag = .r_paren, .str = ")" },
-    });
+    {
+        var it: TokenIterator = .{ .text = "" };
+        try it.expect(.eof, "");
+    }
+    {
+        var it: TokenIterator = .{ .text =
+            \\cs = @LoadAssembly("Assembly-CSharp")
+            \\
+            \\fn void ExecuteSprintCommand(bool fromServer, string[] args) {
+            \\    print("test")
+            \\}
+            \\
+            \\cmd = cs.DebugCommandHandler.ChatCommand(
+            \\    "sprint",
+            \\    ExecuteSprintCommand,
+            \\    null,
+            \\    false,
+            \\)
+            \\
+        };
+        try it.expect(.identifier, "cs");
+        try it.expect(.equal, "=");
+        try it.expect(.builtin, "@LoadAssembly");
+        try it.expect(.l_paren, "(");
+        try it.expect(.string_literal, "\"Assembly-CSharp\"");
+        try it.expect(.r_paren, ")");
+        try it.expect(.keyword_fn, "fn");
+        try it.expect(.identifier, "void");
+        try it.expect(.identifier, "ExecuteSprintCommand");
+        try it.expect(.l_paren, "(");
+        try it.expect(.identifier, "bool");
+        try it.expect(.identifier, "fromServer");
+        try it.expect(.comma, ",");
+        try it.expect(.identifier, "string");
+        try it.expect(.l_bracket, "[");
+        try it.expect(.r_bracket, "]");
+        try it.expect(.identifier, "args");
+        try it.expect(.r_paren, ")");
+        try it.expect(.l_brace, "{");
+        try it.expect(.identifier, "print");
+        try it.expect(.l_paren, "(");
+        try it.expect(.string_literal, "\"test\"");
+        try it.expect(.r_paren, ")");
+        try it.expect(.r_brace, "}");
+        try it.expect(.identifier, "cmd");
+        try it.expect(.equal, "=");
+        try it.expect(.identifier, "cs");
+        try it.expect(.period, ".");
+        try it.expect(.identifier, "DebugCommandHandler");
+        try it.expect(.period, ".");
+        try it.expect(.identifier, "ChatCommand");
+        try it.expect(.l_paren, "(");
+        try it.expect(.string_literal, "\"sprint\"");
+        try it.expect(.comma, ",");
+        try it.expect(.identifier, "ExecuteSprintCommand");
+        try it.expect(.comma, ",");
+        try it.expect(.identifier, "null");
+        try it.expect(.comma, ",");
+        try it.expect(.identifier, "false");
+        try it.expect(.comma, ",");
+        try it.expect(.r_paren, ")");
+    }
 }
 
 const std = @import("std");

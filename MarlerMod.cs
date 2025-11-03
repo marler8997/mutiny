@@ -82,6 +82,16 @@ namespace MarlerMod
                 DebugCommandHandler.instance.Register(energyCmd);
                 logger.LogInfo("Energy command registered!");
 
+                // ADD THIS - Stamina is the same as energy
+                DebugCommandHandler.ChatCommand staminaCmd = new DebugCommandHandler.ChatCommand(
+                    "stamina",
+                    "Set stamina upgrade level. Usage: stamina <level>",
+                    new Action<bool, string[]>(ExecuteEnergyCommand),  // Reuse energy command
+                    null, null, false
+                );
+                DebugCommandHandler.instance.Register(staminaCmd);
+                logger.LogInfo("Stamina command registered!");
+
                 DebugCommandHandler.ChatCommand healthCmd = new DebugCommandHandler.ChatCommand(
                     "health",
                     "Set health upgrade level. Usage: health <level>",

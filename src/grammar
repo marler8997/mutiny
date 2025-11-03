@@ -1,0 +1,58 @@
+Root <- Statement*
+Statement
+   <- if LPAREN Expr RPARN Block
+    / yield Expr
+    / loop
+    / break
+    / continue
+    / fn IDENTIFIER ParamDeclList Block
+    / var IDENTIFIER EQUAL Expr
+    / IDENTIFIER EQUAL Expr
+    / Expr
+
+Expr <- ExprBinaryCompare ('=' ExprBinaryCompare)*
+ExprBinaryCompare <- ExprBinaryMath (BinaryOpComparison ExprBinaryMath)*
+ExprBinaryMath <- ExprSingle (BinaryOpMath ExprSingle)*
+
+PrimaryExpr
+  <- IfExpr
+   / KEYWORD_break Expr
+   / KEYWORD_continue Expr
+   / KEYWORD_return Expr
+   / Block
+   / Expr
+
+PrimaryTypeExpr ExprSuffix
+
+ExprSuffix <- (SuffixOp / FnCallArgs)*
+
+ExprSingle
+    <- BUILTINIDENTIFIER FnCallArgs
+     / NEW IDENTIFIER FnCallArgs
+     / CHAR_LITERAL
+     ??? / ContainerDecl
+     / DOT IDENTIFIER
+     ??? / DOT InitList
+     ??? / ErrorSetDecl
+     / FLOAT
+     ??? / FnProto
+     ??? / GroupedExpr
+     ??? / LabeledTypeExpr
+     / LPAREN Expr RPAREN
+     / IDENTIFIER
+     / IfTypeExpr
+     / INTEGER
+     / KEYWORD_unreachable
+     / STRINGLITERAL
+
+Block <- LBRACE Statement* RBRACE
+//
+SuffixOp
+   <- LBRACKET Expr RBRACKET
+    / DOT IDENTIFIER
+//
+IfExpr <- IfPrefix Expr ("else" Payload? Expr)?
+IfPrefix <- "if" LPAREN Expr RPAREN PtrPayload?
+FnCallArgs <- LPAREN (Expr ",")* Expr? RPAREN
+
+ParamDeclList <- LPAREN (IDENTIFIER COMMA)* IDENTIFIER? RPAREN

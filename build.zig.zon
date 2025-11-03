@@ -1,0 +1,13 @@
+.{
+    .name = .mutiny,
+    .fingerprint = 0x45669a4d9bbfec9f,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .win32 = .{
+            .url = "git+https://github.com/marlersoft/zigwin32#5587b16fa040573846a6bf531301f6206d31a6bf",
+            .hash = "zigwin32-25.0.28-preview-AAAAAICM5AMResOGQnQ85mfe60TTOQeMtt7GRATUOKoP",
+        },
+    },
+    .paths = .{""},
+}

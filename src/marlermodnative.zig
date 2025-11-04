@@ -100,14 +100,20 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     };
     std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_mod) });
 
-    const mono: Mono = .load(mono_mod);
+    const mono_funcs: mono.Funcs = blk: {
+        var missing_proc: [:0]const u8 = undefined;
+        break :blk mono.Funcs.init(&missing_proc, mono_mod) catch errExit(
+            "the mono dll '{s}' is missing proc '{s}'",
+            .{ mono_dll_name, missing_proc },
+        );
+    };
 
     const domain = blk: {
         var attempt: u32 = 0;
         while (true) {
             attempt += 1;
 
-            if (mono.get_root_domain()) |domain| {
+            if (mono_funcs.get_root_domain()) |domain| {
                 std.log.info("Mono root domain found: 0x{x}", .{@intFromPtr(domain)});
                 break :blk domain;
             }
@@ -122,7 +128,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     };
 
     // std.log.info("Attaching thread to Mono domain...", .{});
-    const thread = mono.thread_attach(domain) orelse {
+    const thread = mono_funcs.thread_attach(domain) orelse {
         std.log.err("mono_thread_attach failed!", .{});
         return 0xffffffff;
     };
@@ -137,11 +143,10 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
-        updateMods(scratch.allocator());
+        updateMods(&mono_funcs, domain, scratch.allocator());
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
         }
-
         std.Thread.sleep(std.time.ns_per_s * 5);
     }
 
@@ -163,17 +168,6 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     // _ = msgbox(.{}, "MarlerMod Init Thread", "InitThread running!", .{});
     return 0;
 }
-
-const Mono = struct {
-    get_root_domain: *const fn () callconv(.c) ?*MonoDomain,
-    thread_attach: *const fn (?*MonoDomain) callconv(.c) ?*MonoThread,
-    pub fn load(mod: win32.HINSTANCE) Mono {
-        return .{
-            .get_root_domain = getProc(mod, fn () callconv(.c) ?*MonoDomain, "mono_get_root_domain"),
-            .thread_attach = getProc(mod, fn (?*MonoDomain) callconv(.c) ?*MonoThread, "mono_thread_attach"),
-        };
-    }
-};
 
 const Mod = struct {
     list_node: std.DoublyLinkedList.Node,
@@ -298,7 +292,11 @@ const Mod = struct {
     }
 };
 
-fn updateMods(scratch: std.mem.Allocator) void {
+fn updateMods(
+    mono_funcs: *const mono.Funcs,
+    mono_domain: *mono.Domain,
+    scratch: std.mem.Allocator,
+) void {
     {
         var maybe_mod = global.mods.first;
         while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
@@ -362,11 +360,16 @@ fn updateMods(scratch: std.mem.Allocator) void {
         switch (mod.state) {
             .initial, .err_no_text => {},
             .have_text => |*state| if (!state.processed) {
-                var vm: interpret.Vm = .{};
+                var vm: Vm = .{
+                    .mono_funcs = mono_funcs,
+                    .mono_domain = mono_domain,
+                    .allocator = scratch,
+                    .text = state.text,
+                    .err = undefined,
+                };
                 defer vm.deinit(scratch);
-                var err: interpret.VmError = undefined;
-                vm.interpret(scratch, &err, state.text) catch {
-                    std.log.err("{s}:{f}", .{ mod.name(), err.fmt(state.text) });
+                vm.interpret() catch {
+                    std.log.err("{s}:{f}", .{ mod.name(), vm.err.fmt(state.text) });
                 };
                 state.processed = true;
             },
@@ -589,20 +592,12 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 // Mono API types (opaque pointers)
-const MonoDomain = opaque {};
 const MonoAssembly = opaque {};
 const MonoImage = opaque {};
 const MonoClass = opaque {};
 const MonoMethod = opaque {};
 const MonoObject = opaque {};
 const MonoThread = opaque {};
-
-fn getProc(mono_mod: win32.HINSTANCE, comptime T: type, name: [:0]const u8) *const T {
-    return @ptrCast(win32.GetProcAddress(mono_mod, name) orelse errExit(
-        "GetProcAddress '{s}' from mono failed, error={f}",
-        .{ name, win32.GetLastError() },
-    ));
-}
 
 fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
     std.log.info("initializing managed runtime...", .{});
@@ -616,8 +611,8 @@ fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
     // const mono_runtime_invoke = win32.GetProcAddress(mono_mod, "mono_runtime_invoke") orelse return error.MissingFunction;
 
     // // Cast to proper function types
-    // const thread_attach: *const fn (?*MonoDomain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
-    // const domain_assembly_open: *const fn (?*MonoDomain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
+    // const thread_attach: *const fn (?*mono.Domain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
+    // const domain_assembly_open: *const fn (?*mono.Domain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
     // const assembly_get_image: *const fn (?*MonoAssembly) callconv(.c) ?*MonoImage = @ptrCast(mono_assembly_get_image);
     // const class_from_name: *const fn (?*MonoImage, [*:0]const u8, [*:0]const u8) callconv(.c) ?*MonoClass = @ptrCast(mono_class_from_name);
     // const class_get_method_from_name: *const fn (?*MonoClass, [*:0]const u8, c_int) callconv(.c) ?*MonoMethod = @ptrCast(mono_class_get_method_from_name);
@@ -668,4 +663,5 @@ fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
 const std = @import("std");
 const win32 = @import("win32").everything;
 const Mutex = @import("Mutex.zig");
-const interpret = @import("interpret.zig");
+const Vm = @import("Vm.zig");
+const mono = @import("mono.zig");

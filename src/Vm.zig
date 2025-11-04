@@ -1,26 +1,61 @@
+const Vm = @This();
+
+mono_funcs: *const mono.Funcs,
+mono_domain: *mono.Domain,
+allocator: std.mem.Allocator,
+err: VmError,
+text: []const u8,
+
+symbol_table: std.StringHashMapUnmanaged(Value) = .{},
+stack: std.ArrayListUnmanaged(Value) = .{},
+
 const Extent = struct { start: usize, end: usize };
 
 const Value = union(enum) {
     string_literal: Extent,
+    assembly: *mono.Assembly,
     pub fn deinit(value: *Value) void {
         switch (value.*) {
             .string_literal => {},
+            .assembly => {},
         }
     }
     pub fn moveInto(value: *Value, dst: *Value) void {
         switch (value.*) {
             .string_literal,
+            .assembly,
             => {
                 dst.* = value.*;
             },
         }
     }
+    pub fn getType(value: *const Value) Type {
+        return switch (value.*) {
+            .string_literal => .string_literal,
+            .assembly => .assembly,
+        };
+    }
 };
+
+const Type = enum {
+    string_literal,
+    assembly,
+};
+
+const max_load_assembly_string = 15;
 
 pub const VmError = union(enum) {
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
     builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
+    builtin_arg_type: struct {
+        builtin_extent: Extent,
+        arg_index: u32,
+        expected: Type,
+        actual: Type,
+    },
+    load_assembly_string_too_long: Extent,
+    load_assembly_failed: Extent,
     oom,
     pub fn set(err: *VmError, value: VmError) error{Vm} {
         err.* = value;
@@ -71,6 +106,31 @@ pub const VmError = union(enum) {
                         },
                     );
                 },
+                .builtin_arg_type => |b| {
+                    const builtin_str = f.text[b.builtin_extent.start..b.builtin_extent.end];
+                    try writer.print(
+                        "{d}: builtin '{s}' argument {} type mismatch,  expected '{s}' but got '{s}'",
+                        .{
+                            getLineNum(f.text, b.builtin_extent.start),
+                            builtin_str,
+                            b.arg_index + 1,
+                            @tagName(b.expected),
+                            @tagName(b.actual),
+                        },
+                    );
+                },
+                .load_assembly_string_too_long => |token| try writer.print(
+                    "{d}: @LoadAssembly string too long ({} bytes but max is {}) {s}",
+                    .{
+                        getLineNum(f.text, token.start),
+                        token.end - token.start - 2,
+                        max_load_assembly_string,
+                        f.text[token.start..token.end],
+                    },
+                ),
+                .load_assembly_failed => {
+                    //
+                },
                 .oom => try writer.writeAll("out of memory"),
             }
         }
@@ -85,211 +145,194 @@ fn getLineNum(text: []const u8, offset: usize) u32 {
     return line_num;
 }
 
-pub const Vm = struct {
-    symbol_table: std.StringHashMapUnmanaged(Value) = .{},
-    stack: std.ArrayListUnmanaged(Value) = .{},
+// const SymbolTableEntry = struct {
+//     value: Value,
+//     pub fn deinit(entry: *SymbolTableEntry) void {
+//         entry.value.deinit();
+//     }
+//     pub fn init(entry: *SymbolTableEntry, value: Value) void {
+//         entry.value = value;
+//     }
+// };
 
-    // const SymbolTableEntry = struct {
-    //     value: Value,
-    //     pub fn deinit(entry: *SymbolTableEntry) void {
-    //         entry.value.deinit();
-    //     }
-    //     pub fn init(entry: *SymbolTableEntry, value: Value) void {
-    //         entry.value = value;
-    //     }
-    // };
+pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
+    vm.symbol_table.deinit(allocator);
+    vm.* = undefined;
+}
 
-    pub fn deinit(vm: *Vm, allocator: std.mem.Allocator) void {
-        vm.symbol_table.deinit(allocator);
-        vm.* = undefined;
-    }
+fn stackEnsureUnusedSlot(vm: *Vm, allocator: std.mem.Allocator, out_err: *VmError) error{Vm}!void {
+    vm.stack.ensureUnusedCapacity(allocator, 1) catch return out_err.set(.oom);
+}
+fn stackPushAssume(vm: *Vm, value: Value) void {
+    vm.stack.appendAssumeCapacity(value);
+}
 
-    fn stackEnsureUnusedSlot(vm: *Vm, allocator: std.mem.Allocator, out_err: *VmError) error{Vm}!void {
-        vm.stack.ensureUnusedCapacity(allocator, 1) catch return out_err.set(.oom);
-    }
-    fn stackPushAssume(vm: *Vm, value: Value) void {
-        vm.stack.appendAssumeCapacity(value);
-    }
-
-    pub fn interpret(
-        vm: *Vm,
-        allocator: std.mem.Allocator,
-        out_err: *VmError,
-        text: []const u8,
-    ) error{Vm}!void {
-        var offset: usize = 0;
-        while (true) {
-            const first_token = lex(text, offset);
-            offset = first_token.end;
-            switch (first_token.tag) {
-                .identifier => {
-                    const id = text[first_token.start..first_token.end];
-                    const second_token = lex(text, offset);
-                    offset = second_token.end;
-                    switch (second_token.tag) {
-                        .equal => {
-                            var value, offset = try vm.eval(allocator, out_err, text, second_token.end);
-                            const entry = vm.symbol_table.getOrPut(allocator, id) catch |e| return out_err.setOom(e);
-                            if (entry.found_existing) {
-                                entry.value_ptr.deinit();
-                            }
-                            value.moveInto(entry.value_ptr);
-                        },
-                        .l_paren => @panic("todo: implement function call"),
-                        else => return out_err.set(.{ .unexpected_token = .{
-                            .expected = "an '=' or '(' after identifier",
-                            .token = second_token,
-                        } }),
-                    }
-                },
-                .keyword_fn => @panic("todo: implement fn"),
-                else => return out_err.set(.{ .unexpected_token = .{
-                    .expected = "an identifier or 'fn' keyword",
-                    .token = first_token,
-                } }),
-            }
-        }
-    }
-
-    fn eval(
-        vm: *Vm,
-        allocator: std.mem.Allocator,
-        out_err: *VmError,
-        text: []const u8,
-        start: usize,
-    ) error{Vm}!struct { Value, usize } {
-        const first_token = lex(text, start);
-        // offset = first_token.end;
-        // _ = allocator;
-        // _ = vm;
-        // _ = text;
-        // _ = start;
-        // @panic("todo: implement eval");
+pub fn interpret(vm: *Vm) error{Vm}!void {
+    var offset: usize = 0;
+    while (true) {
+        const first_token = lex(vm.text, offset);
+        offset = first_token.end;
         switch (first_token.tag) {
-            .builtin => {
-                const id = text[first_token.start..first_token.end];
-                const builtin = builtins.get(id) orelse return out_err.set(.{ .unknown_builtin = first_token });
-                const next = try eatToken(out_err, text, first_token.end, .l_paren);
-                const stack_before = vm.stack.items.len;
-                const arg_end = try vm.evalArgs(allocator, out_err, text, next);
-                return .{ try vm.evalBuiltin(out_err, text, first_token.extent(), builtin, stack_before), arg_end };
-            },
             .identifier => {
-                const id = text[first_token.start..first_token.end];
-                const second_token = lex(text, first_token.end);
+                const id = vm.text[first_token.start..first_token.end];
+                const second_token = lex(vm.text, offset);
+                offset = second_token.end;
                 switch (second_token.tag) {
-                    .l_paren => {
-                        std.debug.panic("todo: lookup function '{s}'", .{id});
+                    .equal => {
+                        var value, offset = try vm.evalExpr(second_token.end);
+                        const entry = vm.symbol_table.getOrPut(vm.allocator, id) catch |e| return vm.err.setOom(e);
+                        if (entry.found_existing) {
+                            entry.value_ptr.deinit();
+                        }
+                        value.moveInto(entry.value_ptr);
                     },
-                    else => return out_err.set(.{ .unexpected_token = .{
-                        .expected = "a '(' to start function args",
-                        .token = first_token,
+                    .l_paren => @panic("todo: implement function call"),
+                    else => return vm.err.set(.{ .unexpected_token = .{
+                        .expected = "an '=' or '(' after identifier",
+                        .token = second_token,
                     } }),
                 }
             },
-            .string_literal => return .{ .{ .string_literal = .{
-                .start = first_token.start,
-                .end = first_token.end,
-            } }, first_token.end },
-            else => return out_err.set(.{ .unexpected_token = .{
-                .expected = "an expression",
+            .keyword_fn => @panic("todo: implement fn"),
+            else => return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an identifier or 'fn' keyword",
                 .token = first_token,
             } }),
         }
     }
+}
 
-    fn evalArgs(
-        vm: *Vm,
-        allocator: std.mem.Allocator,
-        out_err: *VmError,
-        text: []const u8,
-        start: usize,
-    ) error{Vm}!usize {
-        var offset = start;
-        while (true) {
-            const first_token = lex(text, offset);
-            const after_expr = blk: switch (first_token.tag) {
-                .r_paren => return first_token.end,
-                else => {
-                    try vm.stackEnsureUnusedSlot(allocator, out_err);
-                    const value, const end = try vm.eval(allocator, out_err, text, offset);
-                    vm.stackPushAssume(value);
-                    break :blk end;
+fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { Value, usize } {
+    const first_token = lex(vm.text, start);
+    // offset = first_token.end;
+    // _ = allocator;
+    // _ = vm;
+    // _ = text;
+    // _ = start;
+    // @panic("todo: implement eval");
+    switch (first_token.tag) {
+        .builtin => {
+            const id = vm.text[first_token.start..first_token.end];
+            const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
+            const next = try eatToken(&vm.err, vm.text, first_token.end, .l_paren);
+            const stack_before = vm.stack.items.len;
+            const arg_end = try vm.evalArgs(next);
+            return .{ try vm.evalBuiltin(first_token.extent(), builtin, stack_before), arg_end };
+        },
+        .identifier => {
+            const id = vm.text[first_token.start..first_token.end];
+            const second_token = lex(vm.text, first_token.end);
+            switch (second_token.tag) {
+                .l_paren => {
+                    std.debug.panic("todo: lookup function '{s}'", .{id});
                 },
-            };
-
-            {
-                const token = lex(text, after_expr);
-                switch (token.tag) {
-                    .r_paren => return token.end,
-                    .comma => {},
-                    else => return out_err.set(.{ .unexpected_token = .{
-                        .expected = "a ',' or close paren ')'",
-                        .token = token,
-                    } }),
-                }
-                offset = token.end;
+                else => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "a '(' to start function args",
+                    .token = first_token,
+                } }),
             }
-        }
+        },
+        .string_literal => return .{ .{ .string_literal = .{
+            .start = first_token.start,
+            .end = first_token.end,
+        } }, first_token.end },
+        else => return vm.err.set(.{ .unexpected_token = .{
+            .expected = "an expression",
+            .token = first_token,
+        } }),
     }
+}
 
-    fn eatToken(
-        out_err: *VmError,
-        text: []const u8,
-        start: usize,
-        what: enum { l_paren },
-    ) error{Vm}!usize {
-        const token = lex(text, start);
-        const expected_tag: Token.Tag = switch (what) {
-            .l_paren => .l_paren,
+fn evalArgs(vm: *Vm, start: usize) error{Vm}!usize {
+    var offset = start;
+    while (true) {
+        const first_token = lex(vm.text, offset);
+        const after_expr = blk: switch (first_token.tag) {
+            .r_paren => return first_token.end,
+            else => {
+                try vm.stackEnsureUnusedSlot(vm.allocator, &vm.err);
+                const value, const end = try vm.evalExpr(offset);
+                vm.stackPushAssume(value);
+                break :blk end;
+            },
         };
-        if (token.tag != expected_tag) return out_err.set(.{ .unexpected_token = .{
-            .expected = "a " ++ switch (what) {
-                .l_paren => "an open paren '('",
-            },
-            .token = token,
-        } });
-        return token.end;
-    }
 
-    fn evalBuiltin(
-        vm: *Vm,
-        // allocator: std.mem.Allocator,
-        out_err: *VmError,
-        text: []const u8,
-        builtin_extent: Extent,
-        builtin: Builtin,
-        stack_before: usize,
-    ) error{Vm}!Value {
-        const arg_count = vm.stack.items.len - stack_before;
-        if (arg_count != builtin.argCount()) return out_err.set(.{
-            .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
-        });
-        switch (builtin) {
-            .@"@LoadAssembly" => {
-                const arg = vm.stack.items[vm.stack.items.len - 1];
-                const extent = switch (arg) {
-                    .string_literal => |e| e,
-                    // else => return out_err.set(.{
-                    //     .builtin_arg_type = .{
-                    //         .builtin = .LoadAssembly,
-                    //         .arg_index = 0,
-                    //         .expected = .string_literal,
-                    //         .actual = arg,
-                    //     },
-                    // }),
-                };
-                const string = text[extent.start + 1 .. extent.end - 1];
-                std.debug.panic("todo: load assembly '{s}'", .{string});
-            },
+        {
+            const token = lex(vm.text, after_expr);
+            switch (token.tag) {
+                .r_paren => return token.end,
+                .comma => {},
+                else => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "a ',' or close paren ')'",
+                    .token = token,
+                } }),
+            }
+            offset = token.end;
         }
-        // if (arg_count != builtin.expectedArgCount())
-        //     _ = vm;
-        // _ = text;
-        // _ = builtin_token;
-        // @panic("todo: evalBuiltin");
     }
-};
+}
+
+fn eatToken(
+    out_err: *VmError,
+    text: []const u8,
+    start: usize,
+    what: enum { l_paren },
+) error{Vm}!usize {
+    const token = lex(text, start);
+    const expected_tag: Token.Tag = switch (what) {
+        .l_paren => .l_paren,
+    };
+    if (token.tag != expected_tag) return out_err.set(.{ .unexpected_token = .{
+        .expected = "a " ++ switch (what) {
+            .l_paren => "an open paren '('",
+        },
+        .token = token,
+    } });
+    return token.end;
+}
+
+fn evalBuiltin(
+    vm: *Vm,
+    builtin_extent: Extent,
+    builtin: Builtin,
+    stack_before: usize,
+) error{Vm}!Value {
+    const arg_count = vm.stack.items.len - stack_before;
+    if (arg_count != builtin.argCount()) return vm.err.set(.{
+        .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
+    });
+    switch (builtin) {
+        .@"@LoadAssembly" => {
+            const arg = vm.stack.items[vm.stack.items.len - 1];
+            const extent = switch (arg) {
+                .string_literal => |e| e,
+                else => return vm.err.set(.{
+                    .builtin_arg_type = .{
+                        .builtin_extent = builtin_extent,
+                        .arg_index = 0,
+                        .expected = .string_literal,
+                        .actual = arg.getType(),
+                    },
+                }),
+            };
+            const string = vm.text[extent.start + 1 .. extent.end - 1];
+            if (string.len > max_load_assembly_string) return vm.err.set(.{ .load_assembly_string_too_long = extent });
+            var string_buf: [max_load_assembly_string + 1]u8 = undefined;
+            @memcpy(string_buf[0..string.len], string);
+            string_buf[string.len] = 0;
+            std.log.info("loading assembly '{s}'...", .{string});
+            return .{ .assembly = vm.mono_funcs.domain_assembly_open(vm.mono_domain, string_buf[0..string.len :0]) orelse {
+                std.log.info("load assembly '{s}' failed", .{string});
+                return vm.err.set(.{ .load_assembly_failed = extent });
+            } };
+        },
+    }
+    // if (arg_count != builtin.expectedArgCount())
+    //     _ = vm;
+    // _ = text;
+    // _ = builtin_token;
+    // @panic("todo: evalBuiltin");
+}
 
 const Builtin = enum {
     @"@LoadAssembly",
@@ -1342,3 +1385,4 @@ test "lex" {
 }
 
 const std = @import("std");
+const mono = @import("mono.zig");

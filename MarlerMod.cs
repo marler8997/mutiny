@@ -1,7 +1,3 @@
-// using BepInEx;
-// using BepInEx.Logging;
-// using UnityEngine;
-// using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -88,13 +84,23 @@ namespace MarlerMod
             );
             DebugCommandHandler.instance.Register(healthCmd);
             logger.LogInfo("Health command registered!");
+
+            DebugCommandHandler.ChatCommand strengthCmd = new DebugCommandHandler.ChatCommand(
+                "strength",
+                "Set strength upgrade level. Usage: strength <level>",
+                new Action<bool, string[]>(ExecuteStrengthCommand),
+                null, null, false
+            );
+            DebugCommandHandler.instance.Register(strengthCmd);
+            logger.LogInfo("Strength command registered!");
         }
 
         private enum UpgradeKind
         {
             Sprint,
             Stamina,
-            Health
+            Health,
+            Strength,
         }
 
         private static void ExecuteSprintCommand(bool fromServer, string[] args)
@@ -110,6 +116,11 @@ namespace MarlerMod
         private static void ExecuteHealthCommand(bool fromServer, string[] args)
         {
             ExecuteUpgradeCommand(UpgradeKind.Health, args);
+        }
+
+        private static void ExecuteStrengthCommand(bool fromServer, string[] args)
+        {
+            ExecuteUpgradeCommand(UpgradeKind.Strength, args);
         }
 
         private static void ExecuteUpgradeCommand(UpgradeKind kind, string[] args)
@@ -211,21 +222,12 @@ namespace MarlerMod
 
         private static int ApplyUpgrade(UpgradeKind kind, string steamID, int change)
         {
-            if (kind == UpgradeKind.Sprint)
-            {
-                return PunManager.instance.UpgradePlayerSprintSpeed(steamID, change);
-            }
-            else if (kind == UpgradeKind.Stamina)
-            {
-                return PunManager.instance.UpgradePlayerEnergy(steamID, change);
-            }
-            else if (kind == UpgradeKind.Health)
-            {
-                return PunManager.instance.UpgradePlayerHealth(steamID, change);
-            }
-            else
-            {
-                throw new ArgumentOutOfRangeException("kind", kind, "Invalid upgrade kind");
+            switch (kind) {
+                case UpgradeKind.Sprint: return PunManager.instance.UpgradePlayerSprintSpeed(steamID, change);
+                case UpgradeKind.Stamina: return PunManager.instance.UpgradePlayerEnergy(steamID, change);
+                case UpgradeKind.Health: return PunManager.instance.UpgradePlayerHealth(steamID, change);
+                case UpgradeKind.Strength: return PunManager.instance.UpgradePlayerGrabStrength(steamID, change);
+                default: throw new ArgumentOutOfRangeException("kind", kind, "Invalid upgrade kind");
             }
         }
 

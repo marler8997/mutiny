@@ -78,12 +78,12 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     std.log.info("Init Thread running!", .{});
 
     const mono_dll_name = "mono-2.0-bdwgc.dll";
-    const mono_module = blk: {
+    const mono_mod = blk: {
         var attempt: u32 = 0;
         while (true) {
             attempt += 1;
-            if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_module|
-                break :blk mono_module;
+            if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_mod|
+                break :blk mono_mod;
             switch (win32.GetLastError()) {
                 .ERROR_MOD_NOT_FOUND => {
                     std.log.info("{s}: not found yet...", .{mono_dll_name});
@@ -98,11 +98,43 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             std.Thread.sleep(std.time.ns_per_s * 1);
         }
     };
-    std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_module) });
+    std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_mod) });
 
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //
-    // TODO: see if we can call "Syste
+    const mono: Mono = .load(mono_mod);
+
+    const domain = blk: {
+        var attempt: u32 = 0;
+        while (true) {
+            attempt += 1;
+
+            if (mono.get_root_domain()) |domain| {
+                std.log.info("Mono root domain found: 0x{x}", .{@intFromPtr(domain)});
+                break :blk domain;
+            }
+            std.log.info("mono_get_root_domain returned NULL (attempt {})", .{attempt});
+            const max_attempts = 30;
+            if (attempt >= max_attempts) {
+                std.log.err("unable to get mono root domain after {} attempts", .{max_attempts});
+                return 0xffffffff;
+            }
+            std.Thread.sleep(std.time.ns_per_s * 1);
+        }
+    };
+
+    // Attach this native thread to the Mono runtime
+    std.log.info("Attaching thread to Mono domain...", .{});
+    const thread = mono.thread_attach(domain) orelse {
+        std.log.err("mono_thread_attach failed!", .{});
+        return 0xffffffff;
+    };
+    std.log.info("Thread attached successfully: 0x{x}", .{@intFromPtr(thread)});
+
+    if (true) @panic("todo");
+    // // Now initialize managed runtime
+    // initializeManagedRuntime(mono_mod) catch |err| {
+    //     std.log.err("Failed to initialize managed runtime: {}", .{err});
+    //     return 0xffffffff;
+    // };
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
@@ -132,6 +164,17 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     // _ = msgbox(.{}, "MarlerMod Init Thread", "InitThread running!", .{});
     return 0;
 }
+
+const Mono = struct {
+    get_root_domain: *const fn () callconv(.c) ?*MonoDomain,
+    thread_attach: *const fn (?*MonoDomain) callconv(.c) ?*MonoThread,
+    pub fn load(mod: win32.HINSTANCE) Mono {
+        return .{
+            .get_root_domain = getProc(mod, fn () callconv(.c) ?*MonoDomain, "mono_get_root_domain"),
+            .thread_attach = getProc(mod, fn (?*MonoDomain) callconv(.c) ?*MonoThread, "mono_thread_attach"),
+        };
+    }
+};
 
 const Mod = struct {
     list_node: std.DoublyLinkedList.Node,
@@ -544,6 +587,83 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     //}
     _ = msgbox(.{}, "MarlerMod.dll: Fatal Error", fmt, args);
     win32.ExitProcess(0xff);
+}
+
+// Mono API types (opaque pointers)
+const MonoDomain = opaque {};
+const MonoAssembly = opaque {};
+const MonoImage = opaque {};
+const MonoClass = opaque {};
+const MonoMethod = opaque {};
+const MonoObject = opaque {};
+const MonoThread = opaque {};
+
+fn getProc(mono_mod: win32.HINSTANCE, comptime T: type, name: [:0]const u8) *const T {
+    return @ptrCast(win32.GetProcAddress(mono_mod, name) orelse errExit(
+        "GetProcAddress '{s}' from mono failed, error={f}",
+        .{ name, win32.GetLastError() },
+    ));
+}
+
+fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
+    std.log.info("initializing managed runtime...", .{});
+    _ = mono_mod;
+
+    // const mono_thread_attach = win32.GetProcAddress(mono_mod, "mono_thread_attach") orelse return error.MissingFunction;
+    // const mono_domain_assembly_open = win32.GetProcAddress(mono_mod, "mono_domain_assembly_open") orelse return error.MissingFunction;
+    // const mono_assembly_get_image = win32.GetProcAddress(mono_mod, "mono_assembly_get_image") orelse return error.MissingFunction;
+    // const mono_class_from_name = win32.GetProcAddress(mono_mod, "mono_class_from_name") orelse return error.MissingFunction;
+    // const mono_class_get_method_from_name = win32.GetProcAddress(mono_mod, "mono_class_get_method_from_name") orelse return error.MissingFunction;
+    // const mono_runtime_invoke = win32.GetProcAddress(mono_mod, "mono_runtime_invoke") orelse return error.MissingFunction;
+
+    // // Cast to proper function types
+    // const thread_attach: *const fn (?*MonoDomain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
+    // const domain_assembly_open: *const fn (?*MonoDomain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
+    // const assembly_get_image: *const fn (?*MonoAssembly) callconv(.c) ?*MonoImage = @ptrCast(mono_assembly_get_image);
+    // const class_from_name: *const fn (?*MonoImage, [*:0]const u8, [*:0]const u8) callconv(.c) ?*MonoClass = @ptrCast(mono_class_from_name);
+    // const class_get_method_from_name: *const fn (?*MonoClass, [*:0]const u8, c_int) callconv(.c) ?*MonoMethod = @ptrCast(mono_class_get_method_from_name);
+    // const runtime_invoke: *const fn (?*MonoMethod, ?*MonoObject, ?*?*anyopaque, ?*?*MonoObject) callconv(.c) ?*MonoObject = @ptrCast(mono_runtime_invoke);
+
+    // Get root domain and attach thread
+    // const domain = mono_get_root_domain() orelse errExit(
+    //     "mono_get_root_domain returned NULL",
+    //     .{},
+    // );
+    // std.log.info("Mono root domain: 0x{x}", .{@intFromPtr(domain)});
+
+    // const thread = thread_attach(domain) orelse return error.ThreadAttachFailed;
+    // std.log.info("Thread attached: 0x{x}", .{@intFromPtr(thread)});
+
+    // // Load managed assembly
+    // const assembly_path = "C:\\temp\\MarlerModManaged.dll";
+    // std.log.info("Loading managed assembly: {s}", .{assembly_path});
+    // const assembly = domain_assembly_open(domain, assembly_path) orelse return error.AssemblyLoadFailed;
+
+    // const image = assembly_get_image(assembly) orelse return error.GetImageFailed;
+
+    // // Find class: MarlerMod.ModLoader
+    // const namespace = "MarlerMod";
+    // const class_name = "ModLoader";
+    // std.log.info("Finding class: {s}.{s}", .{ namespace, class_name });
+    // const class = class_from_name(image, namespace, class_name) orelse return error.ClassNotFound;
+
+    // // Find method: Initialize
+    // const method_name = "Initialize";
+    // std.log.info("Finding method: {s}", .{method_name});
+    // const method = class_get_method_from_name(class, method_name, 0) orelse return error.MethodNotFound;
+
+    // // Invoke the method
+    // std.log.info("Invoking {s}.{s}.{s}()", .{ namespace, class_name, method_name });
+    // var exception: ?*MonoObject = null;
+    // _ = runtime_invoke(method, null, null, &exception);
+
+    // if (exception != null) {
+    //     std.log.err("Exception occurred during method invocation", .{});
+    //     return error.InvocationException;
+    // }
+
+    // std.log.info("Managed code initialized successfully!", .{});
+    @panic("todo");
 }
 
 const std = @import("std");

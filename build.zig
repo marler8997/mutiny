@@ -37,6 +37,22 @@ pub fn build(b: *std.Build) void {
     );
     b.getInstallStep().dependOn(&install_marler_mod_managed_dll.step);
 
+    const test_game = b.addExecutable(.{
+        .name = "TestGame",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testgame.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "win32", .module = win32_mod },
+            },
+        }),
+    });
+    {
+        const run = b.addRunArtifact(test_game);
+        b.step("testgame-raw", "").dependOn(&run.step);
+    }
+
     {
         const launcher = b.addExecutable(.{
             .name = "launcher",
@@ -61,8 +77,8 @@ pub fn build(b: *std.Build) void {
 
         run.addArtifactArg(marler_mod_native_dll);
         run.addFileArg(marler_mod_managed_dll);
-        b.step("run", "").dependOn(&run.step);
-        // if (b.args)
+        run.addArtifactArg(test_game);
+        b.step("testgame", "").dependOn(&run.step);
     }
 
     {

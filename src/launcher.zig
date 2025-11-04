@@ -33,14 +33,15 @@ pub fn main() !void {
     // var framework_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     // const framework_dll = try std.fmt.bufPrint(&framework_path_buf, "{s}{c}framework.dll", .{ exe_dir, std.fs.path.sep });
 
-    std.fs.accessAbsolute(marler_mod_native_dll, .{}) catch {
-        std.log.err("{s} not found", .{marler_mod_native_dll});
-        std.process.exit(0xff);
-    };
-    std.fs.accessAbsolute(marler_mod_managed_dll, .{}) catch {
-        std.log.err("{s} not found", .{marler_mod_managed_dll});
-        std.process.exit(0xff);
-    };
+    // std.fs.accessAbsolute(marler_mod_native_dll, .{}) catch {
+    //     std.log.err("{s} not found", .{marler_mod_native_dll});
+    //     std.process.exit(0xff);
+    // };
+    // std.fs.accessAbsolute(marler_mod_managed_dll, .{}) catch {
+    //     std.log.err("{s} not found", .{marler_mod_managed_dll});
+    //     std.process.exit(0xff);
+    // };
+    _ = marler_mod_managed_dll;
 
     std.log.info("launching '{s}'...", .{exe});
 

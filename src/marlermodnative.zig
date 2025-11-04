@@ -121,15 +121,14 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         }
     };
 
-    // Attach this native thread to the Mono runtime
-    std.log.info("Attaching thread to Mono domain...", .{});
+    // std.log.info("Attaching thread to Mono domain...", .{});
     const thread = mono.thread_attach(domain) orelse {
         std.log.err("mono_thread_attach failed!", .{});
         return 0xffffffff;
     };
-    std.log.info("Thread attached successfully: 0x{x}", .{@intFromPtr(thread)});
+    std.log.info("thread attach succes 0x{x}", .{@intFromPtr(thread)});
 
-    if (true) @panic("todo");
+    // if (true) @panic("todo");
     // // Now initialize managed runtime
     // initializeManagedRuntime(mono_mod) catch |err| {
     //     std.log.err("Failed to initialize managed runtime: {}", .{err});

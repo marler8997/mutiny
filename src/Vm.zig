@@ -173,6 +173,11 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
         const first_token = lex(vm.text, offset);
         offset = first_token.end;
         switch (first_token.tag) {
+            .builtin => {
+                var value, offset = try vm.evalExpr(first_token.start);
+                // TODO: what do we do with this value?
+                value.deinit();
+            },
             .identifier => {
                 const id = vm.text[first_token.start..first_token.end];
                 const second_token = lex(vm.text, offset);
@@ -195,7 +200,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
             },
             .keyword_fn => @panic("todo: implement fn"),
             else => return vm.err.set(.{ .unexpected_token = .{
-                .expected = "an identifier or 'fn' keyword",
+                .expected = "an identifier, builtin or 'fn' keyword",
                 .token = first_token,
             } }),
         }

@@ -49,6 +49,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const install_test_game = b.addInstallArtifact(test_game, .{});
+    b.step("install-testgame", "").dependOn(&install_test_game.step);
+
     {
         const run = b.addRunArtifact(test_game);
         run.step.dependOn(&install_test_game.step);

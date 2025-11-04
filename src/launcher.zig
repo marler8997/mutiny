@@ -10,20 +10,21 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, all_args);
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_DLL\n");
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_DLL EXE\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
-    if (args.len != 1) {
-        std.log.err("expected 1 cmdline argument but got {}", .{args.len});
+    if (args.len != 2) {
+        std.log.err("expected 2 cmdline args but got {}", .{args.len});
         std.process.exit(0xff);
     }
     const marler_mod_dll = args[0];
+    const exe = args[1];
 
-    const game_exe = try findGameExecutable(gpa);
-    defer gpa.free(game_exe);
+    // const game_exe = try findGameExecutable(gpa);
+    // defer gpa.free(game_exe);
 
-    std.log.info("Game: {f}", .{std.unicode.fmtUtf16Le(game_exe)});
+    // std.log.info("Game: {f}", .{std.unicode.fmtUtf16Le(game_exe)});
 
     // Find framework DLL
     // var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -40,91 +41,92 @@ pub fn main() !void {
         // return;
     };
 
-    // std.log.info("Framework: {s}", .{marler_mod_dll});
+    std.log.info("launching '{s}'...", .{exe});
 
-    // Launch and inject
-    std.log.info("launching game...", .{});
-    try launchAndInject(gpa, game_exe, marler_mod_dll);
+    const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe);
+    defer gpa.free(exe_w);
+
+    try launchAndInject(gpa, exe_w, marler_mod_dll);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
 }
 
-fn findGameExecutable(gpa: std.mem.Allocator) ![:0]const u16 {
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    const use_helloworld_exe = false;
-    if (use_helloworld_exe) return gpa.dupeZ(u16, win32.L(
-        "C:\\git\\zigwin32gen\\.zig-cache\\o\\247ea82740ecc3c00d8fb32f7a7a098d\\helloworld-window.exe",
-    ));
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    const use_simple_window = true;
-    if (use_simple_window) return gpa.dupeZ(u16, win32.L(
-        ".\\testapp\\SimpleWindow.exe",
-    ));
-    // const stdin = std.io.getStdIn().reader();
+// fn findGameExecutable(gpa: std.mem.Allocator) ![:0]const u16 {
+//     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//     const use_helloworld_exe = false;
+//     if (use_helloworld_exe) return gpa.dupeZ(u16, win32.L(
+//         "C:\\git\\zigwin32gen\\.zig-cache\\o\\247ea82740ecc3c00d8fb32f7a7a098d\\helloworld-window.exe",
+//     ));
+//     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//     const use_simple_window = true;
+//     if (use_simple_window) return gpa.dupeZ(u16, win32.L(
+//         ".\\testapp\\SimpleWindow.exe",
+//     ));
+//     // const stdin = std.io.getStdIn().reader();
 
-    // // Try to read from config file
-    // var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    // const exe_dir = try std.fs.selfExeDirPath(&exe_path_buf);
+//     // // Try to read from config file
+//     // var exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+//     // const exe_dir = try std.fs.selfExeDirPath(&exe_path_buf);
 
-    // var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    // const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}{c}config.ini", .{ exe_dir, std.fs.path.sep });
+//     // var config_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+//     // const config_path = try std.fmt.bufPrint(&config_path_buf, "{s}{c}config.ini", .{ exe_dir, std.fs.path.sep });
 
-    // if (std.fs.openFileAbsolute(config_path, .{})) |file| {
-    //     defer file.close();
+//     // if (std.fs.openFileAbsolute(config_path, .{})) |file| {
+//     //     defer file.close();
 
-    //     var buf_reader = std.io.bufferedReader(file.reader());
-    //     var reader = buf_reader.reader();
+//     //     var buf_reader = std.io.bufferedReader(file.reader());
+//     //     var reader = buf_reader.reader();
 
-    //     var line_buf: [1024]u8 = undefined;
-    //     while (try reader.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
-    //         const trimmed = std.mem.trim(u8, line, " \r\n\t");
-    //         if (std.mem.startsWith(u8, trimmed, "game_path=")) {
-    //             const path = std.mem.trim(u8, trimmed[10..], " \r\n\t");
-    //             if (path.len > 0) {
-    //                 std.fs.accessAbsolute(path, .{}) catch continue;
-    //                 return try gpa.dupe(u8, path);
-    //             }
-    //         }
-    //     }
-    // } else |_| {
-    //     // Config file doesn't exist, that's ok
-    // }
+//     //     var line_buf: [1024]u8 = undefined;
+//     //     while (try reader.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
+//     //         const trimmed = std.mem.trim(u8, line, " \r\n\t");
+//     //         if (std.mem.startsWith(u8, trimmed, "game_path=")) {
+//     //             const path = std.mem.trim(u8, trimmed[10..], " \r\n\t");
+//     //             if (path.len > 0) {
+//     //                 std.fs.accessAbsolute(path, .{}) catch continue;
+//     //                 return try gpa.dupe(u8, path);
+//     //             }
+//     //         }
+//     //     }
+//     // } else |_| {
+//     //     // Config file doesn't exist, that's ok
+//     // }
 
-    // Try common locations
-    const common_paths = [_][]const u8{
-        "C:\\Program Files (x86)\\Steam\\steamapps\\common\\REPO\\REPO.exe",
-    };
+//     // Try common locations
+//     const common_paths = [_][]const u8{
+//         "C:\\Program Files (x86)\\Steam\\steamapps\\common\\REPO\\REPO.exe",
+//     };
 
-    for (common_paths) |path| {
-        std.fs.accessAbsolute(path, .{}) catch continue;
-        // return try gpa.dupeZ(u8, path);
-        return try std.unicode.utf8ToUtf16LeAllocZ(gpa, path);
-    }
+//     for (common_paths) |path| {
+//         std.fs.accessAbsolute(path, .{}) catch continue;
+//         // return try gpa.dupeZ(u8, path);
+//         return try std.unicode.utf8ToUtf16LeAllocZ(gpa, path);
+//     }
 
-    std.log.err("could not find game executable (todo: maybe make a way to configure this?)", .{});
-    // // Prompt user
-    // std.log.info("Could not auto-detect game location.", .{});
-    // std.log.info("Enter path to game executable: ", .{});
+//     std.log.err("could not find game executable (todo: maybe make a way to configure this?)", .{});
+//     // // Prompt user
+//     // std.log.info("Could not auto-detect game location.", .{});
+//     // std.log.info("Enter path to game executable: ", .{});
 
-    // var path_buf: [1024]u8 = undefined;
-    // const user_input = try stdin.readUntilDelimiterOrEof(&path_buf, '\n');
-    // if (user_input) |path| {
-    //     const trimmed = std.mem.trim(u8, path, " \r\n\t");
-    //     std.fs.accessAbsolute(trimmed, .{}) catch {
-    //         std.log.err("File not found: {s}", .{trimmed});
-    //         return error.FileNotFound;
-    //     };
+//     // var path_buf: [1024]u8 = undefined;
+//     // const user_input = try stdin.readUntilDelimiterOrEof(&path_buf, '\n');
+//     // if (user_input) |path| {
+//     //     const trimmed = std.mem.trim(u8, path, " \r\n\t");
+//     //     std.fs.accessAbsolute(trimmed, .{}) catch {
+//     //         std.log.err("File not found: {s}", .{trimmed});
+//     //         return error.FileNotFound;
+//     //     };
 
-    //     // Save to config for next time
-    //     const file = try std.fs.createFileAbsolute(config_path, .{});
-    //     defer file.close();
-    //     try file.writer().print("game_path={s}\n", .{trimmed});
+//     //     // Save to config for next time
+//     //     const file = try std.fs.createFileAbsolute(config_path, .{});
+//     //     defer file.close();
+//     //     try file.writer().print("game_path={s}\n", .{trimmed});
 
-    //     return try gpa.dupe(u8, trimmed);
-    // }
+//     //     return try gpa.dupe(u8, trimmed);
+//     // }
 
-    return error.NoGameFound;
-}
+//     return error.NoGameFound;
+// }
 
 fn getDirname(path: []const u16) ?[]const u16 {
     for (1..path.len) |i| {

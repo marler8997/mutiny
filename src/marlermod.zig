@@ -50,8 +50,11 @@ pub export fn _DllMainCRTStartup(
             // aren't supposed to call at this phase.
             if (false) win32.OutputDebugStringW(win32.L("MarlerMod: proces attach\n"));
 
-            // We'll spawn a thread so we can do our initialization outside the loader lock
-            const thread = win32.CreateThread(null, 0, initThreadEntry, null, .{}, null) orelse {
+            // NOTE: the default thread stack size when specyfing 0 is too small when
+            //       injecting into .NET asemblies, so, let' just ask for a reasonable 2MB
+            //       no matter what.
+            const thread_stack_size = 2 * 1024 * 1024;
+            const thread = win32.CreateThread(null, thread_stack_size, initThreadEntry, null, .{}, null) orelse {
                 win32.OutputDebugStringW(win32.L("MarlerMod: CreateThread failed"));
                 // TODO: how can we log the error code?
                 return 1; // fail

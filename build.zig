@@ -7,11 +7,11 @@ pub fn build(b: *std.Build) void {
     const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
-    const marler_mod_dll = b.addLibrary(.{
-        .name = "MarlerMod",
+    const marler_mod_native_dll = b.addLibrary(.{
+        .name = "MarlerModNative",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/marlermod.zig"),
+            .root_source_file = b.path("src/marlermodnative.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const install_marler_mod_dll = b.addInstallArtifact(marler_mod_dll, .{});
+    const install_marler_mod_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
     b.getInstallStep().dependOn(&install_marler_mod_dll.step);
     // framework.linkSystemLibrary("kernel32");
     // framework.linkLibC();
@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&install.step);
         run.step.dependOn(&install_marler_mod_dll.step);
 
-        run.addArtifactArg(marler_mod_dll);
+        run.addArtifactArg(marler_mod_native_dll);
         b.step("run", "").dependOn(&run.step);
         // if (b.args)
     }

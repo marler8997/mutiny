@@ -48,8 +48,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const install_test_game = b.addInstallArtifact(test_game, .{});
     {
         const run = b.addRunArtifact(test_game);
+        run.step.dependOn(&install_test_game.step);
         b.step("testgame-raw", "").dependOn(&run.step);
     }
 
@@ -74,6 +76,7 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&install.step);
         run.step.dependOn(&install_marler_mod_native_dll.step);
         run.step.dependOn(&install_marler_mod_managed_dll.step);
+        run.step.dependOn(&install_test_game.step);
 
         run.addArtifactArg(marler_mod_native_dll);
         run.addFileArg(marler_mod_managed_dll);

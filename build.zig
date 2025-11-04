@@ -19,10 +19,23 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const install_marler_mod_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
-    b.getInstallStep().dependOn(&install_marler_mod_dll.step);
-    // framework.linkSystemLibrary("kernel32");
-    // framework.linkLibC();
+    const install_marler_mod_native_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
+    b.getInstallStep().dependOn(&install_marler_mod_native_dll.step);
+
+    const marler_mod_managed_dll = blk: {
+        const compile = b.addSystemCommand(&.{
+            "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
+            "/target:library",
+        });
+        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MarlerModManaged.dll");
+        compile.addFileArg(b.path("managed/MarlerModManaged.cs"));
+        break :blk out_dll;
+    };
+    const install_marler_mod_managed_dll = b.addInstallBinFile(
+        marler_mod_managed_dll,
+        "MarlerModManaged.dll",
+    );
+    b.getInstallStep().dependOn(&install_marler_mod_managed_dll.step);
 
     {
         const launcher = b.addExecutable(.{
@@ -43,9 +56,11 @@ pub fn build(b: *std.Build) void {
 
         const run = b.addRunArtifact(launcher);
         run.step.dependOn(&install.step);
-        run.step.dependOn(&install_marler_mod_dll.step);
+        run.step.dependOn(&install_marler_mod_native_dll.step);
+        run.step.dependOn(&install_marler_mod_managed_dll.step);
 
         run.addArtifactArg(marler_mod_native_dll);
+        run.addFileArg(marler_mod_managed_dll);
         b.step("run", "").dependOn(&run.step);
         // if (b.args)
     }

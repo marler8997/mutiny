@@ -10,16 +10,17 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, all_args);
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_DLL EXE\n");
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_NATIVE_DLL MARLER_MOD_MANAGED_DLL EXE\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
-    if (args.len != 2) {
-        std.log.err("expected 2 cmdline args but got {}", .{args.len});
+    if (args.len != 3) {
+        std.log.err("expected 3 cmdline args but got {}", .{args.len});
         std.process.exit(0xff);
     }
-    const marler_mod_dll = args[0];
-    const exe = args[1];
+    const marler_mod_native_dll = args[0];
+    const marler_mod_managed_dll = args[1];
+    const exe = args[2];
 
     // const game_exe = try findGameExecutable(gpa);
     // defer gpa.free(game_exe);
@@ -32,13 +33,13 @@ pub fn main() !void {
     // var framework_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     // const framework_dll = try std.fmt.bufPrint(&framework_path_buf, "{s}{c}framework.dll", .{ exe_dir, std.fs.path.sep });
 
-    // Check if framework DLL exists
-    std.fs.accessAbsolute(marler_mod_dll, .{}) catch {
-        std.log.err("framework.dll not found at: {s}", .{marler_mod_dll});
+    std.fs.accessAbsolute(marler_mod_native_dll, .{}) catch {
+        std.log.err("{s} not found", .{marler_mod_native_dll});
         std.process.exit(0xff);
-        // std.log.info("Press Enter to exit...", .{});
-        // _ = try std.io.getStdIn().reader().readByte();
-        // return;
+    };
+    std.fs.accessAbsolute(marler_mod_managed_dll, .{}) catch {
+        std.log.err("{s} not found", .{marler_mod_managed_dll});
+        std.process.exit(0xff);
     };
 
     std.log.info("launching '{s}'...", .{exe});
@@ -46,7 +47,7 @@ pub fn main() !void {
     const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe);
     defer gpa.free(exe_w);
 
-    try launchAndInject(gpa, exe_w, marler_mod_dll);
+    try launchAndInject(gpa, exe_w, marler_mod_native_dll);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
 }

@@ -54,7 +54,6 @@ const TypeContext = enum { @"return", param };
 pub const Error = union(enum) {
     not_implemented: [:0]const u8,
     unexpected_token: struct { expected: [:0]const u8, token: Token },
-    // expr_id_then_unexpected: struct { id_extent: Extent, bad_token: Token },
     unknown_builtin: Token,
     builtin_arg_count: struct { builtin_extent: Extent, arg_count: usize },
     builtin_arg_type: struct {
@@ -174,7 +173,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         }
                         maybe_value.?.moveInto(entry.value_ptr);
                     },
-                    .l_paren => @panic("todo: implement function call"),
+                    .l_paren => return vm.err.set(.{ .not_implemented = "function calls" }),
                     else => return vm.err.set(.{ .unexpected_token = .{
                         .expected = "an '=' or '(' after identifier",
                         .token = second_token,
@@ -195,6 +194,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                     );
                     break :blk .{ return_type, after_return_type };
                 };
+                _ = return_type;
 
                 const name_token = lex(vm.text, after_return_type);
                 switch (name_token.tag) {
@@ -204,7 +204,7 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         .token = name_token,
                     } }),
                 }
-                const after_open_paren = try eatToken(&vm.err, vm.text, name_token.end, .l_paren);
+                const after_open_paren = try eat(vm.text, &vm.err).token(name_token.end, .l_paren);
                 offset = after_open_paren;
                 while (true) {
                     const next = lex(vm.text, offset);
@@ -216,9 +216,8 @@ pub fn interpret(vm: *Vm) error{Vm}!void {
                         else => return vm.err.set(.{ .not_implemented = "fn with args" }),
                     }
                 }
-
-                _ = return_type;
-                return vm.err.set(.{ .not_implemented = "fn body" });
+                offset = try eat(vm.text, &vm.err).token(offset, .l_brace);
+                offset = try eat(vm.text, &vm.err).body(offset);
             },
             else => return vm.err.set(.{ .unexpected_token = .{
                 .expected = "an EOF, identifier, builtin or 'fn' keyword",
@@ -234,7 +233,7 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
             const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
-            const next = try eatToken(&vm.err, vm.text, first_token.end, .l_paren);
+            const next = try eat(vm.text, &vm.err).token(first_token.end, .l_paren);
             const stack_before = vm.stack.items.len;
             const arg_end = try vm.evalArgs(next);
             return .{ try vm.evalBuiltin(first_token.extent(), builtin, stack_before), arg_end };
@@ -249,14 +248,6 @@ fn evalExpr(vm: *Vm, start: usize) error{Vm}!struct { ?Value, usize } {
                 else => {
                     return vm.err.set(.{ .not_implemented = "identifier expressions" });
                 },
-                //     return vm.err.set(.{ .expr_id_then_unexpected = .{
-                //     .id_extent = first_token.extent(),
-                //     .bad_token = second_token,
-                // } }),
-                // else => return vm.err.set(.{ .unexpected_token = .{
-                //     .expected = "a '(' to start function args",
-                //     .token = first_token,
-                // } }),
             }
         },
         .string_literal => return .{ .{ .string_literal = .{
@@ -301,25 +292,6 @@ fn evalArgs(vm: *Vm, start: usize) error{Vm}!usize {
             offset = token.end;
         }
     }
-}
-
-fn eatToken(
-    out_err: *Error,
-    text: []const u8,
-    start: usize,
-    what: enum { l_paren },
-) error{Vm}!usize {
-    const token = lex(text, start);
-    const expected_tag: Token.Tag = switch (what) {
-        .l_paren => .l_paren,
-    };
-    if (token.tag != expected_tag) return out_err.set(.{ .unexpected_token = .{
-        .expected = switch (what) {
-            .l_paren => "an open paren '('",
-        },
-        .token = token,
-    } });
-    return token.end;
 }
 
 fn evalBuiltin(
@@ -379,6 +351,138 @@ fn evalBuiltin(
         },
     }
 }
+
+fn eat(text: []const u8, err: *Error) Eat {
+    return .{ .text = text, .err = err };
+}
+const Eat = struct {
+    text: []const u8,
+    err: *Error,
+
+    fn token(vm: Eat, start: usize, what: enum {
+        l_paren,
+        l_brace,
+    }) error{Vm}!usize {
+        const t = lex(vm.text, start);
+        const expected_tag: Token.Tag = switch (what) {
+            .l_paren => .l_paren,
+            .l_brace => .l_brace,
+        };
+        if (t.tag != expected_tag) return vm.err.set(.{ .unexpected_token = .{
+            .expected = switch (what) {
+                .l_paren => "an open paren '('",
+                .l_brace => "an open brace '{'",
+            },
+            .token = t,
+        } });
+        return t.end;
+    }
+
+    fn body(vm: Eat, start: usize) error{Vm}!usize {
+        var offset: usize = start;
+        while (true) {
+            const first_token = lex(vm.text, offset);
+            offset = first_token.end;
+            switch (first_token.tag) {
+                .r_brace => return first_token.end,
+                .eof => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "'}' to close function body",
+                    .token = first_token,
+                } }),
+                .builtin => offset = try vm.expr(first_token.start),
+                .identifier => {
+                    // const id = text[first_token.start..first_token.end];
+                    const second_token = lex(vm.text, offset);
+                    offset = second_token.end;
+                    switch (second_token.tag) {
+                        .equal => offset = try vm.expr(second_token.end),
+                        .l_paren => return vm.err.set(.{ .not_implemented = "eat function call" }),
+                        else => return vm.err.set(.{ .unexpected_token = .{
+                            .expected = "an '=' or '(' after identifier",
+                            .token = second_token,
+                        } }),
+                    }
+                },
+                // .keyword_fn => {
+                //     const return_type: ?Type, const after_return_type = blk: {
+                //         const next_token = lex(vm.text, first_token.end);
+                //         if (next_token.isVoid(vm.text)) break :blk .{ null, next_token.end };
+                //         const return_type_value, const after_return_type = try vm.evalExpr(first_token.end);
+                //         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                //         // defer TODO: clean up return_type_value
+                //         const return_type = try vm.err.typeFromValue(
+                //             first_token.end,
+                //             .@"return",
+                //             &return_type_value,
+                //         );
+                //         break :blk .{ return_type, after_return_type };
+                //     };
+                //     _ = return_type;
+
+                //     const name_token = lex(vm.text, after_return_type);
+                //     switch (name_token.tag) {
+                //         .identifier => {},
+                //         else => return vm.err.set(.{ .unexpected_token = .{
+                //             .expected = "a function name identifier",
+                //             .token = name_token,
+                //         } }),
+                //     }
+                //     const after_open_paren = try eatToken(&vm.err, vm.text, name_token.end, .l_paren);
+                //     offset = after_open_paren;
+                //     while (true) {
+                //         const next = lex(vm.text, offset);
+                //         switch (next.tag) {
+                //             .r_paren => {
+                //                 offset = next.end;
+                //                 break;
+                //             },
+                //             else => return vm.err.set(.{ .not_implemented = "fn with args" }),
+                //         }
+                //     }
+                //     offset = try eatToken(&vm.err, vm.text, offset, .l_brace);
+                //     offset = try eatBody(&vm.err, vm.text, offset);
+                // },
+                else => return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an EOF, identifier, builtin or 'fn' keyword",
+                    .token = first_token,
+                } }),
+            }
+        }
+    }
+
+    fn expr(vm: Eat, start: usize) error{Vm}!usize {
+        const first_token = lex(vm.text, start);
+        switch (first_token.tag) {
+            .builtin => {
+                return vm.err.set(.{ .not_implemented = "eat builtin" });
+                // const id = vm.text[first_token.start..first_token.end];
+                // const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
+                // const next = try eatToken(&vm.err, vm.text, first_token.end, .l_paren);
+                // const stack_before = vm.stack.items.len;
+                // const arg_end = try vm.evalArgs(next);
+                // return .{ try vm.evalBuiltin(first_token.extent(), builtin, stack_before), arg_end };
+            },
+            .identifier => {
+                return vm.err.set(.{ .not_implemented = "eat identifier" });
+                // const id = vm.text[first_token.start..first_token.end];
+                // const second_token = lex(vm.text, first_token.end);
+                // switch (second_token.tag) {
+                //     .l_paren => {
+                //         std.debug.panic("todo: lookup function '{s}'", .{id});
+                //     },
+                //     else => {
+                //         return vm.err.set(.{ .not_implemented = "identifier expressions" });
+                //     },
+                // }
+            },
+            .string_literal => return first_token.end,
+            else => return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression",
+                .token = first_token,
+            } }),
+        }
+    }
+};
 
 const FindAssembly = struct {
     vm: *Vm,
@@ -1560,14 +1664,6 @@ const ErrorFmt = struct {
                     e.token.fmt(f.text),
                 },
             ),
-            // .expr_id_then_unexpected => |e| try writer.print(
-            //     "{d}: syntax error: expected an expression but got id '{s}' followed by {f}",
-            //     .{
-            //         getLineNum(f.text, e.bad_token.start),
-            //         f.text[e.id_extent.start..e.id_extent.end],
-            //         e.bad_token.fmt(f.text),
-            //     },
-            // ),
             .unknown_builtin => |token| try writer.print(
                 "{d}: unknown builtin '{s}'",
                 .{

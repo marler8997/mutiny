@@ -1,15 +1,11 @@
 const Vm = @This();
 
 mono_funcs: *const mono.Funcs,
-mono_domain: *mono.Domain,
+mono_domain: *const mono.Domain,
 err: Error,
 text: []const u8,
 mem: Memory,
 symbols: std.SinglyLinkedList,
-
-// Identifier limit: 1023 characters for any identifier (including class names, method names, variable names, etc.)
-// This is enforced by the C# compiler, not the CLR itself
-const dotnet_max_id = 1023;
 
 const Extent = struct { start: usize, end: usize };
 
@@ -21,27 +17,28 @@ const Symbol = struct {
 
 const FunctionSignature = struct {
     return_type: ?Type,
-    body_start: usize,
+    body: union(enum) {
+        method: *mono.Method,
+        text_source: usize,
+    },
     param_count: u8,
 };
 
 const Type = enum {
-    // type,
+    integer,
     string_literal,
     function,
     assembly,
     class,
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // TODO: replace this with class_field?
-    // assembly_field,
+    method,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
-            // .type => "a type",
+            .integer => "an integer",
             .string_literal => "a string literal",
             .function => "a function",
             .assembly => "an assembly",
             .class => "a class",
-            // .assembly_field => "an assembly field",
+            .method => "a .NET method",
         };
     }
 };
@@ -53,6 +50,7 @@ pub const Error = union(enum) {
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unknown_builtin: Token,
     undefined_identifier: Token,
+    num_literal_overflow: Extent,
     called_non_function: struct {
         start: usize,
         unexpected_type: ?Type,
@@ -100,12 +98,16 @@ pub const Error = union(enum) {
         first_arg_token: Token,
     },
     assembly_not_found: Extent,
-    namespace_too_big: Token,
-    class_name_too_big: Token,
+    id_string_literal_too_big: Extent,
     missing_class: struct {
         assembly: *mono.Assembly,
         namespace: Extent,
         name: Extent,
+    },
+    missing_method: struct {
+        class: *mono.Class,
+        name: Extent,
+        param_count: i64,
     },
     oom,
     pub fn set(err: *Error, value: Error) error{Vm} {
@@ -134,6 +136,18 @@ pub fn deinit(vm: *Vm) void {
     vm.mem.deinit();
     vm.* = undefined;
 }
+
+const IdCstring = struct {
+    buf: [max + 1]u8,
+    len: std.math.IntFittingRange(0, max),
+
+    // C# limits identifiers to 1023 characters (class names, method names, variables etc).
+    const max = 1023;
+
+    pub fn slice(self: *const IdCstring) [:0]const u8 {
+        return self.buf[0..self.len :0];
+    }
+};
 
 pub fn evalRoot(vm: *Vm) error{Vm}!void {
     var offset: usize = 0;
@@ -227,7 +241,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             const signature: *FunctionSignature = try vm.push(FunctionSignature);
             signature.* = .{
                 .return_type = null,
-                .body_start = undefined,
+                .body = .{ .text_source = undefined },
                 .param_count = 0,
             };
 
@@ -248,7 +262,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 
             // TODO: parse and set the return type if we want to support that
             offset = try eat(vm.text, &vm.err).eatToken(offset, .l_brace);
-            signature.body_start = offset;
+            signature.body.text_source = offset;
 
             const function_value_addr = vm.mem.top();
             (try vm.push(Type)).* = .function;
@@ -305,29 +319,23 @@ fn evalExprSuffix(
             const expr_type, const value_addr = vm.readValue(Type, expr_addr);
             _ = value_addr;
             return switch (expr_type) {
-                .string_literal, .function, .assembly => vm.err.set(.{ .no_field = .{
+                .integer, .string_literal, .function, .assembly, .class, .method => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
                     .unexpected_type = expr_type,
                 } }),
-                .class => {
-                    return vm.err.set(.{ .not_implemented = "class fields" });
-                },
-                // .assembly => {
-                //     const field_string = vm.text[id_extent.start..id_extent.end];
-                //     if (std.mem.eql(u8, field_string, "Class")) {
-                //         _ = vm.mem.discardFrom(expr_addr);
-                //         (try vm.push(Type)).* = .builtin;
-                //         (try vm.push(*mono.Assembly)).* = assembly;
-                //     }
-                //     // const assembly, const end = vm.readValue(*mono.Assembly, value_addr);
-                //     // std.debug.assert(end.eql(vm.mem.top()));
-                //     // _ = vm.mem.discardFrom(expr_addr);
-                //     // (try vm.push(Type)).* = .assembly_field;
-                //     // (try vm.push(*mono.Assembly)).* = assembly;
+                // .class => {
+                //     const class, const end = vm.readValue(*mono.Class, value_addr);
+                //     std.debug.assert(end.eql(vm.mem.top()));
+                //     _ = vm.mem.discardFrom(expr_addr);
+                //     (try vm.push(Type)).* = .class_member;
+                //     (try vm.push(*mono.Class)).* = class;
                 //     // (try vm.push(u8)).* = 0;
-                //     // (try vm.push(usize)).* = id_extent.start;
-                //     // return id_extent.end;
+                //     (try vm.push(usize)).* = id_extent.start;
+                //     return id_extent.end;
+                // },
+                // .class_member => {
+                //     return vm.err.set(.{ .not_implemented = "class members(2)" });
                 // },
                 // .assembly_field => {
                 //     _, const id_count_addr = vm.readValue(*mono.Assembly, value_addr);
@@ -350,10 +358,13 @@ fn evalExprSuffix(
                 .start = expr_first_token.start,
                 .unexpected_type = null,
             } });
-            const expr_type, const signature_addr_addr = vm.readValue(Type, expr_addr);
+            const expr_type, const expr_value_addr = vm.readValue(Type, expr_addr);
             if (expr_type == .function) {
-                const signature_addr = vm.mem.toPointer(Memory.Addr, signature_addr_addr).*;
+                const signature_addr, const end_addr = vm.readValue(Memory.Addr, expr_value_addr);
+                std.debug.assert(end_addr.eql(vm.mem.top()));
+                _ = vm.mem.discardFrom(expr_addr);
                 const signature: *FunctionSignature, const params_addr = vm.readPointer(FunctionSignature, signature_addr);
+                std.debug.assert(signature.body == .text_source);
 
                 // std.debug.print("Sig {}", .{signature.*});
                 const mem_before_args = vm.mem.top();
@@ -371,7 +382,7 @@ fn evalExprSuffix(
                     return vm.err.set(.{ .not_implemented = "calling functions with parameters" });
                 }
 
-                _ = try vm.evalBlock(signature.body_start);
+                _ = try vm.evalBlock(signature.body.text_source);
                 if (signature.return_type) |return_type| {
                     _ = return_type;
                     return vm.err.set(.{ .not_implemented = "function calls with return types" });
@@ -379,26 +390,8 @@ fn evalExprSuffix(
                     std.debug.assert(mem_before_args.eql(vm.mem.top()));
                 }
                 return offset;
-                // } else if (expr_type == .assembly_field) {
-                //     // MonoClass* klass = mono_class_from_name(image, "System", "String");
-                //     // Create an instance
-                //     // MonoObject* obj = mono_object_new(domain, klass);
-                //     // Get method info
-                //     // MonoMethod* method = mono_class_get_method_from_name(klass, "MethodName", param_count);
-                //     // Get properties
-                //     // MonoProperty* prop = mono_class_get_property_from_name(klass, "PropertyName");
-                //     // Get fields
-                //     // MonoClassField* field = mono_class_get_field_from_name(klass, "FieldName");
-                //     //
-                //     // Get the Console class
-                //     // MonoClass* console_class = mono_class_from_name(corlib, "System", "Console");
-                //     // Get the WriteLine method - specify parameter count
-                //     // For WriteLine(string), use 1 parameter
-                //     // MonoMethod* writeline = mono_class_get_method_from_name(console_class, "WriteLine", 1);
-                //     // Prepare the argument
-                //     // MonoString* msg = mono_string_new(domain, "Hello from embedded Mono!");
-
-                //     return vm.err.set(.{ .not_implemented = "call an assembly field" });
+            } else if (expr_type == .method) {
+                return vm.err.set(.{ .not_implemented = "calling .NET methods" });
             } else return vm.err.set(.{ .called_non_function = .{
                 .start = expr_first_token.start,
                 .unexpected_type = expr_type,
@@ -412,22 +405,29 @@ fn pushValueFromAddr(vm: *Vm, src_addr: Memory.Addr) error{Vm}!void {
     const value_type, const value_addr = vm.readValue(Type, src_addr);
     (try vm.push(Type)).* = value_type;
     switch (value_type) {
-        // .type => @panic("todo"),
+        .integer => {
+            const value_ptr = vm.mem.toPointer(i64, value_addr);
+            (try vm.push(i64)).* = value_ptr.*;
+        },
         .string_literal => {
-            const token_start = vm.mem.toPointer(usize, value_addr).*;
-            (try vm.push(usize)).* = token_start;
+            const token_start_ptr = vm.mem.toPointer(usize, value_addr);
+            (try vm.push(usize)).* = token_start_ptr.*;
         },
         .function => {
-            const signature_addr = vm.mem.toPointer(Memory.Addr, value_addr);
-            (try vm.push(Memory.Addr)).* = signature_addr.*;
+            const signature_addr_ptr = vm.mem.toPointer(Memory.Addr, value_addr);
+            (try vm.push(Memory.Addr)).* = signature_addr_ptr.*;
         },
         .assembly => {
-            const assembly = vm.mem.toPointer(*mono.Assembly, value_addr);
-            (try vm.push(*mono.Assembly)).* = assembly.*;
+            const assembly_ptr = vm.mem.toPointer(*mono.Assembly, value_addr);
+            (try vm.push(*mono.Assembly)).* = assembly_ptr.*;
         },
         .class => {
-            const class = vm.mem.toPointer(*mono.Class, value_addr);
-            (try vm.push(*mono.Class)).* = class.*;
+            const class_ptr = vm.mem.toPointer(*mono.Class, value_addr);
+            (try vm.push(*mono.Class)).* = class_ptr.*;
+        },
+        .method => {
+            const method_ptr = vm.mem.toPointer(*mono.Method, value_addr);
+            (try vm.push(*mono.Method)).* = method_ptr.*;
         },
     }
 }
@@ -456,12 +456,16 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
             return args_end;
         },
-        // .period => {
-        //     const second_token = lex(vm.text, first_token.end);
-        //     if (second_token.tag != .identifier) return null;
-
-        //     @panic("todo");
-        // },
+        .number_literal => {
+            const str = vm.text[first_token.start..first_token.end];
+            const value = std.fmt.parseInt(i64, str, 10) catch |err| switch (err) {
+                error.Overflow => return vm.err.set(.{ .num_literal_overflow = first_token.extent() }),
+                error.InvalidCharacter => unreachable,
+            };
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = value;
+            return first_token.end;
+        },
         else => null,
     };
 }
@@ -560,10 +564,6 @@ fn evalBuiltin(
     args_addr: Memory.Addr,
 ) error{Vm}!void {
     _ = builtin_extent;
-    // const arg_count = vm.stack.items.len - stack_before;
-    // if (arg_count != builtin.argCount()) return vm.err.set(.{
-    //     .builtin_arg_count = .{ .builtin_extent = builtin_extent, .arg_count = arg_count },
-    // });
     switch (builtin) {
         .@"@Nothing" => {},
         .@"@LogAssemblies" => {
@@ -578,6 +578,7 @@ fn evalBuiltin(
             const token_start, const end_addr = vm.readValue(usize, token_start_addr);
             std.debug.assert(vm.text[token_start] == '"');
             std.debug.assert(end_addr.eql(vm.mem.top()));
+            _ = vm.mem.discardFrom(args_addr);
             const token = lex(vm.text, token_start);
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
@@ -589,7 +590,6 @@ fn evalBuiltin(
                 .match = null,
             };
             vm.mono_funcs.assembly_foreach(&findAssembly, &context);
-            _ = vm.mem.discardFrom(args_addr);
             const match = context.match orelse return vm.err.set(
                 .{ .assembly_not_found = token.extent() },
             );
@@ -621,41 +621,101 @@ fn evalBuiltin(
             std.debug.assert(vm.text[namespace_token.end - 1] == '"');
             std.debug.assert(vm.text[name_token.end - 1] == '"');
 
-            const namespace_slice = vm.text[namespace_token_start + 1 .. namespace_token.end - 1];
-            const name_slice = vm.text[name_token_start + 1 .. name_token.end - 1];
+            const namespace = try vm.idLiteral(namespace_token.extent());
+            const name = try vm.idLiteral(name_token.extent());
 
             const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
                 "mono_assembly_get_image returned null",
             );
-            // vm.mono_funcs.class_from_name(
-
-            var namespace_buf: [dotnet_max_id + 1]u8 = undefined;
-            var name_buf: [dotnet_max_id + 1]u8 = undefined;
-            if (namespace_slice.len > dotnet_max_id) return vm.err.set(.{ .namespace_too_big = namespace_token });
-            if (name_slice.len > dotnet_max_id) return vm.err.set(.{ .class_name_too_big = name_token });
-
-            @memcpy(namespace_buf[0..namespace_slice.len], namespace_slice);
-            @memcpy(name_buf[0..name_slice.len], name_slice);
-
-            namespace_buf[namespace_slice.len] = 0;
-            name_buf[name_slice.len] = 0;
-
-            const namespace: [:0]const u8 = namespace_buf[0..namespace_slice.len :0];
-            const name: [:0]const u8 = name_buf[0..name_slice.len :0];
-
             const class = vm.mono_funcs.class_from_name(
                 image,
-                namespace,
-                name,
+                namespace.slice(),
+                name.slice(),
             ) orelse return vm.err.set(.{ .missing_class = .{
                 .assembly = assembly,
                 .namespace = namespace_token.extent(),
                 .name = name_token.extent(),
             } });
             (try vm.push(Type)).* = .class;
-            (try vm.push(*mono.Class)).* = class;
+            (try vm.push(*const mono.Class)).* = class;
+        },
+        .@"@Method" => {
+            const class_type, const class_addr = vm.readValue(Type, args_addr);
+            std.debug.assert(class_type == .class);
+            const class, const name_type_addr = vm.readValue(*mono.Class, class_addr);
+
+            const name_type, const name_token_addr = vm.readValue(Type, name_type_addr);
+            std.debug.assert(name_type == .string_literal);
+            const name_token_start, const param_count_type_addr = vm.readValue(usize, name_token_addr);
+            std.debug.assert(vm.text[name_token_start] == '"');
+
+            const param_count_type, const param_count_token_addr = vm.readValue(Type, param_count_type_addr);
+            std.debug.assert(param_count_type == .integer);
+            const param_count, const end_addr = vm.readValue(i64, param_count_token_addr);
+
+            std.debug.assert(end_addr.eql(vm.mem.top()));
+            _ = vm.mem.discardFrom(args_addr);
+
+            const name_token = lex(vm.text, name_token_start);
+            std.debug.assert(name_token.tag == .string_literal);
+            std.debug.assert(vm.text[name_token.end - 1] == '"');
+
+            const name = try vm.idLiteral(name_token.extent());
+
+            const param_count_cint: c_int = std.math.cast(c_int, param_count) orelse return vm.err.set(.{ .missing_method = .{
+                .class = class,
+                .name = name_token.extent(),
+                .param_count = param_count,
+            } });
+
+            const method = vm.mono_funcs.class_get_method_from_name(
+                class,
+                name.slice(),
+                param_count_cint,
+            ) orelse return vm.err.set(.{ .missing_method = .{
+                .class = class,
+                .name = name_token.extent(),
+                .param_count = param_count_cint,
+            } });
+
+            const method_sig = vm.mono_funcs.method_signature(method) orelse @panic("method has no signature?");
+
+            var iterator: ?*anyopaque = null;
+            for (0..@intCast(param_count_cint)) |param_index| {
+                const param_type = vm.mono_funcs.signature_get_params(
+                    method_sig,
+                    &iterator,
+                ) orelse std.debug.panic(
+                    "mono_signature_get_params with index {} returned null even though there are {} parameters",
+                    .{ param_index, param_count_cint },
+                );
+                _ = param_type;
+                return vm.err.set(.{ .not_implemented = "methods with params" });
+            }
+
+            // push the method signature first
+            // const signature_addr = vm.mem.top();
+            // const signature: *FunctionSignature = try vm.push(MethodSignature);
+            // signature.* = .{
+            //     .return_type = null,
+            //     ~~
+
+            // };
+            // // ~~~
+
+            (try vm.push(Type)).* = .method;
+            (try vm.push(*const mono.Method)).* = method;
         },
     }
+}
+
+fn idLiteral(vm: *Vm, extent: Extent) error{Vm}!IdCstring {
+    const len = extent.end - extent.start - 2;
+    if (len > IdCstring.max) return vm.err.set(.{ .id_string_literal_too_big = extent });
+    var result: IdCstring = .{ .buf = undefined, .len = @intCast(len) };
+    @memcpy(result.buf[0..len], vm.text[extent.start + 1 .. extent.end - 1]);
+    result.buf[len] = 0;
+    return result;
 }
 
 fn eat(text: []const u8, err: *Error) VmEat {
@@ -859,12 +919,14 @@ const Builtin = enum {
     @"@LogAssemblies",
     @"@Assembly",
     @"@Class",
+    @"@Method",
     pub fn params(builtin: Builtin) []const Type {
         return switch (builtin) {
             .@"@Nothing" => &.{},
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.string_literal},
             .@"@Class" => &.{ .assembly, .string_literal, .string_literal },
+            .@"@Method" => &.{ .class, .string_literal, .integer },
         };
     }
     pub fn paramCount(builtin: Builtin) u8 {
@@ -878,6 +940,7 @@ pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
+    .{ "@Method", .@"@Method" },
 });
 // pub const builtin_symbols = std.StaticStringMap(Value).initComptime(.{
 //     // .{ "void", .{ .type =  },
@@ -977,7 +1040,7 @@ const Token = struct {
         // angle_bracket_angle_bracket_right,
         // angle_bracket_angle_bracket_right_equal,
         // tilde,
-        // number_literal,
+        number_literal,
         // doc_comment,
         // container_doc_comment,
         keyword_fn,
@@ -1051,6 +1114,7 @@ const TokenFmt = struct {
             .period => try writer.writeAll("a period '.'"),
             .slash => try writer.writeAll("a slash '/'"),
             .comma => try writer.writeAll("a comma ','"),
+            .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
         }
     }
@@ -1065,6 +1129,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
         string_literal: usize,
         slash: usize,
         line_comment,
+        int: usize,
     };
 
     var index = lex_start;
@@ -1081,6 +1146,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
             .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
             .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
             .slash => |start| .{ .tag = .slash, .start = start, .end = index },
+            .int => |start| .{ .tag = .number_literal, .start = start, .end = index },
         };
         switch (state) {
             .start => {
@@ -1142,11 +1208,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         index += 1;
                     },
                     // '&' => continue :state .ampersand,
-                    // '0'...'9' => {
-                    //     result.tag = .number_literal;
-                    //     self.index += 1;
-                    //     continue :state .int;
-                    // },
+                    '0'...'9' => {
+                        state = .{ .int = index };
+                        index += 1;
+                    },
                     else => return .{ .tag = .invalid, .start = index, .end = index + 1 },
                 }
             },
@@ -1201,6 +1266,12 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     index += 1;
                 },
                 else => index += 1,
+            },
+            .int => |start| switch (text[index]) {
+                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
+                    index += 1;
+                },
+                else => return .{ .tag = .number_literal, .start = start, .end = index },
             },
         }
     }
@@ -2010,6 +2081,10 @@ const ErrorFmt = struct {
                     f.text[token.start..token.end],
                 },
             ),
+            .num_literal_overflow => |e| try writer.print(
+                "{d}: integer literal '{s}' doesn't fit in an i64",
+                .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
+            ),
             .called_non_function => |e| if (e.unexpected_type) |t| try writer.print(
                 "{d}: can't call {s}",
                 .{ getLineNum(f.text, e.start), t.what() },
@@ -2085,30 +2160,29 @@ const ErrorFmt = struct {
                     f.text[extent.start..extent.end],
                 },
             ),
-            .namespace_too_big => |token| try writer.print(
-                "{d}: namespace {s} is too big ({} bytes but max is {})",
+            .id_string_literal_too_big => |token| try writer.print(
+                "{d}: id {s} is too big ({} bytes but max is {})",
                 .{
                     getLineNum(f.text, token.start),
                     f.text[token.start..token.end],
                     token.end - token.start - 2,
-                    dotnet_max_id,
-                },
-            ),
-            .class_name_too_big => |token| try writer.print(
-                "{d}: class name {s} is too big ({} bytes but max is {})",
-                .{
-                    getLineNum(f.text, token.start),
-                    f.text[token.start..token.end],
-                    token.end - token.start - 2,
-                    dotnet_max_id,
+                    IdCstring.max,
                 },
             ),
             .missing_class => |m| try writer.print(
-                "{d}: this assembly does not have a class with namespace {s} and name {s}",
+                "{d}: this assembly does not have a class named '{s}' in namespace {s}",
                 .{
                     getLineNum(f.text, m.namespace.start),
-                    f.text[m.namespace.start..m.namespace.end],
                     f.text[m.name.start..m.name.end],
+                    f.text[m.namespace.start..m.namespace.end],
+                },
+            ),
+            .missing_method => |m| try writer.print(
+                "{d}: method {s} with {} params does not exist in this class",
+                .{
+                    getLineNum(f.text, m.name.start),
+                    f.text[m.name.start..m.name.end],
+                    m.param_count,
                 },
             ),
             .oom => try writer.writeAll("out of memory"),
@@ -2116,72 +2190,12 @@ const ErrorFmt = struct {
     }
 };
 
-const mono_test_funcs: mono.Funcs = .{
-    .get_root_domain = test_get_root_domain,
-    .thread_attach = test_thread_attach,
-    .assembly_foreach = test_assembly_foreach,
-    .assembly_get_name = test_assembly_get_name,
-    .assembly_get_image = test_assembly_get_image,
-    .assembly_name_get_name = test_assembly_name_get_name,
-    .class_from_name = test_class_from_name,
-};
-fn test_get_root_domain() callconv(.c) ?*mono.Domain {
-    return null;
-}
-fn test_thread_attach(_: ?*mono.Domain) callconv(.c) ?*mono.Thread {
-    return null;
-}
-const TestAssembly = struct {
-    name: TestAssemblyName,
-    image: TestImage = .{},
-};
-const TestImage = struct {
-    placeholder: i32 = 0,
-};
-const TestAssemblyName = struct {
-    cstr: [:0]const u8,
-};
-var mscorlib: TestAssembly = .{ .name = .{ .cstr = "mscorlib" } };
-var example_assembly: TestAssembly = .{ .name = .{ .cstr = "ExampleAssembly" } };
-const ConsoleClass = struct {
-    placeholder: i32 = 0,
-};
-var console_class: ConsoleClass = .{};
-fn test_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
-    func(&mscorlib, user_data);
-    func(&example_assembly, user_data);
-}
-fn test_assembly_get_name(assembly: *mono.Assembly) callconv(.c) ?*mono.AssemblyName {
-    return @ptrCast(&@as(*TestAssembly, @ptrCast(@alignCast(assembly))).name);
-}
-fn test_assembly_get_image(assembly: *mono.Assembly) callconv(.c) ?*mono.Image {
-    return @ptrCast(&@as(*TestAssembly, @ptrCast(@alignCast(assembly))).image);
-}
-fn test_assembly_name_get_name(name: *mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
-    return @as(*TestAssemblyName, @ptrCast(@alignCast(name))).cstr.ptr;
-}
-fn test_class_from_name(
-    image_opaque: *mono.Image,
-    namespace_ptr: [*:0]const u8,
-    name_ptr: [*:0]const u8,
-) callconv(.c) ?*mono.Class {
-    const image: *TestImage = @ptrCast(@alignCast(image_opaque));
-    const namespace = std.mem.span(namespace_ptr);
-    const name = std.mem.span(name_ptr);
-    if (image == &mscorlib.image) {
-        if (std.mem.eql(u8, namespace, "System")) {
-            if (std.mem.eql(u8, name, "Console")) return @ptrCast(&console_class);
-        }
-    }
-    return null;
-}
-
 fn testBadCode(text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     var vm: Vm = .{
-        .mono_funcs = &mono_test_funcs,
+        .mono_funcs = &monomock.funcs,
         .mono_domain = undefined,
         .err = undefined,
         .text = text,
@@ -2219,16 +2233,24 @@ test "bad code" {
     try testBadCode("@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
     try testBadCode(
-        "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (dotnet_max_id + 1)) ++ "\")",
-        "1: class name \"" ++ ("a" ** (dotnet_max_id + 1)) ++ "\" is too big (1024 bytes but max is 1023)",
+        "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (IdCstring.max + 1)) ++ "\")",
+        "1: id \"" ++ ("a" ** (IdCstring.max + 1)) ++ "\" is too big (1024 bytes but max is 1023)",
     );
     try testBadCode(
         "@Class(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
-        "1: this assembly does not have a class with namespace \"DoesNot\" and name \"Exist\"",
+        "1: this assembly does not have a class named '\"Exist\"' in namespace \"DoesNot\"",
     );
+    try testBadCode("999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
+    // try testBadCode("-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
     // try testBadCode("@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
+
+    try testBadCode(
+        \\mscorlib = @Assembly("mscorlib")
+        \\console = @Class(mscorlib, "System", "Console")
+        \\@Method(console, "WriteLine", 9223372036854775807)
+    , "3: method \"WriteLine\" with 9223372036854775807 params does not exist in this class");
 
     // try testBadCode("fn foo(){}fn foo(){}", "");
     // try testBadCode("fn void foo(){} fn void foo(){}", "");
@@ -2240,7 +2262,7 @@ fn testCode(text: []const u8) !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     var vm: Vm = .{
-        .mono_funcs = &mono_test_funcs,
+        .mono_funcs = &monomock.funcs,
         .mono_domain = undefined,
         .err = undefined,
         .text = text,
@@ -2279,10 +2301,13 @@ test {
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\console = @Class(mscorlib, "System", "Console")
-        \\//m.System.Console.WriteLine()
+        \\writeline = @Method(console, "WriteLine", 0)
+        \\writeline
+        \\//console.WriteLine()
     );
 }
 
 const std = @import("std");
 const mono = @import("mono.zig");
+const monomock = @import("monomock.zig");
 const Memory = @import("Memory.zig");

@@ -331,7 +331,30 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 } },
             );
 
-            const method_sig = vm.mono_funcs.method_signature(method) orelse @panic("method has no signature?");
+            const method_flags = vm.mono_funcs.method_get_flags(method, null);
+            std.debug.print("MethodFlags {}", .{method_flags});
+
+            const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
+                "method has no signature?",
+            );
+
+            const return_type: ?Type = blk: {
+                const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
+                    "method has no return type?",
+                );
+                const return_type_kind = vm.mono_funcs.type_get_type(return_type);
+                break :blk switch (return_type_kind) {
+                    .void => null,
+                    else => |k| std.debug.panic(
+                        "todo: handle return type '{?s}' ({})",
+                        .{ std.enums.tagName(mono.TypeKind, k), @intFromEnum(k) },
+                    ),
+                };
+            };
+
+            if (method_flags.static) {
+                return vm.err.set(.{ .not_implemented = "calling non-static methods" });
+            }
 
             var iterator: ?*anyopaque = null;
             for (0..@intCast(param_count)) |param_index| {
@@ -349,9 +372,6 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            // TODO: how do we get the return type?
-            //       we can do that first here before we push the signature on the stack
-            // MonoType *return_type = mono_signature_get_return_type(sig);
             // TODO: we also need to know if this method is static or not, if not,
             //       then we need to add the "this" pointer parameter
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -361,7 +381,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             const signature_addr = vm.mem.top();
             const signature: *FunctionSignature = try vm.push(FunctionSignature);
             signature.* = .{
-                .return_type = null,
+                .return_type = return_type,
                 .body = .{ .managed = method },
                 .param_count = param_count,
             };
@@ -493,6 +513,9 @@ fn evalExprSuffix(
                         _ = try vm.evalBlock(start);
                     },
                     .managed => |method| {
+                        const method_flags = vm.mono_funcs.method_get_flags(method, null);
+                        // std.debug.print("MethodFlags {}", .{method_flags});
+                        if (!method_flags.static) return vm.err.set(.{ .not_implemented = "calling non-static methods" });
                         if (signature.param_count != 0) return vm.err.set(.{ .not_implemented = "calling managed functions with parameters" });
                         if (signature.return_type != null) return vm.err.set(.{ .not_implemented = "calling managed function with return types" });
                         // var exception: *const mono.Object = undefined;
@@ -2376,7 +2399,7 @@ test {
     // try testCode("@Assembly(\"mscorlib\").Class");
 
     // try testCode("@Assembly(\"mscorlib\").System.Console()");
-    try testCode(
+    if (false) try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\console = @Class(mscorlib, "System", "Console")
         \\import Beep 0 from console

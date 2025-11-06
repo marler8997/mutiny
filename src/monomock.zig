@@ -7,8 +7,11 @@ pub const funcs: mono.Funcs = .{
     .assembly_name_get_name = test_assembly_name_get_name,
     .class_from_name = test_class_from_name,
     .class_get_method_from_name = test_class_get_method_from_name,
+    .method_get_flags = test_method_get_flags,
     .method_signature = test_method_signature,
+    .signature_get_return_type = test_signature_get_return_type,
     .signature_get_params = test_signature_get_params,
+    .type_get_type = test_type_get_type,
     .runtime_invoke = test_runtime_invoke,
 };
 fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
@@ -71,6 +74,7 @@ const TestMethod = struct {
     }
 };
 const TestMethodSignature = struct {
+    return_type: TestType,
     param_count: c_int,
     pub fn fromMono(sig: *const mono.MethodSignature) *const TestMethodSignature {
         return @ptrCast(@alignCast(sig));
@@ -79,14 +83,23 @@ const TestMethodSignature = struct {
         return @ptrCast(sig);
     }
 };
+const TestType = struct {
+    kind: mono.TypeKind,
+    pub fn fromMono(t: *const mono.Type) *const TestType {
+        return @ptrCast(@alignCast(t));
+    }
+    pub fn toMono(t: *const TestType) *const mono.Type {
+        return @ptrCast(t);
+    }
+};
 
 const assemblies = [_]TestAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]TestClass{
                 .{ .name = "Console", .methods = &[_]TestMethod{
-                    .{ .name = "WriteLine", .sig = .{ .param_count = 0 } },
-                    .{ .name = "Beep", .sig = .{ .param_count = 0 } },
+                    .{ .name = "WriteLine", .sig = .{ .return_type = .{ .kind = .void }, .param_count = 0 } },
+                    .{ .name = "Beep", .sig = .{ .return_type = .{ .kind = .void }, .param_count = 0 } },
                 } },
             } },
         },
@@ -95,7 +108,10 @@ const assemblies = [_]TestAssembly{
         .namespaces = &[_]Namespace{
             .{ .prefix = "ExNs", .classes = &[_]TestClass{
                 .{ .name = "ExClass", .methods = &[_]TestMethod{
-                    .{ .name = "ExMethod", .sig = .{ .param_count = 0 } },
+                    .{ .name = "ExMethod", .sig = .{
+                        .return_type = .{ .kind = .void },
+                        .param_count = 0,
+                    } },
                 } },
             } },
         },
@@ -151,9 +167,25 @@ fn test_class_get_method_from_name(
     return null;
 }
 
+fn test_method_get_flags(
+    method_opaque: *const mono.Method,
+    iflags: ?*mono.MethodFlags,
+) callconv(.c) mono.MethodFlags {
+    const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
+    _ = method;
+    _ = iflags;
+    return .{ .protection = .public, .static = true };
+}
+
 fn test_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
     const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
     return method.sig.toMono();
+}
+
+fn test_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
+    const sig: *const TestMethodSignature = .fromMono(s);
+    _ = sig;
+    @panic("todo");
 }
 
 fn test_signature_get_params(
@@ -164,6 +196,11 @@ fn test_signature_get_params(
     if (sig.param_count > 0) @panic("todo");
     _ = iter;
     return null;
+}
+
+fn test_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
+    const t: *const TestType = .fromMono(type_opaque);
+    return t.kind;
 }
 
 fn test_runtime_invoke(

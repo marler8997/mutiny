@@ -2377,7 +2377,7 @@ test {
         \\mscorlib = @Assembly("mscorlib")
         \\console = @Class(mscorlib, "System", "Console")
         \\import Beep 0 from console
-        \\Beep()
+        \\Beep
         \\//import WriteLine 0 from console
         \\//WriteLine()
     );

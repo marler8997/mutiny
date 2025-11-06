@@ -9,9 +9,11 @@ pub const funcs: mono.Funcs = .{
     .class_get_method_from_name = test_class_get_method_from_name,
     .method_get_flags = test_method_get_flags,
     .method_signature = test_method_signature,
+    .method_get_class = test_method_get_class,
     .signature_get_return_type = test_signature_get_return_type,
     .signature_get_params = test_signature_get_params,
     .type_get_type = test_type_get_type,
+    .object_new = test_object_new,
     .runtime_invoke = test_runtime_invoke,
 };
 fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
@@ -194,6 +196,15 @@ fn test_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const
     return method.sig.toMono();
 }
 
+fn test_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
+    const method: *const TestMethod = @ptrCast(@alignCast(method_opaque));
+    for (assemblies) |assembly| {
+        _ = assembly;
+        _ = method;
+    }
+    @panic("todo");
+}
+
 fn test_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
     const sig: *const TestMethodSignature = .fromMono(s);
     return sig.return_type.toMono();
@@ -212,6 +223,15 @@ fn test_signature_get_params(
 fn test_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
     const t: *const TestType = .fromMono(type_opaque);
     return t.kind;
+}
+
+fn test_object_new(
+    domain: *const mono.Domain,
+    class: *const mono.Class,
+) callconv(.c) ?*const mono.Object {
+    _ = domain;
+    _ = class;
+    return null;
 }
 
 fn test_runtime_invoke(

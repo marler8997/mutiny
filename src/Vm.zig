@@ -18,8 +18,9 @@ const Symbol = struct {
 const FunctionSignature = struct {
     return_type: ?Type,
     body: union(enum) {
-        managed: *const mono.Method,
         text_source: usize,
+        managed_ctor: *const mono.Method,
+        managed_method: *const mono.Method,
     },
     param_count: u16,
 };
@@ -261,7 +262,8 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             );
 
             const method_flags = vm.mono_funcs.method_get_flags(method, null);
-            std.debug.print("MethodFlags {}", .{method_flags});
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            std.debug.print("method '{s}' flags={}\n", .{ name, method_flags });
 
             const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
                 "method has no signature?",
@@ -312,7 +314,10 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             const signature: *FunctionSignature = try vm.push(FunctionSignature);
             signature.* = .{
                 .return_type = return_type,
-                .body = .{ .managed = method },
+                .body = switch (name_kind) {
+                    .id => .{ .managed_method = method },
+                    .new => .{ .managed_ctor = method },
+                },
                 .param_count = param_count,
             };
 
@@ -442,7 +447,22 @@ fn evalExprSuffix(
                     .text_source => |start| {
                         _ = try vm.evalBlock(start);
                     },
-                    .managed => |method| {
+                    .managed_ctor => |ctor| {
+                        const class = vm.mono_funcs.method_get_class(ctor) orelse unreachable;
+                        const obj = vm.mono_funcs.object_new(
+                            vm.mono_domain,
+                            class,
+                        ) orelse return vm.err.set(
+                            .{ .new_failed = .{ .pos = suffix_op_token.start, .class = class } },
+                        );
+                        _ = obj;
+                        // TODO: we'll need to allocate a gchandle for this
+                        //       since we're going to store it in our allocator's
+                        //       memory which may not be inclueded in gc scans
+
+                        return vm.err.set(.{ .not_implemented = "calling ctors" });
+                    },
+                    .managed_method => |method| {
                         const method_flags = vm.mono_funcs.method_get_flags(method, null);
                         // std.debug.print("MethodFlags {}", .{method_flags});
                         if (!method_flags.static) return vm.err.set(.{ .not_implemented = "calling non-static methods" });
@@ -2177,10 +2197,14 @@ pub const Error = union(enum) {
         name: Extent,
     },
     missing_method: struct {
-        class: *mono.Class,
+        class: *const mono.Class,
         name_kind: MethodNameKind,
         name_extent: Extent,
         param_count: i64,
+    },
+    new_failed: struct {
+        pos: usize,
+        class: *const mono.Class,
     },
     oom,
     pub fn set(err: *Error, value: Error) error{Vm} {
@@ -2356,6 +2380,9 @@ const ErrorFmt = struct {
                     },
                 ),
             },
+            .new_failed => |n| try writer.print("{d}: new failed", .{
+                getLineNum(f.text, n.pos),
+            }),
             .oom => try writer.writeAll("out of memory"),
         }
     }
@@ -2481,8 +2508,8 @@ test {
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\Object = @Class(mscorlib, "System", "Object")
-        \\import new 0 from Object
-        \\example_obj = new Object()
+        \\//import new 0 from Object
+        \\//example_obj = new Object()
         \\
     );
 

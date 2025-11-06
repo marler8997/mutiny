@@ -26,12 +26,14 @@ pub const Funcs = struct {
 
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
     method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
+    method_get_class: *const fn (*const Method) callconv(.c) ?*const Class,
 
     signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
     signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
 
     type_get_type: *const fn (*const Type) callconv(.c) TypeKind,
 
+    object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
     runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?**const Object) callconv(.c) ?*const Object,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
@@ -46,9 +48,11 @@ pub const Funcs = struct {
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
             .method_get_flags = try monoload.get(mod, .method_get_flags, proc_ref),
+            .method_get_class = try monoload.get(mod, .method_get_class, proc_ref),
             .signature_get_return_type = try monoload.get(mod, .signature_get_return_type, proc_ref),
             .signature_get_params = try monoload.get(mod, .signature_get_params, proc_ref),
             .type_get_type = try monoload.get(mod, .type_get_type, proc_ref),
+            .object_new = try monoload.get(mod, .object_new, proc_ref),
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
         };
     }

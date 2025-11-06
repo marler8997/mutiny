@@ -9,6 +9,7 @@ pub const funcs: mono.Funcs = .{
     .class_get_method_from_name = test_class_get_method_from_name,
     .method_signature = test_method_signature,
     .signature_get_params = test_signature_get_params,
+    .runtime_invoke = test_runtime_invoke,
 };
 fn test_get_root_domain() callconv(.c) ?*const mono.Domain {
     return null;
@@ -85,6 +86,7 @@ const assemblies = [_]TestAssembly{
             .{ .prefix = "System", .classes = &[_]TestClass{
                 .{ .name = "Console", .methods = &[_]TestMethod{
                     .{ .name = "WriteLine", .sig = .{ .param_count = 0 } },
+                    .{ .name = "Beep", .sig = .{ .param_count = 0 } },
                 } },
             } },
         },
@@ -161,6 +163,20 @@ fn test_signature_get_params(
     const sig: *const TestMethodSignature = .fromMono(s);
     if (sig.param_count > 0) @panic("todo");
     _ = iter;
+    return null;
+}
+
+fn test_runtime_invoke(
+    method_opaque: *const mono.Method,
+    obj: ?*anyopaque,
+    params: ?**anyopaque,
+    exception: **const mono.Object,
+) callconv(.c) ?*const mono.Object {
+    const method: *const TestMethod = .fromMono(method_opaque);
+    _ = obj;
+    _ = params;
+    _ = exception;
+    std.debug.print("monomock: TestMethod '{s}' has been called\n", .{method.name});
     return null;
 }
 

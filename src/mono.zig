@@ -7,6 +7,7 @@ pub const Class = opaque {};
 pub const Method = opaque {};
 pub const MethodSignature = opaque {};
 pub const Type = opaque {};
+pub const Object = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
 
@@ -26,6 +27,8 @@ pub const Funcs = struct {
     method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
 
     signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
+
+    runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: **const Object) callconv(.c) ?*const Object,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),
@@ -39,6 +42,7 @@ pub const Funcs = struct {
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
             .signature_get_params = try monoload.get(mod, .signature_get_params, proc_ref),
+            .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
         };
     }
 };

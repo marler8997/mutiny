@@ -2,6 +2,7 @@ Root <- Statement*
 Statement
    <- IfStatement
     / fn IDENTIFIER FnCallArguments Block
+    / import IDENTIFIER INTEGER from Expr
     / IDENTIFIER EQUAL Expr
     / Expr (EQUAL Expr)?
 Expr  <- Expr2 (KEYWORD_or Expr2)*

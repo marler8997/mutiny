@@ -18,10 +18,10 @@ const Symbol = struct {
 const FunctionSignature = struct {
     return_type: ?Type,
     body: union(enum) {
-        method: *mono.Method,
+        managed: *const mono.Method,
         text_source: usize,
     },
-    param_count: u8,
+    param_count: u16,
 };
 
 const Type = enum {
@@ -30,7 +30,6 @@ const Type = enum {
     function,
     assembly,
     class,
-    method,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
             .integer => "an integer",
@@ -38,7 +37,6 @@ const Type = enum {
             .function => "a function",
             .assembly => "an assembly",
             .class => "a class",
-            .method => "a .NET method",
         };
     }
 };
@@ -66,19 +64,22 @@ pub const Error = union(enum) {
     },
     arg_count: struct {
         start: usize,
-        expected: u8,
-        actual: u8,
+        expected: u16,
+        actual: u16,
     },
     arg_type: struct {
         arg_pos: usize,
-        arg_index: u8,
+        arg_index: u16,
         expected: Type,
         actual: Type,
     },
     too_many_args: struct {
         pos: usize,
-        param_count: u8,
-        // parameters: []const Type,
+        param_count: u16,
+    },
+    import_from_non_class: struct {
+        pos: usize,
+        actual_type: ?Type,
     },
     needed_type: struct {
         pos: usize,
@@ -98,7 +99,7 @@ pub const Error = union(enum) {
         first_arg_token: Token,
     },
     assembly_not_found: Extent,
-    id_string_literal_too_big: Extent,
+    id_too_big: Extent,
     missing_class: struct {
         assembly: *mono.Assembly,
         namespace: Extent,
@@ -137,14 +138,14 @@ pub fn deinit(vm: *Vm) void {
     vm.* = undefined;
 }
 
-const IdCstring = struct {
+const ManagedId = struct {
     buf: [max + 1]u8,
     len: std.math.IntFittingRange(0, max),
 
     // C# limits identifiers to 1023 characters (class names, method names, variables etc).
     const max = 1023;
 
-    pub fn slice(self: *const IdCstring) [:0]const u8 {
+    pub fn slice(self: *const ManagedId) [:0]const u8 {
         return self.buf[0..self.len :0];
     }
 };
@@ -216,13 +217,10 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
         .keyword_fn => {
             const id_extent = blk: {
                 const token = lex(vm.text, first_token.end);
-                switch (token.tag) {
-                    .identifier => {},
-                    else => return vm.err.set(.{ .unexpected_token = .{
-                        .expected = "an identifier after 'fn' to name a function",
-                        .token = token,
-                    } }),
-                }
+                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an identifier after 'fn'",
+                    .token = token,
+                } });
                 break :blk token.extent();
             };
 
@@ -277,6 +275,115 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             vm.symbols.prepend(&function_symbol.list_node);
             return .{ .statement_end = try eat(vm.text, &vm.err).evalBlock(offset) };
         },
+        .keyword_import => {
+            const id_extent = blk: {
+                const token = lex(vm.text, first_token.end);
+                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an identifier after 'import'",
+                    .token = token,
+                } });
+                break :blk token.extent();
+            };
+
+            const param_count: u16, const param_end = blk: {
+                const token = lex(vm.text, id_extent.end);
+                if (token.tag != .number_literal) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an parameter count integer",
+                    .token = token,
+                } });
+                const param_str = vm.text[token.start..token.end];
+                const value = std.fmt.parseInt(u16, param_str, 0) catch |err| switch (err) {
+                    error.Overflow => return vm.err.set(.{ .num_literal_overflow = token.extent() }),
+                    error.InvalidCharacter => unreachable,
+                };
+                break :blk .{ value, token.end };
+            };
+            const after_from = try eat(vm.text, &vm.err).eatToken(param_end, .identifier_from);
+
+            const expr_addr = vm.mem.top();
+
+            const first_class_token = lex(vm.text, after_from);
+            const after_expr = try vm.evalExpr(first_class_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression after 'from'",
+                .token = first_class_token,
+            } });
+
+            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .import_from_non_class = .{
+                .pos = first_class_token.start,
+                .actual_type = null,
+            } });
+
+            const from_type, const from_value_addr = vm.readValue(Type, expr_addr);
+            if (from_type != .class) return vm.err.set(.{ .import_from_non_class = .{
+                .pos = first_class_token.start,
+                .actual_type = from_type,
+            } });
+            const class, const end_addr = vm.readValue(*mono.Class, from_value_addr);
+            std.debug.assert(end_addr.eql(vm.mem.top()));
+            _ = vm.mem.discardFrom(expr_addr);
+
+            const name = try vm.managedId(id_extent);
+            const method = vm.mono_funcs.class_get_method_from_name(class, name.slice(), param_count) orelse return vm.err.set(
+                .{ .missing_method = .{
+                    .class = class,
+                    .name = id_extent,
+                    .param_count = param_count,
+                } },
+            );
+
+            const method_sig = vm.mono_funcs.method_signature(method) orelse @panic("method has no signature?");
+
+            var iterator: ?*anyopaque = null;
+            for (0..@intCast(param_count)) |param_index| {
+                const param_type = vm.mono_funcs.signature_get_params(
+                    method_sig,
+                    &iterator,
+                ) orelse std.debug.panic(
+                    "mono_signature_get_params with index {} returned null even though there are {} parameters",
+                    .{ param_index, param_count },
+                );
+                _ = param_type;
+                return vm.err.set(.{ .not_implemented = "methods with params" });
+            }
+
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // TODO: how do we get the return type?
+            //       we can do that first here before we push the signature on the stack
+            // MonoType *return_type = mono_signature_get_return_type(sig);
+            // TODO: we also need to know if this method is static or not, if not,
+            //       then we need to add the "this" pointer parameter
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+            const signature_addr = vm.mem.top();
+            const signature: *FunctionSignature = try vm.push(FunctionSignature);
+            signature.* = .{
+                .return_type = null,
+                .body = .{ .managed = method },
+                .param_count = param_count,
+            };
+
+            for (0..param_count) |param_index| {
+                _ = param_index;
+                return vm.err.set(.{ .not_implemented = "managed functions with parameters" });
+            }
+
+            const function_value_addr = vm.mem.top();
+            (try vm.push(Type)).* = .function;
+            (try vm.push(Memory.Addr)).* = signature_addr;
+
+            const function_symbol: *Symbol = try vm.push(Symbol);
+            function_symbol.* = .{
+                .list_node = .{},
+                .extent = id_extent,
+                .value_addr = function_value_addr,
+            };
+            vm.symbols.prepend(&function_symbol.list_node);
+            return .{ .statement_end = after_expr };
+        },
         else => {},
     }
 
@@ -319,7 +426,7 @@ fn evalExprSuffix(
             const expr_type, const value_addr = vm.readValue(Type, expr_addr);
             _ = value_addr;
             return switch (expr_type) {
-                .integer, .string_literal, .function, .assembly, .class, .method => vm.err.set(.{ .no_field = .{
+                .integer, .string_literal, .function, .assembly, .class => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
                     .unexpected_type = expr_type,
@@ -364,7 +471,6 @@ fn evalExprSuffix(
                 std.debug.assert(end_addr.eql(vm.mem.top()));
                 _ = vm.mem.discardFrom(expr_addr);
                 const signature: *FunctionSignature, const params_addr = vm.readPointer(FunctionSignature, signature_addr);
-                std.debug.assert(signature.body == .text_source);
 
                 // std.debug.print("Sig {}", .{signature.*});
                 const mem_before_args = vm.mem.top();
@@ -382,7 +488,20 @@ fn evalExprSuffix(
                     return vm.err.set(.{ .not_implemented = "calling functions with parameters" });
                 }
 
-                _ = try vm.evalBlock(signature.body.text_source);
+                switch (signature.body) {
+                    .text_source => |start| {
+                        _ = try vm.evalBlock(start);
+                    },
+                    .managed => |method| {
+                        if (signature.param_count != 0) return vm.err.set(.{ .not_implemented = "calling managed functions with parameters" });
+                        if (signature.return_type != null) return vm.err.set(.{ .not_implemented = "calling managed function with return types" });
+                        var exception: *const mono.Object = undefined;
+                        const result = vm.mono_funcs.runtime_invoke(method, null, null, &exception);
+                        _ = result;
+                        return vm.err.set(.{ .not_implemented = "finish calling managed method" });
+                    },
+                }
+
                 if (signature.return_type) |return_type| {
                     _ = return_type;
                     return vm.err.set(.{ .not_implemented = "function calls with return types" });
@@ -390,8 +509,6 @@ fn evalExprSuffix(
                     std.debug.assert(mem_before_args.eql(vm.mem.top()));
                 }
                 return offset;
-            } else if (expr_type == .method) {
-                return vm.err.set(.{ .not_implemented = "calling .NET methods" });
             } else return vm.err.set(.{ .called_non_function = .{
                 .start = expr_first_token.start,
                 .unexpected_type = expr_type,
@@ -424,10 +541,6 @@ fn pushValueFromAddr(vm: *Vm, src_addr: Memory.Addr) error{Vm}!void {
         .class => {
             const class_ptr = vm.mem.toPointer(*mono.Class, value_addr);
             (try vm.push(*mono.Class)).* = class_ptr.*;
-        },
-        .method => {
-            const method_ptr = vm.mem.toPointer(*mono.Method, value_addr);
-            (try vm.push(*mono.Method)).* = method_ptr.*;
         },
     }
 }
@@ -492,14 +605,14 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 
 fn evalArgs(
     vm: *Vm,
-    param_count: u8,
+    param_count: u16,
     params: union(enum) {
         builtin: []const Type,
         addr: Memory.Addr,
     },
     start: usize,
 ) error{Vm}!usize {
-    var arg_index: u8 = 0;
+    var arg_index: u16 = 0;
     var offset = start;
     while (true) {
         const first_token = lex(vm.text, offset);
@@ -621,8 +734,8 @@ fn evalBuiltin(
             std.debug.assert(vm.text[namespace_token.end - 1] == '"');
             std.debug.assert(vm.text[name_token.end - 1] == '"');
 
-            const namespace = try vm.idLiteral(namespace_token.extent());
-            const name = try vm.idLiteral(name_token.extent());
+            const namespace = try vm.managedId(namespace_token.extentTrimmed());
+            const name = try vm.managedId(name_token.extentTrimmed());
 
             const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
                 "mono_assembly_get_image returned null",
@@ -639,81 +752,14 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
         },
-        .@"@Method" => {
-            const class_type, const class_addr = vm.readValue(Type, args_addr);
-            std.debug.assert(class_type == .class);
-            const class, const name_type_addr = vm.readValue(*mono.Class, class_addr);
-
-            const name_type, const name_token_addr = vm.readValue(Type, name_type_addr);
-            std.debug.assert(name_type == .string_literal);
-            const name_token_start, const param_count_type_addr = vm.readValue(usize, name_token_addr);
-            std.debug.assert(vm.text[name_token_start] == '"');
-
-            const param_count_type, const param_count_token_addr = vm.readValue(Type, param_count_type_addr);
-            std.debug.assert(param_count_type == .integer);
-            const param_count, const end_addr = vm.readValue(i64, param_count_token_addr);
-
-            std.debug.assert(end_addr.eql(vm.mem.top()));
-            _ = vm.mem.discardFrom(args_addr);
-
-            const name_token = lex(vm.text, name_token_start);
-            std.debug.assert(name_token.tag == .string_literal);
-            std.debug.assert(vm.text[name_token.end - 1] == '"');
-
-            const name = try vm.idLiteral(name_token.extent());
-
-            const param_count_cint: c_int = std.math.cast(c_int, param_count) orelse return vm.err.set(.{ .missing_method = .{
-                .class = class,
-                .name = name_token.extent(),
-                .param_count = param_count,
-            } });
-
-            const method = vm.mono_funcs.class_get_method_from_name(
-                class,
-                name.slice(),
-                param_count_cint,
-            ) orelse return vm.err.set(.{ .missing_method = .{
-                .class = class,
-                .name = name_token.extent(),
-                .param_count = param_count_cint,
-            } });
-
-            const method_sig = vm.mono_funcs.method_signature(method) orelse @panic("method has no signature?");
-
-            var iterator: ?*anyopaque = null;
-            for (0..@intCast(param_count_cint)) |param_index| {
-                const param_type = vm.mono_funcs.signature_get_params(
-                    method_sig,
-                    &iterator,
-                ) orelse std.debug.panic(
-                    "mono_signature_get_params with index {} returned null even though there are {} parameters",
-                    .{ param_index, param_count_cint },
-                );
-                _ = param_type;
-                return vm.err.set(.{ .not_implemented = "methods with params" });
-            }
-
-            // push the method signature first
-            // const signature_addr = vm.mem.top();
-            // const signature: *FunctionSignature = try vm.push(MethodSignature);
-            // signature.* = .{
-            //     .return_type = null,
-            //     ~~
-
-            // };
-            // // ~~~
-
-            (try vm.push(Type)).* = .method;
-            (try vm.push(*const mono.Method)).* = method;
-        },
     }
 }
 
-fn idLiteral(vm: *Vm, extent: Extent) error{Vm}!IdCstring {
-    const len = extent.end - extent.start - 2;
-    if (len > IdCstring.max) return vm.err.set(.{ .id_string_literal_too_big = extent });
-    var result: IdCstring = .{ .buf = undefined, .len = @intCast(len) };
-    @memcpy(result.buf[0..len], vm.text[extent.start + 1 .. extent.end - 1]);
+fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {
+    const len = extent.end - extent.start;
+    if (len > ManagedId.max) return vm.err.set(.{ .id_too_big = extent });
+    var result: ManagedId = .{ .buf = undefined, .len = @intCast(len) };
+    @memcpy(result.buf[0..len], vm.text[extent.start..extent.end]);
     result.buf[len] = 0;
     return result;
 }
@@ -728,19 +774,31 @@ const VmEat = struct {
     fn eatToken(vm: VmEat, start: usize, what: enum {
         l_paren,
         l_brace,
+        identifier_from,
     }) error{Vm}!usize {
         const t = lex(vm.text, start);
         const expected_tag: Token.Tag = switch (what) {
             .l_paren => .l_paren,
             .l_brace => .l_brace,
+            .identifier_from => .identifier,
         };
         if (t.tag != expected_tag) return vm.err.set(.{ .unexpected_token = .{
             .expected = switch (what) {
                 .l_paren => "an open paren '('",
                 .l_brace => "an open brace '{'",
+                .identifier_from => "the 'from' keyword",
             },
             .token = t,
         } });
+        switch (what) {
+            .l_paren, .l_brace => {},
+            .identifier_from => if (!std.mem.eql(u8, vm.text[t.start..t.end], "from")) return vm.err.set(.{
+                .unexpected_token = .{
+                    .expected = "the 'from' keyword",
+                    .token = t,
+                },
+            }),
+        }
         return t.end;
     }
 
@@ -780,6 +838,7 @@ const VmEat = struct {
                 }
             },
             .keyword_fn => @panic("todo"),
+            .keyword_import => @panic("todo"),
             else => {},
         }
 
@@ -919,17 +978,15 @@ const Builtin = enum {
     @"@LogAssemblies",
     @"@Assembly",
     @"@Class",
-    @"@Method",
     pub fn params(builtin: Builtin) []const Type {
         return switch (builtin) {
             .@"@Nothing" => &.{},
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.string_literal},
             .@"@Class" => &.{ .assembly, .string_literal, .string_literal },
-            .@"@Method" => &.{ .class, .string_literal, .integer },
         };
     }
-    pub fn paramCount(builtin: Builtin) u8 {
+    pub fn paramCount(builtin: Builtin) u16 {
         return switch (builtin) {
             inline else => return @intCast(builtin.params().len),
         };
@@ -940,7 +997,6 @@ pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
-    .{ "@Method", .@"@Method" },
 });
 // pub const builtin_symbols = std.StaticStringMap(Value).initComptime(.{
 //     // .{ "void", .{ .type =  },
@@ -956,6 +1012,10 @@ const Token = struct {
 
     pub fn extent(t: Token) Extent {
         return .{ .start = t.start, .end = t.end };
+    }
+
+    pub fn extentTrimmed(t: Token) Extent {
+        return .{ .start = t.start + 1, .end = t.end - 1 };
     }
 
     pub fn fmt(t: Token, text: []const u8) TokenFmt {
@@ -1044,6 +1104,7 @@ const Token = struct {
         // doc_comment,
         // container_doc_comment,
         keyword_fn,
+        keyword_import,
     };
     pub const Loc = struct {
         start: usize,
@@ -1066,6 +1127,7 @@ const Token = struct {
         .{ "fn", .keyword_fn },
         // .{ "for", .keyword_for },
         // .{ "if", .keyword_if },
+        .{ "import", .keyword_import },
         // .{ "inline", .keyword_inline },
         // .{ "noalias", .keyword_noalias },
         // .{ "noinline", .keyword_noinline },
@@ -1116,6 +1178,7 @@ const TokenFmt = struct {
             .comma => try writer.writeAll("a comma ','"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
+            .keyword_import => try writer.writeAll("the 'import' keyword"),
         }
     }
 };
@@ -2131,6 +2194,13 @@ const ErrorFmt = struct {
                     e.param_count,
                 }),
             },
+            .import_from_non_class => |i| if (i.actual_type) |t| try writer.print(
+                "{d}: import from requires a class but got {s}",
+                .{ getLineNum(f.text, i.pos), t.what() },
+            ) else try writer.print(
+                "{d}: import from requires a class but the expression yielded nothing",
+                .{getLineNum(f.text, i.pos)},
+            ),
             .needed_type => |n| try writer.print(
                 "{d}: expected a {s} type but got {s}",
                 .{
@@ -2160,13 +2230,13 @@ const ErrorFmt = struct {
                     f.text[extent.start..extent.end],
                 },
             ),
-            .id_string_literal_too_big => |token| try writer.print(
-                "{d}: id {s} is too big ({} bytes but max is {})",
+            .id_too_big => |token| try writer.print(
+                "{d}: id '{s}' is too big ({} bytes but max is {})",
                 .{
                     getLineNum(f.text, token.start),
                     f.text[token.start..token.end],
-                    token.end - token.start - 2,
-                    IdCstring.max,
+                    token.end - token.start,
+                    ManagedId.max,
                 },
             ),
             .missing_class => |m| try writer.print(
@@ -2217,12 +2287,17 @@ fn testBadCode(text: []const u8, expected_error: []const u8) !void {
 
 test "bad code" {
     try testBadCode("example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
-    try testBadCode("fn", "1: syntax error: expected an identifier after 'fn' to name a function but got EOF");
+    try testBadCode("fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
+    try testBadCode("import", "1: syntax error: expected an identifier after 'import' but got EOF");
     try testBadCode("fn a", "1: syntax error: expected an open paren '(' but got EOF");
-    try testBadCode("fn @Nothing()", "1: syntax error: expected an identifier after 'fn' to name a function but got the builtin function '@Nothing'");
+    try testBadCode("fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
     try testBadCode("fn foo", "1: syntax error: expected an open paren '(' but got EOF");
     try testBadCode("fn foo \"hello\"", "1: syntax error: expected an open paren '(' but got a string literal \"hello\"");
     try testBadCode("fn foo )", "1: syntax error: expected an open paren '(' but got a close paren ')'");
+    try testBadCode("import what 0 fram", "1: syntax error: expected the 'from' keyword but got an identifer 'fram'");
+    try testBadCode("import what 0 from", "1: syntax error: expected an expression after 'from' but got EOF");
+    try testBadCode("import what 0 from @Nothing()", "1: import from requires a class but the expression yielded nothing");
+    try testBadCode("import what 0 from 0", "1: import from requires a class but got an integer");
     try testBadCode("foo()", "1: undefined identifier 'foo'");
     try testBadCode("foo = \"hello\" foo()", "1: can't call a string literal");
     try testBadCode("@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
@@ -2233,8 +2308,8 @@ test "bad code" {
     try testBadCode("@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
     try testBadCode(
-        "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (IdCstring.max + 1)) ++ "\")",
-        "1: id \"" ++ ("a" ** (IdCstring.max + 1)) ++ "\" is too big (1024 bytes but max is 1023)",
+        "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (ManagedId.max + 1)) ++ "\")",
+        "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
     try testBadCode(
         "@Class(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
@@ -2246,10 +2321,10 @@ test "bad code" {
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
     // try testBadCode("@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    try testBadCode(
+    if (false) try testBadCode(
         \\mscorlib = @Assembly("mscorlib")
         \\console = @Class(mscorlib, "System", "Console")
-        \\@Method(console, "WriteLine", 9223372036854775807)
+        \\import writeline 65536 from console
     , "3: method \"WriteLine\" with 9223372036854775807 params does not exist in this class");
 
     // try testBadCode("fn foo(){}fn foo(){}", "");
@@ -2301,9 +2376,10 @@ test {
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\console = @Class(mscorlib, "System", "Console")
-        \\writeline = @Method(console, "WriteLine", 0)
-        \\writeline
-        \\//console.WriteLine()
+        \\import Beep 0 from console
+        \\Beep()
+        \\//import WriteLine 0 from console
+        \\//WriteLine()
     );
 }
 

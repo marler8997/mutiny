@@ -110,6 +110,10 @@ const assemblies = [_]TestAssembly{
                         .return_type = .{ .kind = .void },
                         .param_count = 0,
                     } },
+                    .{ .name = "WriteLine", .sig = .{
+                        .return_type = .{ .kind = .void },
+                        .param_count = 1,
+                    } },
                     .{ .name = "Beep", .sig = .{
                         .return_type = .{ .kind = .void },
                         .param_count = 0,
@@ -241,11 +245,15 @@ fn test_runtime_invoke(
     exception: ?*?*const mono.Object,
 ) callconv(.c) ?*const mono.Object {
     const method: *const TestMethod = .fromMono(method_opaque);
+    // std.debug.print("monomock: TestMethod '{s}' has been called\n", .{method.name});
+    if (method.sig.param_count != 0) @panic("todo: implement params");
     _ = obj;
     _ = params;
     _ = exception;
-    std.debug.print("monomock: TestMethod '{s}' has been called\n", .{method.name});
-    return null;
+    switch (method.sig.return_type.kind) {
+        .void => return null,
+        else => std.debug.panic("todo: implement non-void return type", .{}),
+    }
 }
 
 const std = @import("std");

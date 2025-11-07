@@ -523,7 +523,7 @@ fn evalExprSuffix(
                     params,
                     &maybe_exception,
                 );
-                std.debug.print(
+                if (false) std.debug.print(
                     "Result=0x{x} Exception=0x{x}\n",
                     .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
                 );
@@ -766,7 +766,7 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
 } {
     var arg_index: u16 = 0;
     var text_offset = start;
-    while (true) : (arg_index += 1) {
+    while (true) {
         const first_token = lex(vm.text, text_offset);
         if (first_token.tag == .r_paren) return .{
             .count = arg_index,
@@ -791,42 +791,18 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
             } });
         }
 
-        return vm.err.set(.{ .not_implemented = "here" });
-        //
-        // if (arg_index < param_count) {
-        //     const param_type = blk: switch (params) {
-        //         .builtin => |p| break :blk p[arg_index],
-        //         .addr => {
-        //             const param_type, next_param_addr = vm.readValue(Type, next_param_addr);
-        //             break :blk param_type;
-        //         },
-        //     };
-        //     if (arg_type != param_type) return vm.err.set(.{ .arg_type = .{
-        //         .arg_pos = first_token.start,
-        //         .arg_index = arg_index,
-        //         .expected = param_type,
-        //         .actual = arg_type,
-        //     } });
-        // }
+        arg_index += 1;
 
-        // if (arg_index == std.math.maxInt(u16)) return vm.err.set(.{ .arg_count = .{
-        //     .start = start,
-        //     .expected = param_count,
-        //     .actual = arg_index,
-        // } });
-        // arg_index += 1;
-        // {
-        //     const token = lex(vm.text, text_offset);
-        //     text_offset = token.end;
-        //     switch (token.tag) {
-        //         .r_paren => break,
-        //         .comma => {},
-        //         else => return vm.err.set(.{ .unexpected_token = .{
-        //             .expected = "a ',' or close paren ')'",
-        //             .token = token,
-        //         } }),
-        //     }
-        // }
+        const second_token = lex(vm.text, text_offset);
+        text_offset = second_token.end;
+        switch (second_token.tag) {
+            .r_paren => return .{ .count = arg_index, .end = second_token.end },
+            .comma => {},
+            else => return vm.err.set(.{ .unexpected_token = .{
+                .expected = "a ',' or close paren ')'",
+                .token = second_token,
+            } }),
+        }
     }
 }
 
@@ -2823,9 +2799,10 @@ test {
 
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
-        \\
         \\Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
+        \\Console.WriteLine()
+        \\//Console.WriteLine("Hello")
         \\
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)

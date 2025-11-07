@@ -30,14 +30,18 @@ const Type = enum {
     string_literal,
     function,
     assembly,
+    assembly_field,
     class,
+    object,
     pub fn what(t: Type) []const u8 {
         return switch (t) {
             .integer => "an integer",
             .string_literal => "a string literal",
             .function => "a function",
             .assembly => "an assembly",
+            .assembly_field => "an assembly field",
             .class => "a class",
+            .object => "an object",
         };
     }
 };
@@ -64,8 +68,21 @@ const ManagedId = struct {
     // C# limits identifiers to 1023 characters (class names, method names, variables etc).
     const max = 1023;
 
+    pub fn empty() ManagedId {
+        var result: ManagedId = .{ .buf = undefined, .len = 0 };
+        result.buf[0] = 0;
+        return result;
+    }
+
     pub fn slice(self: *const ManagedId) [:0]const u8 {
         return self.buf[0..self.len :0];
+    }
+
+    pub fn append(self: *ManagedId, s: []const u8) error{NoSpaceLeft}!void {
+        if (self.len + s.len > max) return error.NoSpaceLeft;
+        @memcpy(self.buf[self.len..][0..s.len], s);
+        self.buf[s.len] = 0;
+        self.len += @intCast(s.len);
     }
 };
 
@@ -148,13 +165,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             //     vm.text[id_extent.start..id_extent.end],
             // )) |value| return vm.err.set(...);
 
-            const after_open_paren = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
             const signature_addr = vm.mem.top();
-            // // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            // std.debug.print(
-            //     "Function '{s}' DefinitionAddr={f}\n",
-            //     .{ vm.text[id_extent.start..id_extent.end], value_addr },
-            // );
             const signature: *FunctionSignature = try vm.push(FunctionSignature);
             signature.* = .{
                 .return_type = null,
@@ -162,24 +173,14 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .param_count = 0,
             };
 
-            var offset = after_open_paren;
-            while (true) {
-                const next = lex(vm.text, offset);
-                switch (next.tag) {
-                    .r_paren => {
-                        offset = next.end;
-                        break;
-                    },
-                    else => return vm.err.set(.{ .not_implemented = "fn with args" }),
-                }
-
-                @panic("todo: increment param_count.*");
-                // signature.param_count += 1;
-            }
+            const after_params = try vm.evalParamDeclList(
+                id_extent.end,
+                &signature.param_count,
+            );
 
             // TODO: parse and set the return type if we want to support that
-            offset = try eat(vm.text, &vm.err).eatToken(offset, .l_brace);
-            signature.body.text_source = offset;
+            const block_start = try eat(vm.text, &vm.err).eatToken(after_params, .l_brace);
+            signature.body.text_source = block_start;
 
             const function_value_addr = vm.mem.top();
             (try vm.push(Type)).* = .function;
@@ -192,7 +193,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .value_addr = function_value_addr,
             };
             vm.symbols.prepend(&function_symbol.list_node);
-            return .{ .statement_end = try eat(vm.text, &vm.err).evalBlock(offset) };
+            return .{ .statement_end = try eat(vm.text, &vm.err).evalBlock(block_start) };
         },
         .keyword_import => {
             const name_kind: MethodNameKind, const name_extent: Extent = blk: {
@@ -240,8 +241,9 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .pos = first_class_token.start,
                 .actual_type = from_type,
             } });
-            const class, const end_addr = vm.readValue(*mono.Class, from_value_addr);
+            const class, const end_addr = vm.readValue(*const mono.Class, from_value_addr);
             std.debug.assert(end_addr.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
             _ = vm.mem.discardFrom(expr_addr);
 
             var managed_id_buf: ManagedId = undefined;
@@ -277,6 +279,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 break :blk switch (return_type_kind) {
                     .void => null,
                     .valuetype => return vm.err.set(.{ .not_implemented = "return valuetype" }),
+                    .object => return vm.err.set(.{ .not_implemented = "return object" }),
                     else => |k| std.debug.panic(
                         "todo: handle return type '{?s}' ({})",
                         .{ std.enums.tagName(mono.TypeKind, k), @intFromEnum(k) },
@@ -379,39 +382,53 @@ fn evalExprSuffix(
                 .{ .void_field = .{ .start = suffix_op_token.start } },
             );
             const expr_type, const value_addr = vm.readValue(Type, expr_addr);
-            _ = value_addr;
             return switch (expr_type) {
-                .integer, .string_literal, .function, .assembly, .class => vm.err.set(.{ .no_field = .{
+                .integer, .string_literal, .function, .class => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
                     .unexpected_type = expr_type,
                 } }),
+                .assembly => {
+                    _, const end = vm.readValue(*const mono.Assembly, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+
+                    // NOTE: we could short-circuit the grammar at this point
+                    // and just try to lex as many DOT IDENTIFIERS as possible
+                    // by creating a "ManagedId" which is the same code used to
+                    // gather all the identifiers into one string later on.
+                    // Maybe this would improve performance? I don't want to do
+                    // this too early though because I want to ensure the grammar
+                    // is correct.
+                    // var namespace: ManagedId = .empty();
+                    // var name: ManagedId = .empty();
+                    // if (lexClass(vm.text, &namespace, &name, id_start)) |too_big_end| return vm.err.set(.{
+                    //     .id_too_big = .{ .start = id_start, .end = too_big_end },
+                    // });
+
+                    vm.mem.toPointer(Type, expr_addr).* = .assembly_field;
+                    (try vm.push(usize)).* = id_extent.start;
+                    return id_extent.end;
+                },
+                .assembly_field => {
+                    _, const id_start_addr = vm.readValue(*const mono.Assembly, value_addr);
+                    const id_start, const end = vm.readValue(usize, id_start_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    std.debug.assert(lex(vm.text, id_start).tag == .identifier);
+                    return id_extent.end;
+                },
+                .object => vm.err.set(.{ .not_implemented = "object fields" }),
                 // .class => {
-                //     const class, const end = vm.readValue(*mono.Class, value_addr);
+                //     const class, const end = vm.readValue(*const mono.Class, value_addr);
                 //     std.debug.assert(end.eql(vm.mem.top()));
                 //     _ = vm.mem.discardFrom(expr_addr);
                 //     (try vm.push(Type)).* = .class_member;
-                //     (try vm.push(*mono.Class)).* = class;
+                //     (try vm.push(*const mono.Class)).* = class;
                 //     // (try vm.push(u8)).* = 0;
                 //     (try vm.push(usize)).* = id_extent.start;
                 //     return id_extent.end;
                 // },
                 // .class_member => {
                 //     return vm.err.set(.{ .not_implemented = "class members(2)" });
-                // },
-                // .assembly_field => {
-                //     _, const id_count_addr = vm.readValue(*mono.Assembly, value_addr);
-                //     const id_count_ptr, var next_addr = vm.readPointer(u8, id_count_addr);
-                //     if (id_count_ptr.* == 255) return vm.err.set(
-                //         .{ .too_many_assembly_fields = .{ .pos = id_extent.start } },
-                //     );
-                //     for (0..id_count_ptr.* + 1) |_| {
-                //         _, next_addr = vm.readValue(usize, next_addr);
-                //     }
-                //     std.debug.assert(next_addr.eql(vm.mem.top()));
-                //     (try vm.push(usize)).* = id_extent.start;
-                //     id_count_ptr.* += 1;
-                //     return id_extent.end;
                 // },
             };
         },
@@ -424,24 +441,27 @@ fn evalExprSuffix(
             if (expr_type == .function) {
                 const signature_addr, const end_addr = vm.readValue(Memory.Addr, expr_value_addr);
                 std.debug.assert(end_addr.eql(vm.mem.top()));
+                // TODO: add check that scans to see if anyone is pointing to discarded memory?
                 _ = vm.mem.discardFrom(expr_addr);
-                const signature: *FunctionSignature, const params_addr = vm.readPointer(FunctionSignature, signature_addr);
+                const signature: *FunctionSignature, const params_addr = vm.readPointer(
+                    FunctionSignature,
+                    signature_addr,
+                );
+
+                const return_addr = vm.mem.top();
+                if (signature.return_type) |return_type| {
+                    _ = return_type;
+                    // TODO: we need to allocate space for the return value
+                    return vm.err.set(.{ .not_implemented = "todo: allocate space for return value" });
+                }
 
                 // std.debug.print("Sig {}", .{signature.*});
-                const mem_before_args = vm.mem.top();
-
-                var offset = suffix_op_token.end;
-                if (signature.param_count == 0) {
-                    const t = lex(vm.text, offset);
-                    if (t.tag != .r_paren) return vm.err.set(.{ .too_many_args = .{
-                        .pos = t.start,
-                        .param_count = signature.param_count,
-                    } });
-                    offset = t.end;
-                } else {
-                    _ = params_addr;
-                    return vm.err.set(.{ .not_implemented = "calling functions with parameters" });
-                }
+                const args_addr = vm.mem.top();
+                const after_args = try vm.evalFnCallArgs(
+                    signature.param_count,
+                    .{ .addr = params_addr },
+                    suffix_op_token.end,
+                );
 
                 switch (signature.body) {
                     .text_source => |start| {
@@ -478,13 +498,17 @@ fn evalExprSuffix(
                     },
                 }
 
+                // TODO: add check that scans to see if anyone is pointing to discarded memory?
+                _ = vm.mem.discardFrom(args_addr);
+
                 if (signature.return_type) |return_type| {
                     _ = return_type;
+                    _ = return_addr;
                     return vm.err.set(.{ .not_implemented = "function calls with return types" });
                 } else {
-                    std.debug.assert(mem_before_args.eql(vm.mem.top()));
+                    std.debug.assert(args_addr.eql(vm.mem.top()));
                 }
-                return offset;
+                return after_args;
             } else return vm.err.set(.{ .called_non_function = .{
                 .start = expr_first_token.start,
                 .unexpected_type = expr_type,
@@ -511,12 +535,22 @@ fn pushValueFromAddr(vm: *Vm, src_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Memory.Addr)).* = signature_addr_ptr.*;
         },
         .assembly => {
-            const assembly_ptr = vm.mem.toPointer(*mono.Assembly, value_addr);
-            (try vm.push(*mono.Assembly)).* = assembly_ptr.*;
+            const assembly_ptr = vm.mem.toPointer(*const mono.Assembly, value_addr);
+            (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
+        },
+        .assembly_field => {
+            const assembly_ptr, const some_addr = vm.readPointer(*const mono.Assembly, value_addr);
+            (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
+            _ = some_addr;
+            @panic("todo");
         },
         .class => {
-            const class_ptr = vm.mem.toPointer(*mono.Class, value_addr);
-            (try vm.push(*mono.Class)).* = class_ptr.*;
+            const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
+            (try vm.push(*const mono.Class)).* = class_ptr.*;
+        },
+        .object => {
+            const object_ptr = vm.mem.toPointer(*const mono.Object, value_addr);
+            (try vm.push(*const mono.Object)).* = object_ptr.*;
         },
     }
 }
@@ -538,10 +572,10 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         },
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
-            const builtin = builtins.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
+            const builtin = builtin_map.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
             const next = try eat(vm.text, &vm.err).eatToken(first_token.end, .l_paren);
             const args_addr = vm.mem.top();
-            const args_end = try vm.evalArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
+            const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
             return args_end;
         },
@@ -578,34 +612,50 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             const next = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
             _ = next;
             // const args_addr = vm.mem.top();
-            // const args_end = try vm.evalArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
+            // const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
             return vm.err.set(.{ .not_implemented = "new expression" });
         },
         else => null,
     };
 }
 
-fn lookup(vm: *Vm, needle: []const u8) ?*Symbol {
-    // if (builtin_symbols.get(symbol)) |value| return value;
-    var maybe_symbol = vm.symbols.first;
-    while (maybe_symbol) |node| : (maybe_symbol = node.next) {
-        const s: *Symbol = @fieldParentPtr("list_node", node);
-        if (std.mem.eql(u8, needle, vm.text[s.extent.start..s.extent.end])) return s;
+fn evalParamDeclList(vm: *Vm, start: usize, param_count_ptr: *u16) error{Vm}!usize {
+    std.debug.assert(param_count_ptr.* == 0);
+
+    const after_open_paren = try eat(vm.text, &vm.err).eatToken(start, .l_paren);
+    var offset = after_open_paren;
+    while (true) {
+        const first_token = lex(vm.text, offset);
+        offset = first_token.end;
+        const id_extent = switch (first_token.tag) {
+            .r_paren => return first_token.end,
+            .identifier => first_token.extent(),
+            else => return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an identifier or close paren ')'",
+                .token = first_token,
+            } }),
+        };
+        _ = id_extent;
+        param_count_ptr.* += 1;
+
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // just say everything is an integer for now
+        (try vm.push(Type)).* = .integer;
+
+        const second_token = lex(vm.text, offset);
+        offset = second_token.end;
+        switch (second_token.tag) {
+            .r_paren => return second_token.end,
+            .comma => {},
+            else => return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an comma ',' or close paren ')'",
+                .token = first_token,
+            } }),
+        }
     }
-    return null;
 }
 
-fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
-    return vm.mem.push(T) catch return vm.err.set(.oom);
-}
-fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory.Addr } {
-    return .{ vm.mem.toPointer(T, addr), vm.mem.after(T, addr) };
-}
-fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Addr } {
-    return .{ vm.mem.toPointer(T, addr).*, vm.mem.after(T, addr) };
-}
-
-fn evalArgs(
+fn evalFnCallArgs(
     vm: *Vm,
     param_count: u16,
     params: union(enum) {
@@ -614,23 +664,20 @@ fn evalArgs(
     },
     start: usize,
 ) error{Vm}!usize {
+    var next_param_addr: Memory.Addr = switch (params) {
+        .builtin => undefined,
+        .addr => |addr| addr,
+    };
     var arg_index: u16 = 0;
-    var offset = start;
+    var text_offset = start;
     while (true) {
-        const first_token = lex(vm.text, offset);
+        const first_token = lex(vm.text, text_offset);
         if (first_token.tag == .r_paren) {
-            offset = first_token.end;
+            text_offset = first_token.end;
             break;
         }
-        if (arg_index >= param_count) return vm.err.set(.{
-            .too_many_args = .{
-                .pos = first_token.start,
-                .param_count = param_count,
-                // .parameters = parameters,
-            },
-        });
         const arg_addr = vm.mem.top();
-        offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+        text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
             .expected = "an expression",
             .token = first_token,
         } });
@@ -640,20 +687,32 @@ fn evalArgs(
         } });
 
         const arg_type = vm.mem.toPointer(Type, arg_addr).*;
-        switch (params) {
-            .builtin => |p| if (p[arg_index] != arg_type) return vm.err.set(.{ .arg_type = .{
+
+        if (arg_index < param_count) {
+            const param_type = blk: switch (params) {
+                .builtin => |p| break :blk p[arg_index],
+                .addr => {
+                    const param_type, next_param_addr = vm.readValue(Type, next_param_addr);
+                    break :blk param_type;
+                },
+            };
+            if (arg_type != param_type) return vm.err.set(.{ .arg_type = .{
                 .arg_pos = first_token.start,
                 .arg_index = arg_index,
-                .expected = p[arg_index],
+                .expected = param_type,
                 .actual = arg_type,
-            } }),
-            .addr => @panic("todo"),
+            } });
         }
 
+        if (arg_index == std.math.maxInt(u16)) return vm.err.set(.{ .arg_count = .{
+            .start = start,
+            .expected = param_count,
+            .actual = arg_index,
+        } });
         arg_index += 1;
         {
-            const token = lex(vm.text, offset);
-            offset = token.end;
+            const token = lex(vm.text, text_offset);
+            text_offset = token.end;
             switch (token.tag) {
                 .r_paren => break,
                 .comma => {},
@@ -669,7 +728,7 @@ fn evalArgs(
         .expected = param_count,
         .actual = arg_index,
     } });
-    return offset;
+    return text_offset;
 }
 
 fn evalBuiltin(
@@ -693,6 +752,7 @@ fn evalBuiltin(
             const token_start, const end_addr = vm.readValue(usize, token_start_addr);
             std.debug.assert(vm.text[token_start] == '"');
             std.debug.assert(end_addr.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
             _ = vm.mem.discardFrom(args_addr);
             const token = lex(vm.text, token_start);
             std.debug.assert(token.tag == .string_literal);
@@ -709,36 +769,19 @@ fn evalBuiltin(
                 .{ .assembly_not_found = token.extent() },
             );
             (try vm.push(Type)).* = .assembly;
-            (try vm.push(*mono.Assembly)).* = match;
+            (try vm.push(*const mono.Assembly)).* = match;
         },
         .@"@Class" => {
-            const assembly_type, const assembly_addr = vm.readValue(Type, args_addr);
-            std.debug.assert(assembly_type == .assembly);
-            const assembly, const namespace_type_addr = vm.readValue(*mono.Assembly, assembly_addr);
-
-            const namespace_type, const namespace_token_addr = vm.readValue(Type, namespace_type_addr);
-            std.debug.assert(namespace_type == .string_literal);
-            const namespace_token_start, const name_type_addr = vm.readValue(usize, namespace_token_addr);
-            std.debug.assert(vm.text[namespace_token_start] == '"');
-
-            const name_type, const name_token_addr = vm.readValue(Type, name_type_addr);
-            std.debug.assert(name_type == .string_literal);
-            const name_token_start, const end_addr = vm.readValue(usize, name_token_addr);
-            std.debug.assert(vm.text[name_token_start] == '"');
-
-            std.debug.assert(end_addr.eql(vm.mem.top()));
-            _ = vm.mem.discardFrom(args_addr);
-
-            const namespace_token = lex(vm.text, namespace_token_start);
-            const name_token = lex(vm.text, name_token_start);
-            std.debug.assert(namespace_token.tag == .string_literal);
-            std.debug.assert(name_token.tag == .string_literal);
-            std.debug.assert(vm.text[namespace_token.end - 1] == '"');
-            std.debug.assert(vm.text[name_token.end - 1] == '"');
-
-            const namespace = try vm.managedId(namespace_token.extentTrimmed());
-            const name = try vm.managedId(name_token.extentTrimmed());
-
+            const assembly_field_type, const assembly_addr = vm.readValue(Type, args_addr);
+            std.debug.assert(assembly_field_type == .assembly_field);
+            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, assembly_addr);
+            const id_start, var end = vm.readValue(usize, id_start_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            var namespace: ManagedId = .empty();
+            var name: ManagedId = .empty();
+            if (lexClass(vm.text, &namespace, &name, id_start)) |too_big_end| return vm.err.set(.{
+                .id_too_big = .{ .start = id_start, .end = too_big_end },
+            });
             const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
                 "mono_assembly_get_image returned null",
             );
@@ -748,13 +791,101 @@ fn evalBuiltin(
                 name.slice(),
             ) orelse return vm.err.set(.{ .missing_class = .{
                 .assembly = assembly,
-                .namespace = namespace_token.extent(),
-                .name = name_token.extent(),
+                .id_start = id_start,
             } });
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
         },
+        // .@"@Class" => {
+        //     const assembly_type, const assembly_addr = vm.readValue(Type, args_addr);
+        //     std.debug.assert(assembly_type == .assembly);
+        //     const assembly, const namespace_type_addr = vm.readValue(*const mono.Assembly, assembly_addr);
+
+        //     const namespace_type, const namespace_token_addr = vm.readValue(Type, namespace_type_addr);
+        //     std.debug.assert(namespace_type == .string_literal);
+        //     const namespace_token_start, const name_type_addr = vm.readValue(usize, namespace_token_addr);
+        //     std.debug.assert(vm.text[namespace_token_start] == '"');
+
+        //     const name_type, const name_token_addr = vm.readValue(Type, name_type_addr);
+        //     std.debug.assert(name_type == .string_literal);
+        //     const name_token_start, const end_addr = vm.readValue(usize, name_token_addr);
+        //     std.debug.assert(vm.text[name_token_start] == '"');
+
+        //     std.debug.assert(end_addr.eql(vm.mem.top()));
+        //     // TODO: add check that scans to see if anyone is pointing to discarded memory?
+        //     _ = vm.mem.discardFrom(args_addr);
+
+        //     const namespace_token = lex(vm.text, namespace_token_start);
+        //     const name_token = lex(vm.text, name_token_start);
+        //     std.debug.assert(namespace_token.tag == .string_literal);
+        //     std.debug.assert(name_token.tag == .string_literal);
+        //     std.debug.assert(vm.text[namespace_token.end - 1] == '"');
+        //     std.debug.assert(vm.text[name_token.end - 1] == '"');
+
+        //     const namespace = try vm.managedId(namespace_token.extentTrimmed());
+        //     const name = try vm.managedId(name_token.extentTrimmed());
+
+        //     const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
+        //         "mono_assembly_get_image returned null",
+        //     );
+        //     const class = vm.mono_funcs.class_from_name(
+        //         image,
+        //         namespace.slice(),
+        //         name.slice(),
+        //     ) orelse return vm.err.set(.{ .missing_class = .{
+        //         .assembly = assembly,
+        //         .namespace = namespace_token.extent(),
+        //         .name = name_token.extent(),
+        //     } });
+        //     (try vm.push(Type)).* = .class;
+        //     (try vm.push(*const mono.Class)).* = class;
+        // },
     }
+}
+
+// returns null on success, otherwise, the end of the last identifier where it got too big
+fn lexClass(text: []const u8, namespace: *ManagedId, name: *ManagedId, start: usize) ?usize {
+    const first_id_token = lex(text, start);
+    std.debug.assert(first_id_token.tag == .identifier);
+
+    var previous_id_extent = first_id_token.extent();
+    while (true) {
+        const next_id_extent: Extent = blk: {
+            const period_token = lex(text, previous_id_extent.end);
+            if (period_token.tag != .period) break;
+            const next_id_token = lex(text, period_token.end);
+            if (next_id_token.tag != .identifier) break;
+            break :blk next_id_token.extent();
+        };
+        namespace.append(
+            text[previous_id_extent.start..previous_id_extent.end],
+        ) catch return previous_id_extent.end;
+        previous_id_extent = next_id_extent;
+    }
+    name.append(
+        text[previous_id_extent.start..previous_id_extent.end],
+    ) catch return previous_id_extent.end;
+    return null;
+}
+
+fn lookup(vm: *Vm, needle: []const u8) ?*Symbol {
+    // if (builtin_symbols.get(symbol)) |value| return value;
+    var maybe_symbol = vm.symbols.first;
+    while (maybe_symbol) |node| : (maybe_symbol = node.next) {
+        const s: *Symbol = @fieldParentPtr("list_node", node);
+        if (std.mem.eql(u8, needle, vm.text[s.extent.start..s.extent.end])) return s;
+    }
+    return null;
+}
+
+fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
+    return vm.mem.push(T) catch return vm.err.set(.oom);
+}
+fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory.Addr } {
+    return .{ vm.mem.toPointer(T, addr), vm.mem.after(T, addr) };
+}
+fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Addr } {
+    return .{ vm.mem.toPointer(T, addr).*, vm.mem.after(T, addr) };
 }
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {
@@ -875,10 +1006,7 @@ const VmEat = struct {
                 } });
                 return id_token.end;
             },
-            .l_paren => {
-                // var offset = suffix_op_token.end;
-                @panic("todo");
-            },
+            .l_paren => return try vm.evalFnCallArgs(suffix_op_token.end),
             else => null,
         };
     }
@@ -890,17 +1018,17 @@ const VmEat = struct {
             => return first_token.end,
             .builtin => {
                 const after_l_paren = try vm.eatToken(first_token.end, .l_paren);
-                return try vm.evalArgs(after_l_paren);
+                return try vm.evalFnCallArgs(after_l_paren);
             },
             .keyword_new => {
                 const after_id = try vm.eatToken(first_token.end, .identifier);
                 const after_l_paren = try vm.eatToken(after_id, .l_paren);
-                return try vm.evalArgs(after_l_paren);
+                return try vm.evalFnCallArgs(after_l_paren);
             },
             else => null,
         };
     }
-    fn evalArgs(vm: VmEat, start: usize) error{Vm}!usize {
+    fn evalFnCallArgs(vm: VmEat, start: usize) error{Vm}!usize {
         var offset = start;
         while (true) {
             const first_token = lex(vm.text, offset);
@@ -933,10 +1061,10 @@ const FindAssembly = struct {
     vm: *Vm,
     index: usize,
     needle: []const u8,
-    match: ?*mono.Assembly,
+    match: ?*const mono.Assembly,
 };
 fn findAssembly(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *mono.Assembly = @ptrCast(assembly_opaque);
+    const assembly: *const mono.Assembly = @ptrCast(assembly_opaque);
     const ctx: *FindAssembly = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
     const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
@@ -962,7 +1090,7 @@ const LogAssemblies = struct {
     index: usize,
 };
 fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *mono.Assembly = @ptrCast(assembly_opaque);
+    const assembly: *const mono.Assembly = @ptrCast(assembly_opaque);
     const ctx: *LogAssemblies = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
     const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
@@ -991,7 +1119,7 @@ const Builtin = enum {
             .@"@Nothing" => &.{},
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.string_literal},
-            .@"@Class" => &.{ .assembly, .string_literal, .string_literal },
+            .@"@Class" => &.{.assembly_field},
         };
     }
     pub fn paramCount(builtin: Builtin) u16 {
@@ -1000,7 +1128,7 @@ const Builtin = enum {
         };
     }
 };
-pub const builtins = std.StaticStringMap(Builtin).initComptime(.{
+pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Nothing", .@"@Nothing" },
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
@@ -2160,10 +2288,6 @@ pub const Error = union(enum) {
         expected: Type,
         actual: Type,
     },
-    too_many_args: struct {
-        pos: usize,
-        param_count: u16,
-    },
     import_from_non_class: struct {
         pos: usize,
         actual_type: ?Type,
@@ -2192,9 +2316,8 @@ pub const Error = union(enum) {
     assembly_not_found: Extent,
     id_too_big: Extent,
     missing_class: struct {
-        assembly: *mono.Assembly,
-        namespace: Extent,
-        name: Extent,
+        assembly: *const mono.Assembly,
+        id_start: usize,
     },
     missing_method: struct {
         class: *const mono.Class,
@@ -2256,10 +2379,13 @@ const ErrorFmt = struct {
                 "{d}: invalid integer literal '{s}'",
                 .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
             ),
-            .called_non_function => |e| if (e.unexpected_type) |t| try writer.print(
-                "{d}: can't call {s}",
-                .{ getLineNum(f.text, e.start), t.what() },
-            ) else try writer.print(
+            .called_non_function => |e| if (e.unexpected_type) |t| switch (t) {
+                .assembly_field => try writer.print("{d}: can't call fields on an assembly directly, call @Class first", .{getLineNum(f.text, e.start)}),
+                else => try writer.print(
+                    "{d}: can't call {s}",
+                    .{ getLineNum(f.text, e.start), t.what() },
+                ),
+            } else try writer.print(
                 "{d}: attempted to call a void expression",
                 .{getLineNum(f.text, e.start)},
             ),
@@ -2290,18 +2416,6 @@ const ErrorFmt = struct {
                 e.expected.what(),
                 e.actual.what(),
             }),
-            .too_many_args => |e| switch (e.param_count) {
-                0 => try writer.print("{d}: function has no parameters", .{
-                    getLineNum(f.text, e.pos),
-                }),
-                1 => try writer.print("{d}: function only accepts 1 parameter", .{
-                    getLineNum(f.text, e.pos),
-                }),
-                else => try writer.print("{d}: function only accepts {} parameters", .{
-                    getLineNum(f.text, e.pos),
-                    e.param_count,
-                }),
-            },
             .import_from_non_class => |i| if (i.actual_type) |t| try writer.print(
                 "{d}: import from requires a class but got {s}",
                 .{ getLineNum(f.text, i.pos), t.what() },
@@ -2355,14 +2469,21 @@ const ErrorFmt = struct {
                     ManagedId.max,
                 },
             ),
-            .missing_class => |m| try writer.print(
-                "{d}: this assembly does not have a class named {s} in namespace {s}",
-                .{
-                    getLineNum(f.text, m.namespace.start),
-                    f.text[m.name.start..m.name.end],
-                    f.text[m.namespace.start..m.namespace.end],
-                },
-            ),
+            .missing_class => |m| {
+                // if we got a missing_class error, it means the namespace/name
+                // can be lexed
+                var namespace: ManagedId = .empty();
+                var name: ManagedId = .empty();
+                _ = lexClass(f.text, &namespace, &name, m.id_start);
+                try writer.print(
+                    "{d}: this assembly does not have a class named {s} in namespace {s}",
+                    .{
+                        getLineNum(f.text, m.id_start),
+                        name.slice(),
+                        namespace.slice(),
+                    },
+                );
+            },
             .missing_method => |m| switch (m.name_kind) {
                 .new => try writer.print(
                     "{d}: .ctor with {} params does not exist in this class",
@@ -2435,12 +2556,14 @@ test "bad code" {
     try testBadCode("fn foo(){}foo.wat", "1: a function has no field 'wat'");
     try testBadCode("@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
-    try testBadCode(
-        "@Class(@Assembly(\"mscorlib\"), \"System\", \"" ++ ("a" ** (ManagedId.max + 1)) ++ "\")",
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // TODO: implement this next
+    if (false) try testBadCode(
+        "@IsClass(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
-    try testBadCode(
-        "@Class(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
+    if (false) try testBadCode(
+        "@IsClass(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
         "1: this assembly does not have a class named \"Exist\" in namespace \"DoesNot\"",
     );
     try testBadCode("999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
@@ -2462,6 +2585,14 @@ test "bad code" {
     try testBadCode("foo=0 new foo()", "1: cannot new 'foo' which is an integer");
 
     try testBadCode("0n", "1: invalid integer literal '0n'");
+
+    try testBadCode("fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
+    try testBadCode("fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
+    try testBadCode("fn a(\"hey\"){}", "1: syntax error: expected an identifier or close paren ')' but got a string literal \"hey\"");
+
+    try testBadCode("fn a(){} a(0)", "1: expected 0 args but got 1");
+    try testBadCode("fn a(x){} a()", "1: expected 1 args but got 0");
+    try testBadCode("@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
 }
 
 fn testCode(text: []const u8) !void {
@@ -2505,9 +2636,23 @@ test {
     // try testCode("@Assembly(\"mscorlib\").Class");
 
     // try testCode("@Assembly(\"mscorlib\").System.Console()");
+    try testCode("fn foo(x) { }");
+    try testCode("fn foo(x) { }foo(0)");
+    try testCode("fn foo(x,y) { }foo(0,1)");
+    if (false) try testCode(
+        \\fn fib(n) {
+        \\  if (n <= 1) return n
+        \\  return fib(n - 1) + fib(n - 1)
+        \\}
+        \\fib(10)
+    );
+
     try testCode(
         \\mscorlib = @Assembly("mscorlib")
-        \\Object = @Class(mscorlib, "System", "Object")
+        \\Object = @Class(mscorlib.System.Object)
+        \\//mscorlib.System.Console.WriteLine()
+        \\//mscorlib.System.Console.Beep()
+        \\//example_obj = new Object()
         \\//import new 0 from Object
         \\//example_obj = new Object()
         \\
@@ -2516,7 +2661,7 @@ test {
     if (false) try testCode(
         \\mscorlib = @Assembly("mscorlib")
         \\
-        \\Console = @Class(mscorlib, "System", "Console")
+        \\Console = @Class(mscorlib.System.Console)
         \\import Beep 0 from Console
         \\Beep()
         \\

@@ -1,7 +1,7 @@
 Root <- Statement*
 Statement
    <- IfStatement
-    / fn IDENTIFIER FnCallArguments Block
+    / fn IDENTIFIER ParamDeclList Block
     / import (KEYWORD_new / IDENTIFIER) INTEGER from Expr
     / IDENTIFIER EQUAL Expr
     / Expr (EQUAL Expr)?
@@ -16,11 +16,11 @@ PrimaryExpr
    / Block
    / PrimaryTypeExpr ExprSuffix
 
-ExprSuffix <- (SuffixOp / FnCallArguments)*
+ExprSuffix <- (SuffixOp / FnCallArgs)*
 
 PrimaryTypeExpr
-    <- BUILTINIDENTIFIER FnCallArguments
-     / NEW IDENTIFIER FnCallArguments
+    <- BUILTINIDENTIFIER FnCallArgs
+     / NEW IDENTIFIER FnCallArgs
      / CHAR_LITERAL
      ??? / ContainerDecl
      / DOT IDENTIFIER
@@ -43,5 +43,7 @@ SuffixOp
     / DOT IDENTIFIER
 //
 IfExpr <- IfPrefix Expr ("else" Payload? Expr)?
-IfPrefix <- "if" "(" Expr ")" PtrPayload?
-FnCallArgs <- "(" (Expr ",")* Expr? ")"
+IfPrefix <- "if" LPAREN Expr RPAREN PtrPayload?
+FnCallArgs <- LPAREN (Expr ",")* Expr? RPAREN
+
+ParamDeclList <- LPAREN (IDENTIFIER COMMA)* IDENTIFIER? RPAREN

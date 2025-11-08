@@ -122,7 +122,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         );
     };
 
-    const domain = blk: {
+    const root_domain = blk: {
         var attempt: u32 = 0;
         while (true) {
             attempt += 1;
@@ -141,12 +141,19 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         }
     };
 
+    // sanity check, this should be null before we call thread_attach
+    std.debug.assert(mono_funcs.domain_get() == null);
+
     // std.log.info("Attaching thread to Mono domain...", .{});
-    const thread = mono_funcs.thread_attach(domain) orelse {
+    const thread = mono_funcs.thread_attach(root_domain) orelse {
         std.log.err("mono_thread_attach failed!", .{});
         return 0xffffffff;
     };
     std.log.info("thread attach succes 0x{x}", .{@intFromPtr(thread)});
+
+    // domain_get is how the Vm accesses the domain, make sure it's
+    // what we expect after attaching our thread to it
+    std.debug.assert(mono_funcs.domain_get() == root_domain);
 
     // if (true) @panic("todo");
     // // Now initialize managed runtime
@@ -157,7 +164,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
-        updateMods(&mono_funcs, domain, scratch.allocator());
+        updateMods(&mono_funcs, scratch.allocator());
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
         }
@@ -310,7 +317,6 @@ const Mod = struct {
 
 fn updateMods(
     mono_funcs: *const mono.Funcs,
-    mono_domain: *const mono.Domain,
     scratch: std.mem.Allocator,
 ) void {
     {
@@ -378,7 +384,6 @@ fn updateMods(
             .have_text => |*state| if (!state.processed) {
                 var vm: Vm = .{
                     .mono_funcs = mono_funcs,
-                    .mono_domain = mono_domain,
                     .text = state.text,
                     .err = undefined,
                     .mem = .{ .allocator = scratch },

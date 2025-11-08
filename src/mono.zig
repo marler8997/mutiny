@@ -41,6 +41,7 @@ pub const Funcs = struct {
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),
+            .domain_get = try monoload.get(mod, .domain_get, proc_ref),
             .thread_attach = try monoload.get(mod, .thread_attach, proc_ref),
             // .domain_assembly_open = try monoload.get(mod, .domain_assembly_open, proc_ref),
             .assembly_foreach = try monoload.get(mod, .assembly_foreach, proc_ref),

@@ -1,3 +1,27 @@
+## The Stack
+
+Most everything on the stack will be prefixed by a "type" followed by a value of variable size based on the type.  The exception to this is symbols, which are started by a symbol id (usize pointing to where in the text the id appears) and then a "previous symbol address" (except for the first entry which has none).  After that it's a normal type/value like everywhere else.
+
+
+- symbol_id: usize  (pointer to where the symbol id is in text)
+- [ no previous_addr like subsequent symbols will have ]
+- next_symbol_type: Type
+- next_symbol_value: (size based on type)
+--------------
+- symbol_id: usize  (pointer to where the symbol id is in text)
+- previous_addr: Addr (address of previous symbol id for reverse stack walking)
+- next_symbol_type: Type
+- next_symbol_value: (size based on type)
+--------------
+- symbol_id: usize  (pointer to where the symbol id is in text)
+- previous_addr: Addr (address of previous symbol id for reverse stack walking)
+- next_symbol_type: Type
+- next_symbol_value: (size based on type)
+--------------
+....
+--------------
+
+
 ## Restriction on calling fields on assemblies
 
 > can't call fields on an assembly directly, call @Class first

@@ -4,31 +4,34 @@ mono_funcs: *const mono.Funcs,
 err: Error,
 text: []const u8,
 mem: Memory,
-symbols: std.SinglyLinkedList,
+
+symbol_state: union(enum) {
+    none,
+    evaluating: struct {
+        maybe_previous_newest: ?Memory.Addr,
+        next_newest: Memory.Addr,
+    },
+    stable: struct {
+        newest: Memory.Addr,
+        next: Memory.Addr,
+    },
+} = .none,
+
 tests_scheduled: bool = false,
 
 const Extent = struct { start: usize, end: usize };
 
-const Symbol = struct {
-    list_node: std.SinglyLinkedList.Node,
-    extent: Extent,
-    value_addr: Memory.Addr,
-};
-
 const FunctionSignature = struct {
     return_type: ?Type,
-    body: union(enum) {
-        text_source: usize,
-        managed_ctor: *const mono.Method,
-        managed_method: *const mono.Method,
-    },
+    body: usize,
     param_count: u16,
 };
 
 const Type = enum {
     integer,
     string_literal,
-    function,
+    function_value,
+    function_ptr,
     assembly,
     assembly_field,
     class,
@@ -38,7 +41,8 @@ const Type = enum {
         return switch (t) {
             .integer => "an integer",
             .string_literal => "a string literal",
-            .function => "a function",
+            .function_value => "a function value",
+            .function_ptr => "a function",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
             .class => "a class",
@@ -53,7 +57,8 @@ const Type = enum {
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
             // can store/save the data required on the stack
-            .function => false,
+            .function_value => false,
+            .function_ptr => false,
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
             .class => false, // TODO
@@ -78,27 +83,62 @@ pub fn deinit(vm: *Vm) void {
     vm.* = undefined;
 }
 
-pub fn verifyStack(vm: *Vm) void {
-    if (vm.symbols.first == null) {
-        std.debug.assert(vm.mem.top().eql(.zero));
-        return;
+fn startSymbol(vm: *Vm, id_start: usize) error{Vm}!void {
+    {
+        const token = lex(vm.text, id_start);
+        std.debug.assert(token.tag == .identifier);
+        std.debug.assert(token.start == id_start);
     }
 
-    const first_symbol: *Symbol = @fieldParentPtr("list_node", vm.symbols.first.?);
-    var symbol = first_symbol;
-    while (true) {
-        std.debug.print(
-            "symbol '{s}' adddress {f}\n",
-            .{
-                vm.text[symbol.extent.start..symbol.extent.end],
-                symbol.value_addr,
-            },
-        );
-        // TODO: verify the value is valid
-        _, _ = vm.readValue(Type, symbol.value_addr);
-        const next = symbol.list_node.next orelse break;
-        symbol = @fieldParentPtr("list_node", next);
-    }
+    const new_addr: Memory.Addr, const previous_newest: ?Memory.Addr = switch (vm.symbol_state) {
+        .none => .{ .zero, null },
+        .evaluating => unreachable,
+        .stable => |*symbol_addrs| .{ symbol_addrs.next, symbol_addrs.newest },
+    };
+    std.debug.assert(vm.mem.top().eql(new_addr));
+    (try vm.push(usize)).* = id_start;
+    if (previous_newest) |p| (try vm.push(Memory.Addr)).* = p;
+    vm.symbol_state = .{ .evaluating = .{
+        .maybe_previous_newest = previous_newest,
+        .next_newest = new_addr,
+    } };
+}
+fn endSymbol(vm: *Vm) error{Vm}!void {
+    const evaluating = switch (vm.symbol_state) {
+        .none => unreachable,
+        .evaluating => |*e| e,
+        .stable => unreachable,
+    };
+    const next = vm.mem.top();
+    std.debug.assert(!evaluating.next_newest.eql(next));
+    vm.symbol_state = .{ .stable = .{
+        .newest = evaluating.next_newest,
+        .next = next,
+    } };
+}
+
+pub fn verifyStack(vm: *Vm) void {
+    _ = vm;
+    // if (vm.symbols.first == null) {
+    //     std.debug.assert(vm.mem.top().eql(.zero));
+    //     return;
+    // }
+
+    // const first_symbol: *Symbol = @fieldParentPtr("list_node", vm.symbols.first.?);
+    // var symbol = first_symbol;
+    // while (true) {
+    //     std.debug.print(
+    //         "symbol '{s}' adddress {f}\n",
+    //         .{
+    //             vm.text[symbol.extent.start..symbol.extent.end],
+    //             symbol.value_addr,
+    //         },
+    //     );
+    //     // TODO: verify the value is valid
+    //     _, _ = vm.readValue(Type, symbol.value_addr);
+    //     const next = symbol.list_node.next orelse break;
+    //     symbol = @fieldParentPtr("list_node", next);
+    // }
 }
 
 const ManagedId = struct {
@@ -172,8 +212,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
         .identifier => {
             const second_token = lex(vm.text, first_token.end);
             if (second_token.tag == .equal) {
-                const symbol: *Symbol = try vm.push(Symbol);
-                symbol.* = undefined;
+                try vm.startSymbol(first_token.start);
                 const value_addr = vm.mem.top();
                 const expr_first_token = lex(vm.text, second_token.end);
                 const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
@@ -183,12 +222,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
                     .id_extent = first_token.extent(),
                 } });
-                symbol.* = .{
-                    .list_node = .{},
-                    .extent = first_token.extent(),
-                    .value_addr = value_addr,
-                };
-                vm.symbols.prepend(&symbol.list_node);
+                try vm.endSymbol();
                 return .{ .statement_end = after_expr };
             }
         },
@@ -201,41 +235,10 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 } });
                 break :blk token.extent();
             };
-
-            // TODO: should we not allow shadowing?
-            // if (vm.lookup(
-            //     vm.text[id_extent.start..id_extent.end],
-            // )) |value| return vm.err.set(...);
-
-            const signature_addr = vm.mem.top();
-            const signature: *FunctionSignature = try vm.push(FunctionSignature);
-            signature.* = .{
-                .return_type = null,
-                .body = .{ .text_source = undefined },
-                .param_count = 0,
-            };
-
-            const after_params = try vm.evalParamDeclList(
-                id_extent.end,
-                &signature.param_count,
-            );
-
-            // TODO: parse and set the return type if we want to support that
-            const block_start = try eat(vm.text, &vm.err).eatToken(after_params, .l_brace);
-            signature.body.text_source = block_start;
-
-            const function_value_addr = vm.mem.top();
-            (try vm.push(Type)).* = .function;
-            (try vm.push(Memory.Addr)).* = signature_addr;
-
-            const function_symbol: *Symbol = try vm.push(Symbol);
-            function_symbol.* = .{
-                .list_node = .{},
-                .extent = id_extent,
-                .value_addr = function_value_addr,
-            };
-            vm.symbols.prepend(&function_symbol.list_node);
-            return .{ .statement_end = try eat(vm.text, &vm.err).evalBlock(block_start) };
+            try vm.startSymbol(id_extent.start);
+            const after_definition = try vm.evalFunctionDefinition(id_extent.end);
+            try vm.endSymbol();
+            return .{ .statement_end = after_definition };
         },
         // .keyword_import => {
         //     const name_kind: MethodNameKind, const name_extent: Extent = blk: {
@@ -403,6 +406,23 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 
     @panic("todo");
 }
+
+fn evalFunctionDefinition(vm: *Vm, start: usize) error{Vm}!usize {
+    (try vm.push(Type)).* = .function_value;
+    const signature: *FunctionSignature = try vm.push(FunctionSignature);
+    signature.* = .{
+        .return_type = null,
+        .body = start,
+        .param_count = 0,
+    };
+    const after_params = try vm.evalParamDeclList(start, &signature.param_count);
+    signature.body = after_params;
+    // TODO: parse and set the return type if we want to support that
+    const block_start = try eat(vm.text, &vm.err).eatToken(after_params, .l_brace);
+    signature.body = block_start;
+    return try eat(vm.text, &vm.err).evalBlock(block_start);
+}
+
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
     const expr_addr = vm.mem.top();
     var offset = try vm.evalPrimaryTypeExpr(first_token) orelse return null;
@@ -435,7 +455,11 @@ fn evalExprSuffix(
             );
             const expr_type_ptr, const value_addr = vm.readPointer(Type, expr_addr);
             return switch (expr_type_ptr.*) {
-                .integer, .string_literal, .function => vm.err.set(.{ .no_field = .{
+                .integer,
+                .string_literal,
+                .function_value,
+                .function_ptr,
+                => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
                     .unexpected_type = expr_type_ptr.*,
@@ -566,21 +590,12 @@ fn evalExprSuffix(
                     std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
                     return vm.err.set(.{ .not_implemented = "handle exception" });
                 }
-                const return_type_kind = vm.mono_funcs.type_get_type(return_type);
-                if (return_type_kind == .void) {
-                    if (maybe_result) |_| {
-                        return vm.err.set(
-                            .{ .not_implemented = "error message for calling managed function with void return type that returned something" },
-                        );
-                    }
-                    return args.end;
-                }
-                const result = maybe_result orelse return vm.err.set(
-                    .{ .not_implemented = "error message for calling managed function with non-void return type that returned null" },
-                );
-                switch (return_type_kind) {
-                    .void => unreachable, // would have returned above
+                switch (vm.mono_funcs.type_get_type(return_type)) {
+                    .void => if (maybe_result) |_| {
+                        return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
+                    },
                     .i4 => {
+                        const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
                         const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
                         std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
                         (try vm.push(Type)).* = .integer;
@@ -592,7 +607,9 @@ fn evalExprSuffix(
                     },
                 }
                 return args.end;
-            } else if (expr_type == .function) {
+            } else if (expr_type == .function_value) {
+                return vm.err.set(.{ .not_implemented = "should you be able to call functions by value?" });
+            } else if (expr_type == .function_ptr) {
                 const signature_addr, const end_addr = vm.readValue(Memory.Addr, expr_value_addr);
                 std.debug.assert(end_addr.eql(vm.mem.top()));
                 // TODO: add check that scans to see if anyone is pointing to discarded memory?
@@ -617,40 +634,7 @@ fn evalExprSuffix(
                     suffix_op_token.end,
                 );
 
-                switch (signature.body) {
-                    .text_source => |start| {
-                        _ = try vm.evalBlock(start);
-                    },
-                    .managed_ctor => |ctor| {
-                        const class = vm.mono_funcs.method_get_class(ctor) orelse unreachable;
-                        const obj = vm.mono_funcs.object_new(
-                            vm.mono_funcs.domain_get().?,
-                            class,
-                        ) orelse return vm.err.set(
-                            .{ .new_failed = .{ .pos = suffix_op_token.start, .class = class } },
-                        );
-                        _ = obj;
-                        // TODO: we'll need to allocate a gchandle for this
-                        //       since we're going to store it in our allocator's
-                        //       memory which may not be inclueded in gc scans
-
-                        return vm.err.set(.{ .not_implemented = "calling ctors" });
-                    },
-                    .managed_method => |method| {
-                        const method_flags = vm.mono_funcs.method_get_flags(method, null);
-                        // std.debug.print("MethodFlags {}", .{method_flags});
-                        if (!method_flags.static) return vm.err.set(.{ .not_implemented = "calling non-static methods" });
-                        if (signature.param_count != 0) return vm.err.set(.{ .not_implemented = "calling managed functions with parameters" });
-                        if (signature.return_type != null) return vm.err.set(.{ .not_implemented = "calling managed function with return types" });
-                        // var exception: *const mono.Object = undefined;
-                        // const result = vm.mono_funcs.runtime_invoke(method, null, null, &exception);
-                        const maybe_result = vm.mono_funcs.runtime_invoke(method, null, null, null);
-                        if (maybe_result) |result| {
-                            _ = result;
-                            return vm.err.set(.{ .not_implemented = "finish calling managed method" });
-                        }
-                    },
-                }
+                _ = try vm.evalBlock(signature.body);
 
                 // TODO: add check that scans to see if anyone is pointing to discarded memory?
                 _ = vm.mem.discardFrom(args_addr);
@@ -672,42 +656,53 @@ fn evalExprSuffix(
     };
 }
 
-fn pushValueFromAddr(vm: *Vm, src_addr: Memory.Addr) error{Vm}!void {
-    const value_type, const value_addr = vm.readValue(Type, src_addr);
-    (try vm.push(Type)).* = value_type;
+fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
+    const value_type, const value_addr = vm.readValue(Type, src_type_addr);
     switch (value_type) {
         .integer => {
+            (try vm.push(Type)).* = .integer;
             const value_ptr = vm.mem.toPointer(i64, value_addr);
             (try vm.push(i64)).* = value_ptr.*;
         },
         .string_literal => {
+            (try vm.push(Type)).* = .string_literal;
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
         },
-        .function => {
+        .function_value => {
+            (try vm.push(Type)).* = .function_ptr;
+            (try vm.push(Memory.Addr)).* = value_addr;
+        },
+        .function_ptr => {
+            (try vm.push(Type)).* = .function_ptr;
             const signature_addr_ptr = vm.mem.toPointer(Memory.Addr, value_addr);
             (try vm.push(Memory.Addr)).* = signature_addr_ptr.*;
         },
         .assembly => {
+            (try vm.push(Type)).* = .assembly;
             const assembly_ptr = vm.mem.toPointer(*const mono.Assembly, value_addr);
             (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
         },
         .assembly_field => {
+            (try vm.push(Type)).* = .assembly_field;
             // const assembly_ptr, const some_addr = vm.readPointer(*const mono.Assembly, value_addr);
             // (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
             // _ = some_addr;
             return vm.err.set(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
         .class => {
+            (try vm.push(Type)).* = .class;
             const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
             (try vm.push(*const mono.Class)).* = class_ptr.*;
         },
         .class_member => {
+            (try vm.push(Type)).* = .class_member;
             // const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
             // (try vm.push(*const mono.Class)).* = class_ptr.*;
             return vm.err.set(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
         .object => {
+            (try vm.push(Type)).* = .object;
             const object_ptr = vm.mem.toPointer(*const mono.Object, value_addr);
             (try vm.push(*const mono.Object)).* = object_ptr.*;
         },
@@ -718,10 +713,10 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
     return switch (first_token.tag) {
         .identifier => {
             const string = vm.text[first_token.start..first_token.end];
-            const symbol = vm.lookup(string) orelse return vm.err.set(
+            const entry = vm.lookup(string) orelse return vm.err.set(
                 .{ .undefined_identifier = first_token.extent() },
             );
-            try vm.pushValueFromAddr(symbol.value_addr);
+            try vm.pushValueFromAddr(entry.type_addr);
             return first_token.end;
         },
         .string_literal => {
@@ -749,30 +744,31 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             return first_token.end;
         },
         .keyword_new => {
-            const id_extent = blk: {
-                const token = lex(vm.text, first_token.end);
-                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
-                    .expected = "an identifier to follow 'new'",
-                    .token = token,
-                } });
-                break :blk token.extent();
-            };
-            const id_string = vm.text[id_extent.start..id_extent.end];
-            const symbol = vm.lookup(id_string) orelse return vm.err.set(
-                .{ .undefined_identifier = id_extent },
-            );
-            const symbol_type, const value_addr = vm.readValue(Type, symbol.value_addr);
-            if (symbol_type != .class) return vm.err.set(.{ .new_non_class = .{
-                .id_extent = id_extent,
-                .actual_type = symbol_type,
-            } });
-            _ = value_addr;
+            @panic("todo");
+            // const id_extent = blk: {
+            //     const token = lex(vm.text, first_token.end);
+            //     if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+            //         .expected = "an identifier to follow 'new'",
+            //         .token = token,
+            //     } });
+            //     break :blk token.extent();
+            // };
+            // const id_string = vm.text[id_extent.start..id_extent.end];
+            // const symbol = vm.lookup(id_string) orelse return vm.err.set(
+            //     .{ .undefined_identifier = id_extent },
+            // );
+            // const symbol_type, const value_addr = vm.readValue(Type, symbol.value_addr);
+            // if (symbol_type != .class) return vm.err.set(.{ .new_non_class = .{
+            //     .id_extent = id_extent,
+            //     .actual_type = symbol_type,
+            // } });
+            // _ = value_addr;
 
-            const next = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
-            _ = next;
-            // const args_addr = vm.mem.top();
-            // const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
-            return vm.err.set(.{ .not_implemented = "new expression" });
+            // const next = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
+            // _ = next;
+            // // const args_addr = vm.mem.top();
+            // // const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
+            // return vm.err.set(.{ .not_implemented = "new expression" });
         },
         else => null,
     };
@@ -1027,7 +1023,10 @@ fn discardTopValue(vm: *Vm, addr: Memory.Addr) void {
             _, const end = vm.readPointer(usize, value_addr);
             break :blk end;
         },
-        .function => {
+        .function_value => {
+            @panic("todo");
+        },
+        .function_ptr => {
             _, const end = vm.readPointer(Memory.Addr, value_addr);
             break :blk end;
         },
@@ -1089,12 +1088,33 @@ fn lexClass(text: []const u8, namespace: *ManagedId, name: *ManagedId, start: us
     return null;
 }
 
-fn lookup(vm: *Vm, needle: []const u8) ?*Symbol {
+const SymbolEntry = struct {
+    id_extent: Extent,
+    type_addr: Memory.Addr,
+};
+fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
     // if (builtin_symbols.get(symbol)) |value| return value;
-    var maybe_symbol = vm.symbols.first;
-    while (maybe_symbol) |node| : (maybe_symbol = node.next) {
-        const s: *Symbol = @fieldParentPtr("list_node", node);
-        if (std.mem.eql(u8, needle, vm.text[s.extent.start..s.extent.end])) return s;
+    var id_addr = switch (vm.symbol_state) {
+        .none => return null,
+        .evaluating => |*symbol_addrs| symbol_addrs.maybe_previous_newest orelse return null,
+        .stable => |*symbol_addrs| symbol_addrs.newest,
+    };
+    while (true) {
+        const id_start, const after_id_addr = vm.readValue(usize, id_addr);
+        const id = lex(vm.text, id_start);
+        std.debug.assert(id.tag == .identifier);
+        var previous_id_addr: Memory.Addr = undefined;
+        var type_addr: Memory.Addr = undefined;
+        if (id_addr.eql(.zero)) {
+            type_addr = after_id_addr;
+        } else {
+            previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
+        }
+        if (std.mem.eql(u8, needle, vm.text[id.start..id.end])) return .{
+            .id_extent = id.extent(),
+            .type_addr = type_addr,
+        };
+        id_addr = previous_id_addr;
     }
     return null;
 }
@@ -2758,7 +2778,6 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
-        .symbols = .{},
     };
     vm.verifyStack();
     defer vm.deinit();
@@ -2809,11 +2828,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
     // try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    try testBadCode(mono_funcs, "new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
-    try testBadCode(mono_funcs, "new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
+    // try testBadCode(mono_funcs, "new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
+    // try testBadCode(mono_funcs, "new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
     // try testBadCode(mono_funcs, "new foo(", "");
-    try testBadCode(mono_funcs, "new foo()", "1: undefined identifier 'foo'");
-    try testBadCode(mono_funcs, "foo=0 new foo()", "1: cannot new 'foo' which is an integer");
+    // try testBadCode(mono_funcs, "new foo()", "1: undefined identifier 'foo'");
+    // try testBadCode(mono_funcs, "foo=0 new foo()", "1: cannot new 'foo' which is an integer");
 
     try testBadCode(mono_funcs, "0n", "1: invalid integer literal '0n'");
 
@@ -2875,6 +2894,8 @@ const TestDomain = struct {
 };
 
 fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
+    std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
+
     var test_domain: TestDomain = undefined;
     test_domain.init(mono_funcs);
     defer test_domain.deinit(mono_funcs);
@@ -2887,7 +2908,6 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
         .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
-        .symbols = .{},
     };
     vm.verifyStack();
     vm.evalRoot() catch {

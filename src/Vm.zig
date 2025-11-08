@@ -1130,6 +1130,7 @@ fn pop(vm: *Vm, addr: Memory.Addr) union(enum) {
             _ = vm.mem.discardFrom(addr);
             std.debug.assert(vm.text[start] == '"');
             const token = lex(vm.text, start);
+            std.debug.assert(token.start == start);
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .string_literal = token.extent() };
@@ -1586,9 +1587,6 @@ const TokenFmt = struct {
     }
 };
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// TODO: maybe this should return a struct { Tag, usize } instead?
-//       const tag, const end = lex(text, start) ?
 fn lex(text: []const u8, lex_start: usize) Token {
     const State = union(enum) {
         start,

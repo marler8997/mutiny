@@ -523,135 +523,127 @@ fn evalExprSuffix(
                 .start = expr_first_token.start,
                 .unexpected_type = null,
             } });
+            switch (vm.pop(expr_addr)) {
+                .class_member => |member| {
+                    const method_id_extent = blk: {
+                        var it: DottedIterator = .init(vm.text, member.id_start);
+                        var previous = it.id;
+                        while (it.next(vm.text)) {
+                            _ = &previous;
+                            return vm.err.set(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
+                        }
+                        break :blk previous;
+                    };
+                    const method_id = try vm.managedId(method_id_extent);
+                    // const method = vm.mono_funcs.class_get_method_form_name
+                    // if (true) std.debug.panic("TODO: call '{s}'\n", .{method_id});
 
-            const expr_type, const expr_value_addr = vm.readValue(Type, expr_addr);
-            if (expr_type == .class_member) {
-                const class, const id_start_addr = vm.readValue(*const mono.Class, expr_value_addr);
-                const id_start, const end = vm.readValue(usize, id_start_addr);
-                std.debug.assert(end.eql(vm.mem.top()));
-                // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                _ = vm.mem.discardFrom(expr_addr);
+                    const args_addr = vm.mem.top();
+                    const args = try vm.evalFnCallArgsManaged(suffix_op_token.end);
 
-                const method_id_extent = blk: {
-                    var it: DottedIterator = .init(vm.text, id_start);
-                    var previous = it.id;
-                    while (it.next(vm.text)) {
-                        _ = &previous;
-                        return vm.err.set(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
+                    const method = vm.mono_funcs.class_get_method_from_name(
+                        member.class,
+                        method_id.slice(),
+                        args.count,
+                    ) orelse return vm.err.set(.{ .missing_method = .{
+                        .class = member.class,
+                        .id_extent = method_id_extent,
+                        .arg_count = args.count,
+                    } });
+                    const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
+                        "method has no signature?", // impossible right?
+                    );
+                    const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
+                        "method has no return type?", // impossible right?
+                    );
+                    if (args.count == 0) {
+                        std.debug.assert(args_addr.eql(vm.mem.top()));
+                        // TODO: add check that scans to see if anyone is pointing to discarded memory?
+                        // _ = vm.mem.discardFrom(expr_addr);
+                    } else {
+                        return vm.err.set(.{ .not_implemented = "call method with args" });
                     }
-                    break :blk previous;
-                };
-                const method_id = try vm.managedId(method_id_extent);
-                // const method = vm.mono_funcs.class_get_method_form_name
-                // if (true) std.debug.panic("TODO: call '{s}'\n", .{method_id});
 
-                const args_addr = vm.mem.top();
-                const args = try vm.evalFnCallArgsManaged(suffix_op_token.end);
+                    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                    // TODO: how do we know if we need an object
+                    const object: ?*anyopaque = null;
+                    const params: ?**anyopaque = null;
+                    var maybe_exception: ?*const mono.Object = null;
 
-                const method = vm.mono_funcs.class_get_method_from_name(
-                    class,
-                    method_id.slice(),
-                    args.count,
-                ) orelse return vm.err.set(.{ .missing_method = .{
-                    .class = class,
-                    .id_extent = method_id_extent,
-                    .arg_count = args.count,
-                } });
-                const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
-                    "method has no signature?", // impossible right?
-                );
-                const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
-                    "method has no return type?", // impossible right?
-                );
-                if (args.count == 0) {
-                    std.debug.assert(args_addr.eql(vm.mem.top()));
+                    const maybe_result = vm.mono_funcs.runtime_invoke(
+                        method,
+                        object,
+                        params,
+                        &maybe_exception,
+                    );
+                    if (false) std.debug.print(
+                        "Result=0x{x} Exception=0x{x}\n",
+                        .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
+                    );
+                    if (maybe_exception) |e| {
+                        std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
+                        return vm.err.set(.{ .not_implemented = "handle exception" });
+                    }
+                    switch (vm.mono_funcs.type_get_type(return_type)) {
+                        .void => if (maybe_result) |_| {
+                            return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
+                        },
+                        .i4 => {
+                            const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
+                            const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
+                            std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
+                            (try vm.push(Type)).* = .integer;
+                            (try vm.push(i64)).* = unboxed.*;
+                        },
+                        else => |kind| {
+                            std.debug.print("ReturnTypeKind={t}\n", .{kind});
+                            return vm.err.set(.{ .not_implemented = "managed return value of this type" });
+                        },
+                    }
+                    return args.end;
+                },
+                // .function_value => {
+                //     return vm.err.set(.{ .not_implemented = "should you be able to call functions by value?" });
+                // },
+                .function_ptr => |signature_addr| {
+                    const signature: *FunctionSignature, const params_addr = vm.readPointer(
+                        FunctionSignature,
+                        signature_addr,
+                    );
+                    const return_addr = vm.mem.top();
+                    if (signature.return_type) |return_type| {
+                        _ = return_type;
+                        // TODO: we need to allocate space for the return value
+                        return vm.err.set(.{ .not_implemented = "todo: allocate space for return value" });
+                    }
+
+                    // std.debug.print("Sig {}", .{signature.*});
+                    const args_addr = vm.mem.top();
+                    const after_args = try vm.evalFnCallArgs(
+                        signature.param_count,
+                        .{ .addr = params_addr },
+                        suffix_op_token.end,
+                    );
+
+                    _ = try vm.evalBlock(signature.body);
+
                     // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                    // _ = vm.mem.discardFrom(expr_addr);
-                } else {
-                    return vm.err.set(.{ .not_implemented = "call method with args" });
-                }
+                    _ = vm.mem.discardFrom(args_addr);
 
-                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                // TODO: how do we know if we need an object
-                const object: ?*anyopaque = null;
-                const params: ?**anyopaque = null;
-                var maybe_exception: ?*const mono.Object = null;
-
-                const maybe_result = vm.mono_funcs.runtime_invoke(
-                    method,
-                    object,
-                    params,
-                    &maybe_exception,
-                );
-                if (false) std.debug.print(
-                    "Result=0x{x} Exception=0x{x}\n",
-                    .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
-                );
-                if (maybe_exception) |e| {
-                    std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
-                    return vm.err.set(.{ .not_implemented = "handle exception" });
-                }
-                switch (vm.mono_funcs.type_get_type(return_type)) {
-                    .void => if (maybe_result) |_| {
-                        return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
-                    },
-                    .i4 => {
-                        const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
-                        const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
-                        std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
-                        (try vm.push(Type)).* = .integer;
-                        (try vm.push(i64)).* = unboxed.*;
-                    },
-                    else => |kind| {
-                        std.debug.print("ReturnTypeKind={t}\n", .{kind});
-                        return vm.err.set(.{ .not_implemented = "managed return value of this type" });
-                    },
-                }
-                return args.end;
-            } else if (expr_type == .function_value) {
-                return vm.err.set(.{ .not_implemented = "should you be able to call functions by value?" });
-            } else if (expr_type == .function_ptr) {
-                const signature_addr, const end_addr = vm.readValue(Memory.Addr, expr_value_addr);
-                std.debug.assert(end_addr.eql(vm.mem.top()));
-                // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                _ = vm.mem.discardFrom(expr_addr);
-                const signature: *FunctionSignature, const params_addr = vm.readPointer(
-                    FunctionSignature,
-                    signature_addr,
-                );
-
-                const return_addr = vm.mem.top();
-                if (signature.return_type) |return_type| {
-                    _ = return_type;
-                    // TODO: we need to allocate space for the return value
-                    return vm.err.set(.{ .not_implemented = "todo: allocate space for return value" });
-                }
-
-                // std.debug.print("Sig {}", .{signature.*});
-                const args_addr = vm.mem.top();
-                const after_args = try vm.evalFnCallArgs(
-                    signature.param_count,
-                    .{ .addr = params_addr },
-                    suffix_op_token.end,
-                );
-
-                _ = try vm.evalBlock(signature.body);
-
-                // TODO: add check that scans to see if anyone is pointing to discarded memory?
-                _ = vm.mem.discardFrom(args_addr);
-
-                if (signature.return_type) |return_type| {
-                    _ = return_type;
-                    _ = return_addr;
-                    return vm.err.set(.{ .not_implemented = "function calls with return types" });
-                } else {
-                    std.debug.assert(args_addr.eql(vm.mem.top()));
-                }
-                return after_args;
-            } else return vm.err.set(.{ .called_non_function = .{
-                .start = expr_first_token.start,
-                .unexpected_type = expr_type,
-            } });
+                    if (signature.return_type) |return_type| {
+                        _ = return_type;
+                        _ = return_addr;
+                        return vm.err.set(.{ .not_implemented = "function calls with return types" });
+                    } else {
+                        std.debug.assert(args_addr.eql(vm.mem.top()));
+                    }
+                    return after_args;
+                },
+                else => |value| return vm.err.set(.{ .called_non_function = .{
+                    .start = expr_first_token.start,
+                    .unexpected_type = value.getType(),
+                } }),
+            }
         },
         else => null,
     };
@@ -1089,6 +1081,7 @@ fn pop(vm: *Vm, addr: Memory.Addr) Value {
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .string_literal = token.extent() };
         },
+        .function_value => unreachable, // I *think* this is unreachable?
         .function_ptr => {
             const signature_addr, const end = vm.readValue(Memory.Addr, value_addr);
             std.debug.assert(end.eql(vm.mem.top()));
@@ -1166,6 +1159,17 @@ const Value = union(enum) {
             .class => {},
             .class_member => {},
         }
+    }
+    pub fn getType(value: *const Value) Type {
+        return switch (value.*) {
+            .integer => .integer,
+            .string_literal => .string_literal,
+            .function_ptr => .function_ptr,
+            .assembly => .assembly,
+            .assembly_field => .assembly_field,
+            .class => .class,
+            .class_member => .class_member,
+        };
     }
 };
 

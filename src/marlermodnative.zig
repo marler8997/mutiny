@@ -76,6 +76,20 @@ pub export fn _DllMainCRTStartup(
 fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
+    var stdout = std.fs.File.stdout().writer(&.{});
+    stdout.interface.writeAll("stdout is working\n") catch {
+        std.log.err(
+            "write to stdout failed with {t}",
+            .{stdout.err orelse error.Unexpected},
+        );
+    };
+    var stderr = std.fs.File.stderr().writer(&.{});
+    stderr.interface.writeAll("stderr is working\n") catch {
+        std.log.err(
+            "write to stderr failed with {t}",
+            .{stderr.err orelse error.Unexpected},
+        );
+    };
 
     const mono_dll_name = "mono-2.0-bdwgc.dll";
     const mono_mod = blk: {

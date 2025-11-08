@@ -58,7 +58,75 @@ fn launchAndInject(
     const dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, dll_path);
     defer gpa.free(dll_path_w);
 
-    // const game_dir: []const u16 = getDirname(game_exe) orelse win32.L(".");
+    std.log.info("Init Thread running!", .{});
+
+    const stdout_path = win32.L("C:\\temp\\marlermod-stdout.log");
+    const stderr_path = win32.L("C:\\temp\\marlermod-stderr.log");
+
+    var security_attrs: win32.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = null,
+        .bInheritHandle = 1,
+    };
+
+    const stdout_file: std.fs.File = .{
+        .handle = win32.CreateFileW(
+            stdout_path,
+            .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
+            .{ .READ = 1 },
+            &security_attrs,
+            .CREATE_ALWAYS, // always create and truncate the file
+            .{ .FILE_ATTRIBUTE_NORMAL = 1 },
+            null,
+        ),
+    };
+    if (stdout_file.handle == win32.INVALID_HANDLE_VALUE) win32.panicWin32(
+        "CreateFileW (stdout)",
+        win32.GetLastError(),
+    );
+    defer stdout_file.close();
+
+    security_attrs = .{
+        .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = null,
+        .bInheritHandle = 1,
+    };
+
+    const stderr_file: std.fs.File = .{
+        .handle = win32.CreateFileW(
+            stderr_path,
+            .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
+            .{ .READ = 1 },
+            &security_attrs,
+            .CREATE_ALWAYS, // always create and truncate the file
+            .{ .FILE_ATTRIBUTE_NORMAL = 1 },
+            null,
+        ),
+    };
+    if (stderr_file.handle == win32.INVALID_HANDLE_VALUE) win32.panicWin32(
+        "CreateFileW (stdout)",
+        win32.GetLastError(),
+    );
+    defer stderr_file.close();
+
+    if (true) {
+        var stdout = stdout_file.writer(&.{});
+        stdout.interface.writeAll("launcher has created this log for the child process stdout\n") catch {
+            std.log.err(
+                "write to stdout failed with {t}",
+                .{stdout.err orelse error.Unexpected},
+            );
+        };
+    }
+    if (true) {
+        var stderr = stderr_file.writer(&.{});
+        stderr.interface.writeAll("launcher has created this log for the child process stderr\n") catch {
+            std.log.err(
+                "write to stderr failed with {t}",
+                .{stderr.err orelse error.Unexpected},
+            );
+        };
+    }
 
     var si: win32.STARTUPINFOW = .{
         .cb = @sizeOf(win32.STARTUPINFOW),
@@ -72,24 +140,23 @@ fn launchAndInject(
         .dwXCountChars = 0,
         .dwYCountChars = 0,
         .dwFillAttribute = 0,
-        .dwFlags = .{},
+        .dwFlags = .{ .USESTDHANDLES = 1 },
         .wShowWindow = 0,
         .cbReserved2 = 0,
         .lpReserved2 = null,
-        .hStdInput = null,
-        .hStdOutput = null,
-        .hStdError = null,
+        .hStdInput = std.fs.File.stdin().handle,
+        .hStdOutput = stdout_file.handle,
+        .hStdError = stderr_file.handle,
     };
 
     var pi: win32.PROCESS_INFORMATION = undefined;
 
-    // Create process in suspended state
     const result = win32.CreateProcessW(
         game_exe.ptr,
         null,
         null,
         null,
-        0,
+        1, // bInheritHandles
         win32.CREATE_SUSPENDED,
         null,
         // game_dir_w.ptr,

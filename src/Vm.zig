@@ -223,6 +223,7 @@ pub fn evalFunction(
     if (!args_addr.eql(vm.mem.top())) return vm.err.set(.{ .not_implemented = "evalFunction stack cleanup" });
     return after_close_brace;
 }
+
 fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
@@ -272,153 +273,6 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             try vm.endSymbol();
             return .{ .statement_end = after_definition };
         },
-        // .keyword_import => {
-        //     const name_kind: MethodNameKind, const name_extent: Extent = blk: {
-        //         const token = lex(vm.text, first_token.end);
-        //         break :blk switch (token.tag) {
-        //             .identifier => .{ .id, token.extent() },
-        //             .keyword_new => .{ .new, token.extent() },
-        //             else => return vm.err.set(.{ .unexpected_token = .{
-        //                 .expected = "an identifier or 'new' after 'import'",
-        //                 .token = token,
-        //             } }),
-        //         };
-        //     };
-
-        //     const param_count: u16, const param_end = blk: {
-        //         const token = lex(vm.text, name_extent.end);
-        //         if (token.tag != .number_literal) return vm.err.set(.{ .unexpected_token = .{
-        //             .expected = "an parameter count integer",
-        //             .token = token,
-        //         } });
-        //         const param_str = vm.text[token.start..token.end];
-        //         const value = std.fmt.parseInt(u16, param_str, 0) catch |err| switch (err) {
-        //             error.Overflow => return vm.err.set(.{ .num_literal_overflow = token.extent() }),
-        //             error.InvalidCharacter => return vm.err.set(.{ .bad_num_literal = token.extent() }),
-        //         };
-        //         break :blk .{ value, token.end };
-        //     };
-        //     const after_from = try eat(vm.text, &vm.err).eatToken(param_end, .identifier_from);
-
-        //     const expr_addr = vm.mem.top();
-
-        //     const first_class_token = lex(vm.text, after_from);
-        //     const after_expr = try vm.evalExpr(first_class_token) orelse return vm.err.set(.{ .unexpected_token = .{
-        //         .expected = "an expression after 'from'",
-        //         .token = first_class_token,
-        //     } });
-
-        //     if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .import_from_non_class = .{
-        //         .pos = first_class_token.start,
-        //         .actual_type = null,
-        //     } });
-
-        //     const from_type, const from_value_addr = vm.readValue(Type, expr_addr);
-        //     if (from_type != .class) return vm.err.set(.{ .import_from_non_class = .{
-        //         .pos = first_class_token.start,
-        //         .actual_type = from_type,
-        //     } });
-        //     const class, const end_addr = vm.readValue(*const mono.Class, from_value_addr);
-        //     std.debug.assert(end_addr.eql(vm.mem.top()));
-        //     // TODO: add check that scans to see if anyone is pointing to discarded memory?
-        //     _ = vm.mem.discardFrom(expr_addr);
-
-        //     var managed_id_buf: ManagedId = undefined;
-        //     const name: [:0]const u8 = blk: switch (name_kind) {
-        //         .id => {
-        //             managed_id_buf = try vm.managedId(name_extent);
-        //             break :blk managed_id_buf.slice();
-        //         },
-        //         .new => ".ctor",
-        //     };
-        //     const method = vm.mono_funcs.class_get_method_from_name(class, name, param_count) orelse return vm.err.set(
-        //         .{ .missing_method = .{
-        //             .class = class,
-        //             .name_kind = name_kind,
-        //             .name_extent = name_extent,
-        //             .param_count = param_count,
-        //         } },
-        //     );
-
-        //     const method_flags = vm.mono_funcs.method_get_flags(method, null);
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     std.debug.print("method '{s}' flags={}\n", .{ name, method_flags });
-
-        //     const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
-        //         "method has no signature?",
-        //     );
-
-        //     const return_type: ?Type = blk: {
-        //         const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
-        //             "method has no return type?",
-        //         );
-        //         const return_type_kind = vm.mono_funcs.type_get_type(return_type);
-        //         break :blk switch (return_type_kind) {
-        //             .void => null,
-        //             .valuetype => return vm.err.set(.{ .not_implemented = "return valuetype" }),
-        //             .object => return vm.err.set(.{ .not_implemented = "return object" }),
-        //             else => |k| std.debug.panic(
-        //                 "todo: handle return type '{?s}' ({})",
-        //                 .{ std.enums.tagName(mono.TypeKind, k), @intFromEnum(k) },
-        //             ),
-        //         };
-        //     };
-
-        //     if (method_flags.static) {
-        //         return vm.err.set(.{ .not_implemented = "calling non-static methods" });
-        //     }
-
-        //     var iterator: ?*anyopaque = null;
-        //     for (0..@intCast(param_count)) |param_index| {
-        //         const param_type = vm.mono_funcs.signature_get_params(
-        //             method_sig,
-        //             &iterator,
-        //         ) orelse std.debug.panic(
-        //             "mono_signature_get_params with index {} returned null even though there are {} parameters",
-        //             .{ param_index, param_count },
-        //         );
-        //         _ = param_type;
-        //         return vm.err.set(.{ .not_implemented = "methods with params" });
-        //     }
-
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     // TODO: we also need to know if this method is static or not, if not,
-        //     //       then we need to add the "this" pointer parameter
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        //     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-        //     const signature_addr = vm.mem.top();
-        //     const signature: *FunctionSignature = try vm.push(FunctionSignature);
-        //     signature.* = .{
-        //         .return_type = return_type,
-        //         .body = switch (name_kind) {
-        //             .id => .{ .managed_method = method },
-        //             .new => .{ .managed_ctor = method },
-        //         },
-        //         .param_count = param_count,
-        //     };
-
-        //     for (0..param_count) |param_index| {
-        //         _ = param_index;
-        //         return vm.err.set(.{ .not_implemented = "managed functions with parameters" });
-        //     }
-
-        //     const function_value_addr = vm.mem.top();
-        //     (try vm.push(Type)).* = .function;
-        //     (try vm.push(Memory.Addr)).* = signature_addr;
-
-        //     const function_symbol: *Symbol = try vm.push(Symbol);
-        //     function_symbol.* = .{
-        //         .list_node = .{},
-        //         .extent = name_extent,
-        //         .value_addr = function_value_addr,
-        //     };
-        //     vm.symbols.prepend(&function_symbol.list_node);
-        //     return .{ .statement_end = after_expr };
-        // },
         else => {},
     }
 
@@ -518,19 +372,6 @@ fn evalExprSuffix(
                     return vm.err.set(.{ .not_implemented = "class member" });
                 },
                 .object => vm.err.set(.{ .not_implemented = "object fields" }),
-                // .class => {
-                //     const class, const end = vm.readValue(*const mono.Class, value_addr);
-                //     std.debug.assert(end.eql(vm.mem.top()));
-                //     _ = vm.mem.discardFrom(expr_addr);
-                //     (try vm.push(Type)).* = .class_member;
-                //     (try vm.push(*const mono.Class)).* = class;
-                //     // (try vm.push(u8)).* = 0;
-                //     (try vm.push(usize)).* = id_extent.start;
-                //     return id_extent.end;
-                // },
-                // .class_member => {
-                //     return vm.err.set(.{ .not_implemented = "class members(2)" });
-                // },
             };
         },
         .l_paren => {
@@ -617,9 +458,6 @@ fn evalExprSuffix(
                     }
                     return args.end;
                 },
-                // .function_value => {
-                //     return vm.err.set(.{ .not_implemented = "should you be able to call functions by value?" });
-                // },
                 .script_function => |param_start| {
                     const params = try eat(vm.text, &vm.err).evalParamDeclList(param_start);
                     const args_addr = vm.mem.top();
@@ -1424,12 +1262,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Discard", .@"@Discard" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
 });
-// pub const builtin_symbols = std.StaticStringMap(Value).initComptime(.{
-//     // .{ "void", .{ .type =  },
-//     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-//     // TODO: remove this
-//     .{ "placeholder", Value{ .type = null } },
-// });
 
 const Token = struct {
     tag: Tag,
@@ -2847,18 +2679,12 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
     try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // TODO: implement this next
-    if (false) try testBadCode(
+    try testBadCode(
         mono_funcs,
-        "@IsClass(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
+        "@Class(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
-    if (false) try testBadCode(
-        mono_funcs,
-        "@IsClass(@Assembly(\"mscorlib\"), \"DoesNot\", \"Exist\")",
-        "1: this assembly does not have a class named \"Exist\" in namespace \"DoesNot\"",
-    );
+    try testBadCode(mono_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named Exist in namespace DoesNot");
     try testBadCode(mono_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
     // try testBadCode(mono_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;

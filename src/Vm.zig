@@ -5,6 +5,7 @@ err: Error,
 text: []const u8,
 mem: Memory,
 symbols: std.SinglyLinkedList,
+tests_scheduled: bool = false,
 
 const Extent = struct { start: usize, end: usize };
 
@@ -1000,6 +1001,9 @@ fn evalBuiltin(
             std.debug.assert(!args_addr.eql(vm.mem.top()));
             vm.discardTopValue(args_addr);
         },
+        .@"@ScheduleTests" => {
+            vm.tests_scheduled = true;
+        },
     }
 }
 
@@ -1327,6 +1331,8 @@ const Builtin = enum {
     @"@Assembly",
     @"@Class",
     @"@Discard",
+    //
+    @"@ScheduleTests",
     pub fn params(builtin: Builtin) []const BuiltinParamType {
         return switch (builtin) {
             .@"@Nothing" => &.{},
@@ -1334,6 +1340,7 @@ const Builtin = enum {
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@Discard" => &.{.anything},
+            .@"@ScheduleTests" => &.{},
         };
     }
     pub fn paramCount(builtin: Builtin) u16 {
@@ -1348,6 +1355,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
     .{ "@Discard", .@"@Discard" },
+    .{ "@ScheduleTests", .@"@ScheduleTests" },
 });
 // pub const builtin_symbols = std.StaticStringMap(Value).initComptime(.{
 //     // .{ "void", .{ .type =  },
@@ -2715,6 +2723,11 @@ const ErrorFmt = struct {
         }
     }
 };
+
+pub fn runTests(mono_funcs: *const mono.Funcs) !void {
+    try badCodeTests(mono_funcs);
+    try goodCodeTests(mono_funcs);
+}
 
 test {
     try badCodeTests(&monomock.funcs);

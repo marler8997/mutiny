@@ -164,9 +164,22 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
-        updateMods(&mono_funcs, scratch.allocator());
+        var tests_scheduled: bool = false;
+        updateMods(&mono_funcs, scratch.allocator(), &tests_scheduled);
         if (!scratch.reset(.retain_capacity)) {
             std.log.warn("reset scratch allocator failed?", .{});
+        }
+
+        if (tests_scheduled) {
+            std.log.info("@ScheduleTests requested! running...", .{});
+            Vm.runTests(&mono_funcs) catch |err| {
+                std.log.err("tests failed with {s}:", .{@errorName(err)});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                } else {
+                    std.log.err("    no error trace", .{});
+                }
+            };
         }
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // std.Thread.sleep(std.time.ns_per_s * 5);
@@ -318,6 +331,7 @@ const Mod = struct {
 fn updateMods(
     mono_funcs: *const mono.Funcs,
     scratch: std.mem.Allocator,
+    run_tests_ref: *bool,
 ) void {
     {
         var maybe_mod = global.mods.first;
@@ -393,6 +407,8 @@ fn updateMods(
                 vm.evalRoot() catch {
                     std.log.err("{s}:{f}", .{ mod.name(), vm.err.fmt(state.text) });
                 };
+                run_tests_ref.* = run_tests_ref.* or vm.tests_scheduled;
+                // TODO: call vm.verifyStack?
                 state.processed = true;
             },
         }

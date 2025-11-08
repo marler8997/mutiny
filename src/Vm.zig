@@ -970,19 +970,16 @@ fn evalBuiltin(
             (try vm.push(*const mono.Assembly)).* = match;
         },
         .@"@Class" => {
-            const assembly_field_type, const assembly_addr = vm.readValue(Type, args_addr);
-            std.debug.assert(assembly_field_type == .assembly_field);
-            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, assembly_addr);
-            const id_start, var end = vm.readValue(usize, id_start_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(args_addr);
+            const field = switch (vm.pop(args_addr)) {
+                .assembly_field => |f| f,
+                else => unreachable,
+            };
             var namespace: ManagedId = .empty();
             var name: ManagedId = .empty();
-            if (lexClass(vm.text, &namespace, &name, id_start)) |too_big_end| return vm.err.set(.{
-                .id_too_big = .{ .start = id_start, .end = too_big_end },
+            if (lexClass(vm.text, &namespace, &name, field.id_start)) |too_big_end| return vm.err.set(.{
+                .id_too_big = .{ .start = field.id_start, .end = too_big_end },
             });
-            const image = vm.mono_funcs.assembly_get_image(assembly) orelse @panic(
+            const image = vm.mono_funcs.assembly_get_image(field.assembly) orelse @panic(
                 "mono_assembly_get_image returned null",
             );
             const class = vm.mono_funcs.class_from_name(
@@ -990,8 +987,8 @@ fn evalBuiltin(
                 namespace.slice(),
                 name.slice(),
             ) orelse return vm.err.set(.{ .missing_class = .{
-                .assembly = assembly,
-                .id_start = id_start,
+                .assembly = field.assembly,
+                .id_start = field.id_start,
             } });
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
@@ -1131,6 +1128,17 @@ fn pop(vm: *Vm, addr: Memory.Addr) Value {
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .string_literal = token.extent() };
         },
+        .assembly_field => {
+            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, value_addr);
+            const id_start, var end = vm.readValue(usize, id_start_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .assembly_field = .{
+                .assembly = assembly,
+                .id_start = id_start,
+            } };
+        },
         else => @panic("todo"),
     }
 }
@@ -1143,8 +1151,10 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 
 const Value = union(enum) {
     string_literal: Extent,
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    placeholder: i32,
+    assembly_field: struct {
+        assembly: *const mono.Assembly,
+        id_start: usize,
+    },
 };
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {

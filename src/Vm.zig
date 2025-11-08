@@ -1116,11 +1116,7 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
 fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
     return vm.mem.push(T) catch return vm.err.set(.oom);
 }
-fn pop(vm: *Vm, addr: Memory.Addr) union(enum) {
-    string_literal: Extent,
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    placeholder: i32,
-} {
+fn pop(vm: *Vm, addr: Memory.Addr) Value {
     const value_type, const value_addr = vm.readValue(Type, addr);
     switch (value_type) {
         .string_literal => {
@@ -1144,6 +1140,12 @@ fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory
 fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Addr } {
     return .{ vm.mem.toPointer(T, addr).*, vm.mem.after(T, addr) };
 }
+
+const Value = union(enum) {
+    string_literal: Extent,
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    placeholder: i32,
+};
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {
     const len = extent.end - extent.start;

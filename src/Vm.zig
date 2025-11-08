@@ -566,12 +566,21 @@ fn evalExprSuffix(
                     std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
                     return vm.err.set(.{ .not_implemented = "handle exception" });
                 }
-                switch (vm.mono_funcs.type_get_type(return_type)) {
-                    .void => if (maybe_result) |_| {
-                        return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
-                    },
+                const return_type_kind = vm.mono_funcs.type_get_type(return_type);
+                if (return_type_kind == .void) {
+                    if (maybe_result) |_| {
+                        return vm.err.set(
+                            .{ .not_implemented = "error message for calling managed function with void return type that returned something" },
+                        );
+                    }
+                    return args.end;
+                }
+                const result = maybe_result orelse return vm.err.set(
+                    .{ .not_implemented = "error message for calling managed function with non-void return type that returned null" },
+                );
+                switch (return_type_kind) {
+                    .void => unreachable, // would have returned above
                     .i4 => {
-                        const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
                         const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
                         std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
                         (try vm.push(Type)).* = .integer;

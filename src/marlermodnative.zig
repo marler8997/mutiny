@@ -1,11 +1,25 @@
 const global = struct {
-    var mutex: Mutex = .{};
-    var localappdata_resolved: bool = false;
-    var localappdata: ?[]const u16 = null;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
+    var paniced_threads_dumping: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 
     var mods: std.DoublyLinkedList = .{};
+
+    const localappdata = struct {
+        var mutex: Mutex = .{};
+        var initialized: bool = false;
+        var cached: ?[:0]const u16 = null;
+    };
+    pub fn getLocalappdata() ?[]const u16 {
+        // localappdata.mutex.lock();
+        // defer localappdata.mutex.unlock();
+        // if (!localappdata.initialized) {
+        //     localappdata.cached = std.process.getenvW(win32.L("localappdata"));
+        //     localappdata.initialized = true;
+        // }
+        // return localappdata.cached;
+        return null;
+    }
 };
 
 pub fn panic(
@@ -15,6 +29,13 @@ pub fn panic(
 ) noreturn {
     if (0 == global.paniced_threads_logging.fetchAdd(1, .seq_cst)) {
         std.log.err("panic: {s}", .{msg});
+    }
+    if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
+        // if (error_return_trace) |trace| {
+        //     dumpStackTrace(trace.*);
+        // } else {
+        //     std.log.err("    no error trace", .{});
+        // }
     }
     if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
         var buf: [200]u8 = undefined;
@@ -33,6 +54,23 @@ pub fn panic(
     @breakpoint();
     std.process.exit(0xff);
 }
+
+// fn dumpStackTrace() void {
+//     // const stderr = lockStderrWriter(&.{});
+//     // defer unlockStderrWriter();
+//     if (builtin.strip_debug_info) {
+//         stderr.writeAll("Unable to dump stack trace: debug info stripped\n") catch return;
+//         return;
+//     }
+//     const debug_info = getSelfDebugInfo() catch |err| {
+//         stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
+//         return;
+//     };
+//     writeStackTrace(stack_trace, stderr, debug_info, io.tty.detectConfig(.stderr())) catch |err| {
+//         stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
+//         return;
+//     };
+// }
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -73,6 +111,32 @@ pub export fn _DllMainCRTStartup(
     return 1; // success
 }
 
+// fn on_vectored_exception(maybe_e: ?*win32.EXCEPTION_POINTERS) callconv(.winapi) i32 {
+//     const e = maybe_e orelse {
+//         std.log.err("exception! no info", .{});
+//         return 0; // EXCEPTION_CONTINUE_SEARCH
+//     };
+//     const first_record = e.ExceptionRecord orelse {
+//         std.log.err("exception! no records", .{});
+//         return 0; // EXCEPTION_CONTINUE_SEARCH
+//     };
+//     switch (first_record.ExceptionCode) {
+//         0x406d1388, // used for naming threads
+//         => return 0, // EXCEPTION_CONTINUE_SEARCH
+//         else => {},
+//     }
+//     std.log.err("exception! records:", .{});
+//     var r = first_record;
+//     while (true) {
+//         std.log.err(
+//             "  code={} (0x{0x}) flags=0x{x} address=0x{x}",
+//             .{ r.ExceptionCode, r.ExceptionFlags, @intFromPtr(r.ExceptionAddress) },
+//         );
+//         r = r.ExceptionRecord orelse break;
+//     }
+//     return 0; // EXCEPTION_CONTINUE_SEARCH
+// }
+
 fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
@@ -91,6 +155,12 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         );
     };
 
+    // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
+    //     std.log.info("AddVectoredExceptionHandler success", .{});
+    // } else {
+    //     std.log.err("AddVectoredExceptionHandler failed, error={f}", .{win32.GetLastError()});
+    // }
+
     const mono_dll_name = "mono-2.0-bdwgc.dll";
     const mono_mod = blk: {
         var attempt: u32 = 0;
@@ -106,7 +176,12 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             }
             const max_attempts = 30;
             if (attempt >= max_attempts) {
-                std.log.err("unable to load mono dll after {} attempts", .{max_attempts});
+                _ = fmtMsgbox(
+                    .{},
+                    "Mutiny Fatal Error",
+                    "failed to load the mono DLL after {} attempts",
+                    .{max_attempts},
+                );
                 return 0xffffffff;
             }
             std.Thread.sleep(std.time.ns_per_s * 1);
@@ -116,10 +191,15 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     const mono_funcs: mono.Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
-        break :blk mono.Funcs.init(&missing_proc, mono_mod) catch errExit(
-            "the mono dll '{s}' is missing proc '{s}'",
-            .{ mono_dll_name, missing_proc },
-        );
+        break :blk mono.Funcs.init(&missing_proc, mono_mod) catch {
+            _ = fmtMsgbox(
+                .{},
+                "Mutiny Fatal Error",
+                "the mono dll '{s}' is missing proc '{s}'",
+                .{ mono_dll_name, missing_proc },
+            );
+            return 0xffffffff;
+        };
     };
 
     const root_domain = blk: {
@@ -154,13 +234,6 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     // domain_get is how the Vm accesses the domain, make sure it's
     // what we expect after attaching our thread to it
     std.debug.assert(mono_funcs.domain_get() == root_domain);
-
-    // if (true) @panic("todo");
-    // // Now initialize managed runtime
-    // initializeManagedRuntime(mono_mod) catch |err| {
-    //     std.log.err("Failed to initialize managed runtime: {}", .{err});
-    //     return 0xffffffff;
-    // };
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     while (true) {
@@ -445,249 +518,85 @@ fn log(
     const level_txt = comptime message_level.asText();
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
 
-    const localappdata = blk: {
-        global.mutex.lock();
-        defer global.mutex.unlock();
-        if (!global.localappdata_resolved) {
-            global.localappdata = std.process.getenvW(win32.L("localappdata"));
-            global.localappdata_resolved = true;
-        }
-        break :blk global.localappdata;
-    } orelse {
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        if (true) @panic("no localappdata");
-        // no localappdata, guess we won't log anything
-        return;
-    };
+    const maybe_localappdata = global.getLocalappdata();
+    // var logfile_size: ?u64 = null;
 
-    const log_size = log_size_blk: {
-        const log_file = openLog(localappdata) orelse {
-            if (true) @panic("here");
-            // TODO: should we do anything?
-            return;
-        };
-        defer log_file.close();
-
-        const name: []const u16 = blk: {
-            const p = getImagePathName() orelse break :blk win32.L("?");
-            break :blk getBasename(p);
-        };
-
-        var out_buffer: [1024]u8 = undefined;
-        var file_writer = log_file.writer(&out_buffer);
-        const writer = &file_writer.interface;
-        // TODO: maybe we should also log to OutputDebug?
-
-        {
-            var time: win32.SYSTEMTIME = undefined;
-            win32.GetSystemTime(&time);
-            writer.print(
-                "{:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|{f}|" ++ level_txt ++ scope_suffix ++ "|",
-                .{
-                    time.wHour,                  time.wMinute,               time.wSecond,                 time.wMilliseconds,
-                    win32.GetCurrentProcessId(), win32.GetCurrentThreadId(), std.unicode.fmtUtf16Le(name),
-                },
-            ) catch |err| errExit("log failed with {s}", .{@errorName(err)});
-        }
-        writer.print(format ++ "\n", args) catch |err| errExit("log failed with {s}", .{@errorName(err)});
-        writer.flush() catch |err| errExit("flush log file failed with {s}", .{@errorName(err)});
-
-        var file_size: win32.LARGE_INTEGER = undefined;
-        if (0 == win32.GetFileSizeEx(log_file.handle, &file_size))
-            break :log_size_blk 0;
-        break :log_size_blk file_size.QuadPart;
-    };
-
-    // roll at 1 MB
-    const roll_size = 1 * 1024 * 1024; // 1 MB
-    if (log_size >= roll_size) {
-        rollLog(localappdata);
-    }
-}
-
-const max_log_path = 2000;
-
-fn makeLocalAppDataPath(
-    path_buf: []u16,
-    localappdata: []const u16,
-    sub_path: []const u16,
-) ?[:0]const u16 {
-    if (localappdata.len + 1 + sub_path.len >= path_buf.len) {
-        // oh well
-        return null;
-    }
-    @memcpy(path_buf[0..localappdata.len], localappdata);
-    path_buf[localappdata.len] = '\\';
-    @memcpy(path_buf[localappdata.len + 1 ..][0..sub_path.len], sub_path);
-    path_buf[localappdata.len + 1 + sub_path.len] = 0;
-    return path_buf.ptr[0 .. localappdata.len + 1 + sub_path.len :0];
-}
-
-fn openLog(localappdata: []const u16) ?std.fs.File {
-    // var path_buf: [max_log_path]u16 = undefined;
-    // const path = makeLocalAppDataPath(&path_buf, localappdata, win32.L("marlermod\\log.txt")) orelse return null;
-    _ = localappdata;
-    const path = win32.L("C:\\temp\\marlermod.log");
-
-    // if (getDirname(path)) |log_dir| {
-    //     _ = log_dir;
-    //     @panic("todo");
-    // }
-
-    var attempt: u32 = 1;
-    while (true) : (attempt += 1) {
-        const handle = win32.CreateFileW(
-            path,
-            .{
-                //.FILE_WRITE_DATA = 1,
-                .FILE_APPEND_DATA = 1,
-                //.FILE_WRITE_EA = 1,
-                //.FILE_WRITE_ATTRIBUTES = 1,
-                //.READ_CONTROL = 1,
-                //.SYNCHRONIZE = 1,
-            },
-            .{ .READ = 1 },
-            null,
-            .OPEN_ALWAYS,
-            .{ .FILE_ATTRIBUTE_NORMAL = 1 },
-            null,
+    var buffer: [400]u8 = undefined;
+    const writer: *std.Io.Writer = blk: {
+        const localappdata = maybe_localappdata orelse break :blk std.debug.lockStderrWriter(
+            &buffer,
         );
-        if (handle == win32.INVALID_HANDLE_VALUE) switch (win32.GetLastError()) {
-            .ERROR_SHARING_VIOLATION => {
-                if (attempt >= 5) return null;
-                // try again
-                win32.Sleep(1);
-                continue;
-            },
-            else => |e| {
-                if (attempt >= 5) return null;
-                // try again
-                win32.Sleep(1);
-                _ = e;
-                //std.debug.panic("CreateFile failed, error={}", .{e}),
-                continue;
-            },
-        };
-        return .{ .handle = handle };
+        _ = localappdata;
+        // const log_file = openLog(localappdata);
+        // defer log_file.close();
+        @panic("todo");
+        // const log_file = openLog(localappdata) orelse {
+        //     @p
+        // };
+    };
+    defer if (maybe_localappdata == null) std.debug.unlockStderrWriter();
+
+    // const name: []const u16 = blk: {
+    //     const p = getImagePathName() orelse break :blk win32.L("?");
+    //     break :blk getBasename(p);
+    // };
+
+    {
+        var time: win32.SYSTEMTIME = undefined;
+        win32.GetSystemTime(&time);
+        writer.print(
+            "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|" ++ level_txt ++ scope_suffix ++ "|",
+            .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentThreadId() },
+        ) catch |err| std.debug.panic("print log prefix failed with {s}", .{@errorName(err)});
     }
+    writer.print(format ++ "\n", args) catch |err| std.debug.panic("print log failed with {s}", .{@errorName(err)});
+    writer.flush() catch |err| std.debug.panic("flush log file failed with {s}", .{@errorName(err)});
 }
 
-fn rollLog(localappdata: []const u16) void {
-    var src_buf: [max_log_path]u16 = undefined;
-    const src = makeLocalAppDataPath(&src_buf, localappdata, win32.L("marlermod\\log.txt")) orelse return;
-    var dst_buf: [max_log_path + 2]u16 = undefined;
-    const dst = makeLocalAppDataPath(&dst_buf, localappdata, win32.L("marlermod\\log.1.txt")) orelse return;
-    _ = win32.MoveFileExW(src, dst, .{ .REPLACE_EXISTING = 1 });
-}
+// fn getImagePathName() ?[]const u16 {
+//     const str = &std.os.windows.peb().ProcessParameters.ImagePathName;
+//     if (str.Buffer) |buffer|
+//         return buffer[0..@divTrunc(str.Length, 2)];
+//     return null;
+// }
+// fn getBasename(path: []const u16) []const u16 {
+//     for (1..path.len) |i| {
+//         if (path[path.len - i] == '\\')
+//             return path[path.len - i + 1 ..];
+//     }
+//     return path;
+// }
+// fn getDirname(path: []const u16) ?[]const u16 {
+//     for (1..path.len) |i| {
+//         if (path[path.len - i] == '\\')
+//             return path[0 .. path.len - i];
+//     }
+//     return null;
+// }
 
-fn getImagePathName() ?[]const u16 {
-    const str = &std.os.windows.peb().ProcessParameters.ImagePathName;
-    if (str.Buffer) |buffer|
-        return buffer[0..@divTrunc(str.Length, 2)];
-    return null;
-}
-fn getBasename(path: []const u16) []const u16 {
-    for (1..path.len) |i| {
-        if (path[path.len - i] == '\\')
-            return path[path.len - i + 1 ..];
-    }
-    return path;
-}
-fn getDirname(path: []const u16) ?[]const u16 {
-    for (1..path.len) |i| {
-        if (path[path.len - i] == '\\')
-            return path[0 .. path.len - i];
-    }
-    return null;
-}
-
-fn msgbox(
+fn fmtMsgbox(
     style: win32.MESSAGEBOX_STYLE,
     title: [*:0]const u8,
-    comptime fmt: []const u8,
+    comptime fmt: [:0]const u8,
     args: anytype,
 ) win32.MESSAGEBOX_RESULT {
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     const msg = std.fmt.allocPrintSentinel(arena, fmt, args, 0) catch |err| switch (err) {
-        error.OutOfMemory => {
-            _ = win32.MessageBoxA(null, "Out of memory", title, .{});
-            win32.ExitProcess(0xff);
-        },
+        error.OutOfMemory => fmt,
     };
     //defer global.arena.free(msg);
     return win32.MessageBoxA(null, msg, title, style);
 }
 
-fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
-    //if (global.log_file) |f| {
-    //    f.writer().writeAll("fatal: ") catch { };
-    //    f.writer().print(fmt, args) catch { };
-    //}
-    _ = msgbox(.{}, "MarlerMod.dll: Fatal Error", fmt, args);
-    win32.ExitProcess(0xff);
-}
-
-// fn initializeManagedRuntime(mono_mod: win32.HINSTANCE) error{MissingProc}!void {
-//     std.log.info("initializing managed runtime...", .{});
-//     _ = mono_mod;
-
-//     // const mono_thread_attach = win32.GetProcAddress(mono_mod, "mono_thread_attach") orelse return error.MissingFunction;
-//     // const mono_domain_assembly_open = win32.GetProcAddress(mono_mod, "mono_domain_assembly_open") orelse return error.MissingFunction;
-//     // const mono_assembly_get_image = win32.GetProcAddress(mono_mod, "mono_assembly_get_image") orelse return error.MissingFunction;
-//     // const mono_class_from_name = win32.GetProcAddress(mono_mod, "mono_class_from_name") orelse return error.MissingFunction;
-//     // const mono_class_get_method_from_name = win32.GetProcAddress(mono_mod, "mono_class_get_method_from_name") orelse return error.MissingFunction;
-//     // const mono_runtime_invoke = win32.GetProcAddress(mono_mod, "mono_runtime_invoke") orelse return error.MissingFunction;
-
-//     // // Cast to proper function types
-//     // const thread_attach: *const fn (?*mono.Domain) callconv(.c) ?*MonoThread = @ptrCast(mono_thread_attach);
-//     // const domain_assembly_open: *const fn (?*mono.Domain, [*:0]const u8) callconv(.c) ?*MonoAssembly = @ptrCast(mono_domain_assembly_open);
-//     // const assembly_get_image: *const fn (?*MonoAssembly) callconv(.c) ?*MonoImage = @ptrCast(mono_assembly_get_image);
-//     // const class_from_name: *const fn (?*MonoImage, [*:0]const u8, [*:0]const u8) callconv(.c) ?*MonoClass = @ptrCast(mono_class_from_name);
-//     // const class_get_method_from_name: *const fn (?*MonoClass, [*:0]const u8, c_int) callconv(.c) ?*MonoMethod = @ptrCast(mono_class_get_method_from_name);
-//     // const runtime_invoke: *const fn (?*MonoMethod, ?*MonoObject, ?*?*anyopaque, ?*?*MonoObject) callconv(.c) ?*MonoObject = @ptrCast(mono_runtime_invoke);
-
-//     // Get root domain and attach thread
-//     // const domain = mono_get_root_domain() orelse errExit(
-//     //     "mono_get_root_domain returned NULL",
-//     //     .{},
-//     // );
-//     // std.log.info("Mono root domain: 0x{x}", .{@intFromPtr(domain)});
-
-//     // const thread = thread_attach(domain) orelse return error.ThreadAttachFailed;
-//     // std.log.info("Thread attached: 0x{x}", .{@intFromPtr(thread)});
-
-//     // // Load managed assembly
-//     // const assembly_path = "C:\\temp\\MarlerModManaged.dll";
-//     // std.log.info("Loading managed assembly: {s}", .{assembly_path});
-//     // const assembly = domain_assembly_open(domain, assembly_path) orelse return error.AssemblyLoadFailed;
-
-//     // const image = assembly_get_image(assembly) orelse return error.GetImageFailed;
-
-//     // // Find class: MarlerMod.ModLoader
-//     // const namespace = "MarlerMod";
-//     // const class_name = "ModLoader";
-//     // std.log.info("Finding class: {s}.{s}", .{ namespace, class_name });
-//     // const class = class_from_name(image, namespace, class_name) orelse return error.ClassNotFound;
-
-//     // // Find method: Initialize
-//     // const method_name = "Initialize";
-//     // std.log.info("Finding method: {s}", .{method_name});
-//     // const method = class_get_method_from_name(class, method_name, 0) orelse return error.MethodNotFound;
-
-//     // // Invoke the method
-//     // std.log.info("Invoking {s}.{s}.{s}()", .{ namespace, class_name, method_name });
-//     // var exception: ?*MonoObject = null;
-//     // _ = runtime_invoke(method, null, null, &exception);
-
-//     // if (exception != null) {
-//     //     std.log.err("Exception occurred during method invocation", .{});
-//     //     return error.InvocationException;
-//     // }
-
-//     // std.log.info("Managed code initialized successfully!", .{});
-//     @panic("todo");
+// fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
+//     //if (global.log_file) |f| {
+//     //    f.writer().writeAll("fatal: ") catch { };
+//     //    f.writer().print(fmt, args) catch { };
+//     //}
+//     _ = msgbox(.{}, "MarlerMod.dll: Fatal Error", fmt, args);
+//     win32.ExitProcess(0xff);
 // }
 
 const std = @import("std");

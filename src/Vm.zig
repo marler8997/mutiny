@@ -994,59 +994,13 @@ fn evalBuiltin(
             (try vm.push(*const mono.Class)).* = class;
         },
         .@"@Discard" => {
-            std.debug.assert(!args_addr.eql(vm.mem.top()));
-            vm.discardTopValue(args_addr);
+            var value = vm.pop(args_addr);
+            value.discard();
         },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
         },
     }
-}
-
-fn discardTopValue(vm: *Vm, addr: Memory.Addr) void {
-    const value_type, const value_addr = vm.readValue(Type, addr);
-    const end = blk: switch (value_type) {
-        .integer => {
-            _, const end = vm.readPointer(i64, value_addr);
-            break :blk end;
-        },
-        .string_literal => {
-            _, const end = vm.readPointer(usize, value_addr);
-            break :blk end;
-        },
-        .function_value => {
-            @panic("todo");
-        },
-        .function_ptr => {
-            _, const end = vm.readPointer(Memory.Addr, value_addr);
-            break :blk end;
-        },
-        .assembly => {
-            _, const end = vm.readPointer(*const mono.Assembly, value_addr);
-            break :blk end;
-        },
-        .assembly_field => {
-            _, const id_start_addr = vm.readPointer(*const mono.Assembly, value_addr);
-            _, const end = vm.readPointer(usize, id_start_addr);
-            break :blk end;
-        },
-        .class => {
-            _, const end = vm.readPointer(*const mono.Class, value_addr);
-            break :blk end;
-        },
-        .class_member => {
-            _, const id_start_addr = vm.readPointer(*const mono.Class, value_addr);
-            _, const end = vm.readPointer(usize, id_start_addr);
-            break :blk end;
-        },
-        .object => {
-            _, const end = vm.readPointer(*const mono.Object, value_addr);
-            break :blk end;
-        },
-    };
-    std.debug.assert(end.eql(vm.mem.top()));
-    // TODO: add check that scans to see if anyone is pointing to discarded memory?
-    _ = vm.mem.discardFrom(addr);
 }
 
 const DottedIterator = struct {
@@ -1116,9 +1070,16 @@ fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
 fn pop(vm: *Vm, addr: Memory.Addr) Value {
     const value_type, const value_addr = vm.readValue(Type, addr);
     switch (value_type) {
+        .integer => {
+            const value, const end = vm.readValue(i64, value_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .integer = value };
+        },
         .string_literal => {
-            const start, const end_addr = vm.readValue(usize, value_addr);
-            std.debug.assert(end_addr.eql(vm.mem.top()));
+            const start, const end = vm.readValue(usize, value_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
             // TODO: add check that scans to see if anyone is pointing to discarded memory?
             _ = vm.mem.discardFrom(addr);
             std.debug.assert(vm.text[start] == '"');
@@ -1127,6 +1088,20 @@ fn pop(vm: *Vm, addr: Memory.Addr) Value {
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .string_literal = token.extent() };
+        },
+        .function_ptr => {
+            const signature_addr, const end = vm.readValue(Memory.Addr, value_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .function_ptr = signature_addr };
+        },
+        .assembly => {
+            const assembly, const end = vm.readValue(*const mono.Assembly, value_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .assembly = assembly };
         },
         .assembly_field => {
             const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, value_addr);
@@ -1139,7 +1114,25 @@ fn pop(vm: *Vm, addr: Memory.Addr) Value {
                 .id_start = id_start,
             } };
         },
-        else => @panic("todo"),
+        .class => {
+            const class, const end = vm.readValue(*const mono.Class, value_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .class = class };
+        },
+        .class_member => {
+            const class, const id_start_addr = vm.readValue(*const mono.Class, value_addr);
+            const id_start, var end = vm.readValue(usize, id_start_addr);
+            std.debug.assert(end.eql(vm.mem.top()));
+            // TODO: add check that scans to see if anyone is pointing to discarded memory?
+            _ = vm.mem.discardFrom(addr);
+            return .{ .class_member = .{
+                .class = class,
+                .id_start = id_start,
+            } };
+        },
+        else => |t| std.debug.panic("todo: implement pop for type '{s}'", .{@tagName(t)}),
     }
 }
 fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory.Addr } {
@@ -1150,11 +1143,30 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 }
 
 const Value = union(enum) {
+    integer: i64,
     string_literal: Extent,
+    function_ptr: Memory.Addr,
+    assembly: *const mono.Assembly,
     assembly_field: struct {
         assembly: *const mono.Assembly,
         id_start: usize,
     },
+    class: *const mono.Class,
+    class_member: struct {
+        class: *const mono.Class,
+        id_start: usize,
+    },
+    pub fn discard(value: *Value) void {
+        switch (value.*) {
+            .integer => {},
+            .string_literal => {},
+            .function_ptr => {},
+            .assembly => {},
+            .assembly_field => {},
+            .class => {},
+            .class_member => {},
+        }
+    }
 };
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {

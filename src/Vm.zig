@@ -2834,10 +2834,9 @@ const TestDomain = struct {
     mock_domain: if (is_test) monomock.Domain else void,
     thread: *const mono.Thread,
     pub fn init(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
-        std.debug.assert(null == mono_funcs.domain_get());
-
         if (is_test) {
             if (mono_funcs == &monomock.funcs) {
+                std.debug.assert(null == mono_funcs.domain_get());
                 self.mock_domain = .{};
                 monomock.setRootDomain(&self.mock_domain);
             }
@@ -2855,9 +2854,9 @@ const TestDomain = struct {
         std.debug.assert(mono_funcs.domain_get() == root_domain);
     }
     pub fn deinit(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
-        mono_funcs.thread_detach(self.thread);
         if (is_test) {
             if (mono_funcs == &monomock.funcs) {
+                mono_funcs.thread_detach(self.thread);
                 monomock.unsetRootDomain(&self.mock_domain);
                 self.mock_domain.deinit();
             }

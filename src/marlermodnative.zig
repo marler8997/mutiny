@@ -4,22 +4,6 @@ const global = struct {
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 
     var mods: std.DoublyLinkedList = .{};
-
-    const localappdata = struct {
-        var mutex: Mutex = .{};
-        var initialized: bool = false;
-        var cached: ?[:0]const u16 = null;
-    };
-    pub fn getLocalappdata() ?[]const u16 {
-        // localappdata.mutex.lock();
-        // defer localappdata.mutex.unlock();
-        // if (!localappdata.initialized) {
-        //     localappdata.cached = std.process.getenvW(win32.L("localappdata"));
-        //     localappdata.initialized = true;
-        // }
-        // return localappdata.cached;
-        return null;
-    }
 };
 
 pub fn panic(
@@ -31,16 +15,17 @@ pub fn panic(
         std.log.err("panic: {s}", .{msg});
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
-        // if (error_return_trace) |trace| {
-        //     dumpStackTrace(trace.*);
-        // } else {
-        //     std.log.err("    no error trace", .{});
-        // }
+        const stderr = std.debug.lockStderrWriter(&.{});
+        defer std.debug.unlockStderrWriter();
+        if (error_return_trace) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        std.debug.dumpCurrentStackTraceToWriter(ret_addr orelse @returnAddress(), stderr) catch {};
     }
     if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
         var buf: [200]u8 = undefined;
         if (std.fmt.bufPrintZ(&buf, "{s}", .{msg})) |msg_z| {
-            _ = win32.MessageBoxA(null, msg_z, "MarlerMod Panic", .{});
+            _ = win32.MessageBoxA(null, msg_z, "Mutiny Panic", .{});
         } else |_| {
             _ = win32.MessageBoxA(null, "message too long", "MarlerMod Panic", .{});
         }
@@ -49,10 +34,9 @@ pub fn panic(
     //     error: lld-link: undefined symbol: _tls_index
     // this must be because it uses a threadlocal variable "panic_stage"
     //std.builtin.default_panic(msg, error_return_trace, ret_addr);
-    _ = error_return_trace;
-    _ = ret_addr;
+    // _ = error_return_trace;
     @breakpoint();
-    std.process.exit(0xff);
+    win32.ExitThread(0x8071540);
 }
 
 // fn dumpStackTrace() void {
@@ -502,23 +486,9 @@ fn log(
     const level_txt = comptime message_level.asText();
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
 
-    const maybe_localappdata = global.getLocalappdata();
-    // var logfile_size: ?u64 = null;
-
     var buffer: [400]u8 = undefined;
-    const writer: *std.Io.Writer = blk: {
-        const localappdata = maybe_localappdata orelse break :blk std.debug.lockStderrWriter(
-            &buffer,
-        );
-        _ = localappdata;
-        // const log_file = openLog(localappdata);
-        // defer log_file.close();
-        @panic("todo");
-        // const log_file = openLog(localappdata) orelse {
-        //     @p
-        // };
-    };
-    defer if (maybe_localappdata == null) std.debug.unlockStderrWriter();
+    const writer = std.debug.lockStderrWriter(&buffer);
+    defer std.debug.unlockStderrWriter();
 
     // const name: []const u16 = blk: {
     //     const p = getImagePathName() orelse break :blk win32.L("?");

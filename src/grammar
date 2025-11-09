@@ -2,6 +2,9 @@ Root <- Statement*
 Statement
    <- if LPAREN Expr RPARN Block
     / yield Expr
+    / startloop
+    / endloop
+    / continue
     / fn IDENTIFIER ParamDeclList Block
     / var IDENTIFIER EQUAL Expr
     / IDENTIFIER EQUAL Expr

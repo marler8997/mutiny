@@ -1,10 +1,11 @@
 const Vm = @This();
 
 mono_funcs: *const mono.Funcs,
-err: Error,
+error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
 
+loop_text_offset: ?usize = null,
 symbol_state: union(enum) {
     none,
     evaluating: struct {
@@ -18,6 +19,16 @@ symbol_state: union(enum) {
 } = .none,
 
 tests_scheduled: bool = false,
+
+const ErrorResult = union(enum) {
+    exit,
+    err: Error,
+};
+
+fn setError(vm: *Vm, e: Error) error{Vm} {
+    vm.error_result = .{ .err = e };
+    return error.Vm;
+}
 
 const Extent = struct { start: usize, end: usize };
 
@@ -296,24 +307,34 @@ pub const Yield = struct {
     resume_offset: usize,
 };
 
-pub fn evalRoot(vm: *Vm, resume_offset: usize) error{Vm}!union(enum) { done, yield: Yield } {
+pub fn evalRoot(vm: *Vm, resume_offset: usize) error{Vm}!Yield {
     // std.debug.assert(vm.mem.top().eql(.zero));
     var offset: usize = resume_offset;
     while (true) {
         std.debug.assert(offset <= vm.text.len);
-        const after_statement = switch (try vm.evalStatement(offset)) {
+        const new_offset = blk: switch (try vm.evalStatement(offset)) {
             .not_statement => |token| {
-                if (token.tag == .eof) return .done;
-                return vm.err.set(.{ .unexpected_token = .{
+                if (token.tag == .eof) {
+                    vm.error_result = .exit;
+                    return error.Vm;
+                }
+                return vm.setError(.{ .unexpected_token = .{
                     .expected = "a statement",
                     .token = token,
                 } });
             },
-            .statement_end => |end| end,
-            .yield => |yield| return .{ .yield = yield },
+            .statement_end => |end| {
+                std.debug.assert(end > offset);
+                break :blk end;
+            },
+            .yield => |yield| return yield,
+            .@"continue" => |startloop_offset| {
+                std.debug.assert(startloop_offset < offset);
+                break :blk startloop_offset;
+            },
         };
-        std.debug.assert(after_statement > offset);
-        offset = after_statement;
+        std.debug.assert(new_offset != offset);
+        offset = new_offset;
     }
 }
 
@@ -325,7 +346,7 @@ pub fn evalFunction(
 ) error{Vm}!usize {
     const body_start = blk: {
         const token = lex(vm.text, start);
-        if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+        if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
             .expected = "an open brace '{' to start function body",
             .token = token,
         } });
@@ -335,56 +356,72 @@ pub fn evalFunction(
     const after_close_brace = blk: {
         var offset: usize = body_start;
         while (true) {
-            const after_statement = switch (try vm.evalStatement(offset)) {
+            const new_offset = switch (try vm.evalStatement(offset)) {
                 .not_statement => |token| {
                     if (token.tag == .r_brace) break :blk token.end;
-                    return vm.err.set(.{ .unexpected_token = .{
+                    return vm.setError(.{ .unexpected_token = .{
                         .expected = "a statement",
                         .token = token,
                     } });
                 },
-                .statement_end => |end| end,
-                .yield => return vm.err.set(.{ .static_error = .{
+                .statement_end => |end| {
+                    std.debug.assert(end > offset);
+                    break :blk end;
+                },
+                .yield => return vm.setError(.{ .static_error = .{
                     .pos = lex(vm.text, offset).start,
                     .string = "yield unsupported inside a function",
                 } }),
+                .@"continue" => |startloop_offset| {
+                    std.debug.assert(startloop_offset < offset);
+                    break :blk startloop_offset;
+                },
             };
-            std.debug.assert(after_statement > offset);
-            offset = after_statement;
+            std.debug.assert(new_offset != offset);
+            offset = new_offset;
         }
     };
 
     _ = return_storage;
-    if (!args_addr.eql(vm.mem.top())) return vm.err.set(.{ .not_implemented = "evalFunction stack cleanup" });
+    if (!args_addr.eql(vm.mem.top())) return vm.setError(.{ .not_implemented = "evalFunction stack cleanup" });
     return after_close_brace;
 }
 
 pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}!usize {
     const body_start = blk: {
         const token = lex(vm.text, start);
-        if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+        if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
             .expected = "an open brace '{' to start " ++ @tagName(kind) ++ " block",
             .token = token,
         } });
         break :blk token.end;
     };
 
-    const after_close_brace = blk: {
+    const after_close_brace = blk_close_brace: {
         var offset: usize = body_start;
         while (true) {
-            const after_statement = switch (try vm.evalStatement(offset)) {
+            const new_offset = blk: switch (try vm.evalStatement(offset)) {
                 .not_statement => |token| {
-                    if (token.tag == .r_brace) break :blk token.end;
-                    return vm.err.set(.{ .unexpected_token = .{
+                    if (token.tag == .r_brace) break :blk_close_brace token.end;
+                    return vm.setError(.{ .unexpected_token = .{
                         .expected = "a statement",
                         .token = token,
                     } });
                 },
-                .statement_end => |end| end,
-                .yield => return vm.err.set(.{ .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block" }),
+                .statement_end => |end| {
+                    std.debug.assert(end > offset);
+                    break :blk end;
+                },
+                .yield => return vm.setError(.{
+                    .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block",
+                }),
+                .@"continue" => |startloop_offset| {
+                    std.debug.assert(startloop_offset < offset);
+                    break :blk startloop_offset;
+                },
             };
-            std.debug.assert(after_statement > offset);
-            offset = after_statement;
+            std.debug.assert(new_offset != offset);
+            offset = new_offset;
         }
     };
 
@@ -395,27 +432,28 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
     yield: Yield,
+    @"continue": usize,
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
         .identifier => {
             const second_token = lex(vm.text, first_token.end);
             if (second_token.tag == .@"=") {
-                const entry = vm.lookup(vm.text[first_token.start..first_token.end]) orelse return vm.err.set(.{
+                const entry = vm.lookup(vm.text[first_token.start..first_token.end]) orelse return vm.setError(.{
                     .undefined_identifier = first_token.extent(),
                 });
                 const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
                 const value_addr = vm.mem.top();
                 const expr_first_token = lex(vm.text, second_token.end);
-                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expresson to follow '='",
                     .token = expr_first_token,
                 } });
-                if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
+                if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
                     .id_extent = first_token.extent(),
                 } });
                 const src = vm.pop(value_addr);
-                if (src.getType() != symbol_type) return vm.err.set(.{ .assign_type = .{
+                if (src.getType() != symbol_type) return vm.setError(.{ .assign_type = .{
                     .id_extent = first_token.extent(),
                     .dst = symbol_type,
                     .src = src.getType(),
@@ -430,7 +468,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
         .keyword_fn => {
             const id_extent = blk: {
                 const token = lex(vm.text, first_token.end);
-                if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                if (token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after 'fn'",
                     .token = token,
                 } });
@@ -438,14 +476,14 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             };
             const arg_start = blk: {
                 const token = lex(vm.text, id_extent.end);
-                if (token.tag != .l_paren) return vm.err.set(.{ .unexpected_token = .{
+                if (token.tag != .l_paren) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an open paren '(' to start function args",
                     .token = token,
                 } });
                 break :blk token.end;
             };
-            const params = try eat(vm.text, &vm.err).evalParamDeclList(arg_start);
-            const after_definition = try eat(vm.text, &vm.err).evalBlock(params.end, .function);
+            const params = try vm.eat().evalParamDeclList(arg_start);
+            const after_definition = try vm.eat().evalBlock(params.end, .function);
 
             try vm.startSymbol(id_extent.start);
             (try vm.push(Type)).* = .script_function;
@@ -454,23 +492,23 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             return .{ .statement_end = after_definition };
         },
         .keyword_if => {
-            const after_lparen = try eat(vm.text, &vm.err).eatToken(
+            const after_lparen = try vm.eat().eatToken(
                 first_token.end,
                 .l_paren,
                 "a '(' to start the if conditional",
             );
             const expr_addr = vm.mem.top();
             const first_expr_token = lex(vm.text, after_lparen);
-            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression inside the if conditional",
                 .token = first_expr_token,
             } });
-            const after_rparen = try eat(vm.text, &vm.err).eatToken(
+            const after_rparen = try vm.eat().eatToken(
                 after_expr,
                 .r_paren,
                 "a ')' to finish the if conditional",
             );
-            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .if_type = .{
+            if (expr_addr.eql(vm.mem.top())) return vm.setError(.{ .if_type = .{
                 .pos = first_expr_token.start,
                 .type = null,
             } });
@@ -479,21 +517,44 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 defer value.discard(vm.mono_funcs);
                 break :blk switch (value) {
                     .integer => |int_value| int_value != 0,
-                    else => |t| return vm.err.set(.{ .if_type = .{
+                    else => |t| return vm.setError(.{ .if_type = .{
                         .pos = first_expr_token.start,
                         .type = t.getType(),
                     } }),
                 };
             };
             return .{ .statement_end = blk: {
-                if (!is_true) break :blk try eat(vm.text, &vm.err).evalBlock(after_rparen, .@"if");
+                if (!is_true) break :blk try vm.eat().evalBlock(after_rparen, .@"if");
                 break :blk try vm.evalBlock(after_rparen, .@"if");
             } };
+        },
+        .keyword_startloop => {
+            if (vm.loop_text_offset != null) return vm.setError(.{ .static_error = .{
+                .pos = first_token.start,
+                .string = "startloop cannot be inside startloop, need endloop first",
+            } });
+            vm.loop_text_offset = first_token.end;
+            return .{ .statement_end = first_token.end };
+        },
+        .keyword_endloop => {
+            if (vm.loop_text_offset == null) return vm.setError(.{ .static_error = .{
+                .pos = first_token.start,
+                .string = "endloop must correspond to a startloop",
+            } });
+            vm.loop_text_offset = null;
+            return .{ .statement_end = first_token.end };
+        },
+        .keyword_continue => {
+            if (vm.loop_text_offset == null) return vm.setError(.{ .static_error = .{
+                .pos = first_token.start,
+                .string = "continue must correspond to a startloop",
+            } });
+            return .{ .@"continue" = vm.loop_text_offset.? };
         },
         .keyword_var => {
             const id_extent = blk: {
                 const id_token = lex(vm.text, first_token.end);
-                if (id_token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after 'var'",
                     .token = id_token,
                 } });
@@ -501,7 +562,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             };
             const after_equal = blk: {
                 const token = lex(vm.text, id_extent.end);
-                if (token.tag != .@"=") return vm.err.set(.{ .unexpected_token = .{
+                if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
                     .expected = "an '=' to initialize new var",
                     .token = token,
                 } });
@@ -510,11 +571,11 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             try vm.startSymbol(id_extent.start);
             const value_addr = vm.mem.top();
             const expr_first_token = lex(vm.text, after_equal);
-            const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expresson to initialize new var",
                 .token = expr_first_token,
             } });
-            if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
+            if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
                 .id_extent = id_extent,
             } });
             try vm.endSymbol();
@@ -523,11 +584,11 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
         .keyword_yield => {
             const expr_first_token = lex(vm.text, first_token.end);
             const expr_addr = vm.mem.top();
-            const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression after yield",
                 .token = expr_first_token,
             } });
-            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .unexpected_type = .{
+            if (expr_addr.eql(vm.mem.top())) return vm.setError(.{ .unexpected_type = .{
                 .pos = expr_first_token.start,
                 .expected = "an integer expression after yield",
                 .actual = null,
@@ -536,7 +597,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
                 .resume_offset = expr_end,
                 .millis = switch (vm.pop(expr_addr)) {
                     .integer => |v| v,
-                    else => |t| return vm.err.set(.{ .unexpected_type = .{
+                    else => |t| return vm.setError(.{ .unexpected_type = .{
                         .pos = expr_first_token.start,
                         .expected = "an integer expression after yield",
                         .actual = t.getType(),
@@ -553,7 +614,7 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
     if (next_token.tag != .@"=") {
         if (!vm.mem.top().eql(expr_addr)) {
             const expr_type, _ = vm.readValue(Type, expr_addr);
-            return vm.err.set(.{ .statement_result_ignored = .{
+            return vm.setError(.{ .statement_result_ignored = .{
                 .pos = first_token.start,
                 .ignored_type = expr_type,
             } });
@@ -604,18 +665,18 @@ fn evalExprSuffix(
     const suffix_op_token = lex(vm.text, suffix_start);
     return switch (suffix_op_token.tag) {
         .l_bracket => {
-            return vm.err.set(.{ .not_implemented = "array index" });
+            return vm.setError(.{ .not_implemented = "array index" });
         },
         .period => {
             const id_extent = blk: {
                 const id_token = lex(vm.text, suffix_op_token.end);
-                if (id_token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after '.'",
                     .token = id_token,
                 } });
                 break :blk id_token.extent();
             };
-            if (expr_addr.eql(vm.mem.top())) return vm.err.set(
+            if (expr_addr.eql(vm.mem.top())) return vm.setError(
                 .{ .void_field = .{ .start = suffix_op_token.start } },
             );
             const expr_type_ptr, const value_addr = vm.readPointer(Type, expr_addr);
@@ -625,7 +686,7 @@ fn evalExprSuffix(
                 // .c_string,
                 .managed_string,
                 .script_function,
-                => vm.err.set(.{ .no_field = .{
+                => vm.setError(.{ .no_field = .{
                     .start = suffix_op_token.start,
                     .field = id_extent,
                     .unexpected_type = expr_type_ptr.*,
@@ -643,7 +704,7 @@ fn evalExprSuffix(
                     // is correct.
                     // var namespace: ManagedId = .empty();
                     // var name: ManagedId = .empty();
-                    // if (lexClass(vm.text, &namespace, &name, id_start)) |too_big_end| return vm.err.set(.{
+                    // if (lexClass(vm.text, &namespace, &name, id_start)) |too_big_end| return vm.setError(.{
                     //     .id_too_big = .{ .start = id_start, .end = too_big_end },
                     // });
 
@@ -666,13 +727,13 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .class_member => {
-                    return vm.err.set(.{ .not_implemented = "class member" });
+                    return vm.setError(.{ .not_implemented = "class member" });
                 },
-                .object => vm.err.set(.{ .not_implemented = "object fields" }),
+                .object => vm.setError(.{ .not_implemented = "object fields" }),
             };
         },
         .l_paren => {
-            if (expr_addr.eql(vm.mem.top())) return vm.err.set(.{ .called_non_function = .{
+            if (expr_addr.eql(vm.mem.top())) return vm.setError(.{ .called_non_function = .{
                 .start = expr_first_token.start,
                 .unexpected_type = null,
             } });
@@ -683,7 +744,7 @@ fn evalExprSuffix(
                         var previous = it.id;
                         while (it.next(vm.text)) {
                             _ = &previous;
-                            return vm.err.set(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
+                            return vm.setError(.{ .not_implemented = "class member with multiple '.IDENTIFIER'" });
                         }
                         break :blk previous;
                     };
@@ -694,7 +755,7 @@ fn evalExprSuffix(
                     // NOTE: we could push the args on the vm.mem stack, but, having a reasonable
                     //       max like 100 is probably fine right?
                     const max_arg_count = 100;
-                    if (args.count > max_arg_count) return vm.err.set(.{ .static_error = .{
+                    if (args.count > max_arg_count) return vm.setError(.{ .static_error = .{
                         .pos = suffix_op_token.start,
                         .string = "too many args for managed function (current max is 100)",
                     } });
@@ -703,7 +764,7 @@ fn evalExprSuffix(
                         member.class,
                         method_id.slice(),
                         args.count,
-                    ) orelse return vm.err.set(.{ .missing_method = .{
+                    ) orelse return vm.setError(.{ .missing_method = .{
                         .class = member.class,
                         .id_extent = method_id_extent,
                         .arg_count = args.count,
@@ -727,11 +788,11 @@ fn evalExprSuffix(
                                 const str = vm.mono_funcs.string_new_len(
                                     vm.mono_funcs.domain_get().?,
                                     slice.ptr,
-                                    std.math.cast(c_uint, slice.len) orelse return vm.err.set(.{ .static_error = .{
+                                    std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
                                         .pos = suffix_op_token.start,
                                         .string = "native string too long",
                                     } }),
-                                ) orelse return vm.err.set(.{ .static_error = .{
+                                ) orelse return vm.setError(.{ .static_error = .{
                                     .pos = suffix_op_token.start,
                                     .string = "native string to managed returned null",
                                 } });
@@ -747,7 +808,7 @@ fn evalExprSuffix(
                             },
                             else => |a| {
                                 std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
-                                return vm.err.set(.{ .not_implemented = "call method with this kind of arg" });
+                                return vm.setError(.{ .not_implemented = "call method with this kind of arg" });
                             },
                         };
                     }
@@ -774,22 +835,22 @@ fn evalExprSuffix(
                     );
                     if (maybe_exception) |e| {
                         std.log.err("TODO: handle exception 0x{x}\n", .{@intFromPtr(e)});
-                        return vm.err.set(.{ .not_implemented = "handle exception" });
+                        return vm.setError(.{ .not_implemented = "handle exception" });
                     }
                     switch (vm.mono_funcs.type_get_type(return_type)) {
                         .void => if (maybe_result) |_| {
-                            return vm.err.set(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
+                            return vm.setError(.{ .not_implemented = "error message for calling managed function with void return type that returned something" });
                         },
                         .i4 => {
-                            const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
+                            const result = maybe_result orelse return vm.setError(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
                             const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
                             std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
                             (try vm.push(Type)).* = .integer;
                             (try vm.push(i64)).* = unboxed.*;
                         },
                         .string => {
-                            const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with string return type that returned null" });
-                            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.err.set(.{
+                            const result = maybe_result orelse return vm.setError(.{ .not_implemented = "error message for calling managed function with string return type that returned null" });
+                            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.setError(.{
                             //     .static_error = .{
                             //         .pos = suffix_op_token.start,
                             //         .string = "managed string to native returned null",
@@ -807,13 +868,13 @@ fn evalExprSuffix(
                         },
                         else => |kind| {
                             std.debug.print("ReturnTypeKind={t}\n", .{kind});
-                            return vm.err.set(.{ .not_implemented = "managed return value of this type" });
+                            return vm.setError(.{ .not_implemented = "managed return value of this type" });
                         },
                     }
                     return args.end;
                 },
                 .script_function => |param_start| {
-                    const params = try eat(vm.text, &vm.err).evalParamDeclList(param_start);
+                    const params = try vm.eat().evalParamDeclList(param_start);
                     const args_addr = vm.mem.top();
                     const after_args = try vm.evalFnCallArgs(.{ .script = params.count }, suffix_op_token.end);
                     var return_storage: ReturnStorage = .{};
@@ -825,11 +886,11 @@ fn evalExprSuffix(
                         // verify there is only one value on the stack
                         // var value_type, const value_addr = vm.
                         // @panic("todo");
-                        return vm.err.set(.{ .not_implemented = "function calls with return types" });
+                        return vm.setError(.{ .not_implemented = "function calls with return types" });
                     }
                     return after_args;
                 },
-                else => |value| return vm.err.set(.{ .called_non_function = .{
+                else => |value| return vm.setError(.{ .called_non_function = .{
                     .start = expr_first_token.start,
                     .unexpected_type = value.getType(),
                 } }),
@@ -853,10 +914,10 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(usize)).* = token_start_ptr.*;
         },
         // .c_string => {
-        //     return vm.err.set(.{ .not_implemented = "pushValueFromAddr c_string" });
+        //     return vm.setError(.{ .not_implemented = "pushValueFromAddr c_string" });
         // },
         .managed_string => {
-            return vm.err.set(.{ .not_implemented = "pushValueFromAddr managed_string" });
+            return vm.setError(.{ .not_implemented = "pushValueFromAddr managed_string" });
         },
         .script_function => {
             (try vm.push(Type)).* = .script_function;
@@ -872,7 +933,7 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             // const assembly_ptr, const some_addr = vm.readPointer(*const mono.Assembly, value_addr);
             // (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
             // _ = some_addr;
-            return vm.err.set(.{ .not_implemented = "pushValueFromAddr assembly_field" });
+            return vm.setError(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
         .class => {
             (try vm.push(Type)).* = .class;
@@ -883,7 +944,7 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .class_member;
             // const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
             // (try vm.push(*const mono.Class)).* = class_ptr.*;
-            return vm.err.set(.{ .not_implemented = "pushValueFromAddr assembly_field" });
+            return vm.setError(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
         .object => {
             (try vm.push(Type)).* = .object;
@@ -897,7 +958,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
     return switch (first_token.tag) {
         .identifier => {
             const string = vm.text[first_token.start..first_token.end];
-            const entry = vm.lookup(string) orelse return vm.err.set(
+            const entry = vm.lookup(string) orelse return vm.setError(
                 .{ .undefined_identifier = first_token.extent() },
             );
             try vm.pushValueFromAddr(entry.type_addr);
@@ -910,8 +971,8 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         },
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
-            const builtin = builtin_map.get(id) orelse return vm.err.set(.{ .unknown_builtin = first_token });
-            const next = try eat(vm.text, &vm.err).eatToken(first_token.end, .l_paren, "a '(' to start the builtin args");
+            const builtin = builtin_map.get(id) orelse return vm.setError(.{ .unknown_builtin = first_token });
+            const next = try vm.eat().eatToken(first_token.end, .l_paren, "a '(' to start the builtin args");
             const args_addr = vm.mem.top();
             const args_end = try vm.evalFnCallArgs(.{ .builtin = builtin.params() }, next);
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
@@ -919,12 +980,12 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         },
         .l_paren => {
             const first_expr_token = lex(vm.text, first_token.end);
-            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression after '('",
                 .token = first_expr_token,
             } });
             const t = lex(vm.text, after_expr);
-            if (t.tag != .r_paren) return vm.err.set(.{ .unexpected_token = .{
+            if (t.tag != .r_paren) return vm.setError(.{ .unexpected_token = .{
                 .expected = "a close paren ')' to end expression",
                 .token = t,
             } });
@@ -933,8 +994,8 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         .number_literal => {
             const str = vm.text[first_token.start..first_token.end];
             const value = std.fmt.parseInt(i64, str, 10) catch |err| switch (err) {
-                error.Overflow => return vm.err.set(.{ .num_literal_overflow = first_token.extent() }),
-                error.InvalidCharacter => return vm.err.set(.{ .bad_num_literal = first_token.extent() }),
+                error.Overflow => return vm.setError(.{ .num_literal_overflow = first_token.extent() }),
+                error.InvalidCharacter => return vm.setError(.{ .bad_num_literal = first_token.extent() }),
             };
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value;
@@ -944,28 +1005,28 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             @panic("todo");
             // const id_extent = blk: {
             //     const token = lex(vm.text, first_token.end);
-            //     if (token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+            //     if (token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
             //         .expected = "an identifier to follow 'new'",
             //         .token = token,
             //     } });
             //     break :blk token.extent();
             // };
             // const id_string = vm.text[id_extent.start..id_extent.end];
-            // const symbol = vm.lookup(id_string) orelse return vm.err.set(
+            // const symbol = vm.lookup(id_string) orelse return vm.setError(
             //     .{ .undefined_identifier = id_extent },
             // );
             // const symbol_type, const value_addr = vm.readValue(Type, symbol.value_addr);
-            // if (symbol_type != .class) return vm.err.set(.{ .new_non_class = .{
+            // if (symbol_type != .class) return vm.setError(.{ .new_non_class = .{
             //     .id_extent = id_extent,
             //     .actual_type = symbol_type,
             // } });
             // _ = value_addr;
 
-            // const next = try eat(vm.text, &vm.err).eatToken(id_extent.end, .l_paren);
+            // const next = try vm.eat().eatToken(id_extent.end, .l_paren);
             // _ = next;
             // // const args_addr = vm.mem.top();
             // // const args_end = try vm.evalFnCallArgs(builtin.paramCount(), .{ .builtin = builtin.params() }, next);
-            // return vm.err.set(.{ .not_implemented = "new expression" });
+            // return vm.setError(.{ .not_implemented = "new expression" });
         },
         else => null,
     };
@@ -984,11 +1045,11 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
             .end = first_token.end,
         };
         const arg_addr = vm.mem.top();
-        text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+        text_offset = try vm.evalExpr(first_token) orelse return vm.setError(.{ .unexpected_token = .{
             .expected = "an expression",
             .token = first_token,
         } });
-        if (arg_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_argument = .{
+        if (arg_addr.eql(vm.mem.top())) return vm.setError(.{ .void_argument = .{
             .arg_index = arg_index,
             .first_arg_token = first_token,
         } });
@@ -996,7 +1057,7 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
         {
             // should we perform any checks
             const arg_type = vm.mem.toPointer(Type, arg_addr).*;
-            if (!arg_type.canMarshal()) return vm.err.set(.{ .cant_marshal = .{
+            if (!arg_type.canMarshal()) return vm.setError(.{ .cant_marshal = .{
                 .pos = first_token.start,
                 .type = arg_type,
             } });
@@ -1009,7 +1070,7 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
         switch (second_token.tag) {
             .r_paren => return .{ .count = arg_index, .end = second_token.end },
             .comma => {},
-            else => return vm.err.set(.{ .unexpected_token = .{
+            else => return vm.setError(.{ .unexpected_token = .{
                 .expected = "a ',' or close paren ')'",
                 .token = second_token,
             } }),
@@ -1057,29 +1118,29 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
         }
         if (params.indexInRange(arg_index)) {
             const arg_addr = vm.mem.top();
-            text_offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            text_offset = try vm.evalExpr(first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression",
                 .token = first_token,
             } });
-            if (arg_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_argument = .{
+            if (arg_addr.eql(vm.mem.top())) return vm.setError(.{ .void_argument = .{
                 .arg_index = arg_index,
                 .first_arg_token = first_token,
             } });
             const arg_type = vm.mem.toPointer(Type, arg_addr).*;
-            if (params.expectedType(arg_index)) |t| if (t != arg_type) return vm.err.set(.{ .arg_type = .{
+            if (params.expectedType(arg_index)) |t| if (t != arg_type) return vm.setError(.{ .arg_type = .{
                 .arg_pos = first_token.start,
                 .arg_index = arg_index,
                 .expected = t,
                 .actual = arg_type,
             } });
         } else {
-            text_offset = try eat(vm.text, &vm.err).evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            text_offset = try vm.eat().evalExpr(first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression",
                 .token = first_token,
             } });
         }
 
-        if (arg_index == std.math.maxInt(u16)) return vm.err.set(.{ .arg_count = .{
+        if (arg_index == std.math.maxInt(u16)) return vm.setError(.{ .arg_count = .{
             .start = start,
             .expected = params.count() orelse std.math.maxInt(u16),
             .actual = @as(u17, std.math.maxInt(u16)) + 1,
@@ -1092,14 +1153,14 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
             switch (token.tag) {
                 .r_paren => break,
                 .comma => {},
-                else => return vm.err.set(.{ .unexpected_token = .{
+                else => return vm.setError(.{ .unexpected_token = .{
                     .expected = "a ',' or close paren ')'",
                     .token = token,
                 } }),
             }
         }
     }
-    if (params.count()) |expected_count| if (arg_index != expected_count) return vm.err.set(.{
+    if (params.count()) |expected_count| if (arg_index != expected_count) return vm.setError(.{
         .arg_count = .{
             .start = start,
             .expected = expected_count,
@@ -1117,11 +1178,15 @@ fn evalBuiltin(
 ) error{Vm}!void {
     switch (builtin) {
         .@"@Nothing" => {},
+        .@"@Exit" => {
+            vm.error_result = .exit;
+            return error.Vm;
+        },
         .@"@Log" => {
             var buffer: [1000]u8 = undefined;
             var stderr = std.fs.File.stderr().writer(&buffer);
             vm.log(&stderr.interface, args_addr) catch |err| switch (err) {
-                error.WriteFailed => return vm.err.set(.{ .log_error = .{
+                error.WriteFailed => return vm.setError(.{ .log_error = .{
                     .pos = builtin_extent.start,
                     .err = stderr.err orelse error.Unexpected,
                 } }),
@@ -1147,7 +1212,7 @@ fn evalBuiltin(
                 .match = null,
             };
             vm.mono_funcs.assembly_foreach(&findAssembly, &context);
-            const match = context.match orelse return vm.err.set(
+            const match = context.match orelse return vm.setError(
                 .{ .assembly_not_found = extent },
             );
             (try vm.push(Type)).* = .assembly;
@@ -1160,7 +1225,7 @@ fn evalBuiltin(
             };
             var namespace: ManagedId = .empty();
             var name: ManagedId = .empty();
-            if (lexClass(vm.text, &namespace, &name, field.id_start)) |too_big_end| return vm.err.set(.{
+            if (lexClass(vm.text, &namespace, &name, field.id_start)) |too_big_end| return vm.setError(.{
                 .id_too_big = .{ .start = field.id_start, .end = too_big_end },
             });
             const image = vm.mono_funcs.assembly_get_image(field.assembly) orelse @panic(
@@ -1170,7 +1235,7 @@ fn evalBuiltin(
                 image,
                 namespace.slice(),
                 name.slice(),
-            ) orelse return vm.err.set(.{ .missing_class = .{
+            ) orelse return vm.setError(.{ .missing_class = .{
                 .assembly = field.assembly,
                 .id_start = field.id_start,
             } });
@@ -1182,7 +1247,7 @@ fn evalBuiltin(
             value.discard(vm.mono_funcs);
         },
         // .@"@ScheduleMs" => {
-        //     if (args_addr.eql(vm.mem.top())) return vm.err.set(.{ .static_error = .{
+        //     if (args_addr.eql(vm.mem.top())) return vm.setError(.{ .static_error = .{
         //         .pos = builtin_extent.start,
         //         .string = "@ScheduleMs requires at least 2 args (millisecond count and function id) but got 0",
         //     } });
@@ -1190,7 +1255,7 @@ fn evalBuiltin(
         //         const v, const next_arg_addr = vm.read(args_addr);
         //         break :blk switch (v) {
         //             .integer => |v_int| .{ v_int, next_arg_addr },
-        //             else => |t| return vm.err.set(.{ .arg_type_call_pos = .{
+        //             else => |t| return vm.setError(.{ .arg_type_call_pos = .{
         //                 .call_pos = builtin_extent.start,
         //                 .arg_index = 0,
         //                 .expected = .integer,
@@ -1198,7 +1263,7 @@ fn evalBuiltin(
         //             } }),
         //         };
         //     };
-        //     if (callable_addr.eql(vm.mem.top())) return vm.err.set(.{ .static_error = .{
+        //     if (callable_addr.eql(vm.mem.top())) return vm.setError(.{ .static_error = .{
         //         .pos = builtin_extent.start,
         //         .string = "@ScheduleMs requires at least 2 args (millisecond count and function id) but got 1",
         //     } });
@@ -1209,7 +1274,7 @@ fn evalBuiltin(
         //         const v: Value, const callable_args_addr = vm.read(args_addr);
         //         break :blk switch (v) {
         //             .script_function => |pos| break :blk .{ .{ .script_function = pos }, callable_args_addr },
-        //             else => |t| return vm.err.set(.{ .arg_type_expected = .{
+        //             else => |t| return vm.setError(.{ .arg_type_expected = .{
         //                 .call_pos = builtin_extent.start,
         //                 .arg_index = 0,
         //                 .expected = "a callable object",
@@ -1220,7 +1285,7 @@ fn evalBuiltin(
         //     _ = ms_count;
         //     _ = callable;
         //     _ = callable_args_addr;
-        //     return vm.err.set(.{ .not_implemented = "@ScheduleMs" });
+        //     return vm.setError(.{ .not_implemented = "@ScheduleMs" });
         // },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
@@ -1326,7 +1391,7 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
 }
 
 fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
-    return vm.mem.push(T) catch return vm.err.set(.oom);
+    return vm.mem.push(T) catch return vm.setError(.oom);
 }
 
 fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Memory.Addr } {
@@ -1450,23 +1515,28 @@ const Value = union(enum) {
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {
     const len = extent.end - extent.start;
-    if (len > ManagedId.max) return vm.err.set(.{ .id_too_big = extent });
+    if (len > ManagedId.max) return vm.setError(.{ .id_too_big = extent });
     var result: ManagedId = .{ .buf = undefined, .len = @intCast(len) };
     @memcpy(result.buf[0..len], vm.text[extent.start..extent.end]);
     result.buf[len] = 0;
     return result;
 }
 
-fn eat(text: []const u8, err: *Error) VmEat {
-    return .{ .text = text, .err = err };
+fn eat(vm: *Vm) VmEat {
+    return .{ .text = vm.text, .error_result_ref = &vm.error_result };
 }
 const VmEat = struct {
     text: []const u8,
-    err: *Error,
+    error_result_ref: *ErrorResult,
+
+    fn setError(vm: VmEat, e: Error) error{Vm} {
+        vm.error_result_ref.* = .{ .err = e };
+        return error.Vm;
+    }
 
     fn eatToken(vm: VmEat, start: usize, expected_tag: Token.Tag, expected: [:0]const u8) error{Vm}!usize {
         const t = lex(vm.text, start);
-        if (t.tag != expected_tag) return vm.err.set(.{
+        if (t.tag != expected_tag) return vm.setError(.{
             .unexpected_token = .{ .expected = expected, .token = t },
         });
         return t.end;
@@ -1475,7 +1545,7 @@ const VmEat = struct {
     pub fn evalBlock(vm: VmEat, start: usize, comptime kind: enum { function, @"if" }) error{Vm}!usize {
         const body_start = blk: {
             const token = lex(vm.text, start);
-            if (token.tag != .l_brace) return vm.err.set(.{ .unexpected_token = .{
+            if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
                 .expected = "an open brace '{' to start " ++ switch (kind) {
                     .function => "function body",
                     .@"if" => "if block",
@@ -1490,7 +1560,7 @@ const VmEat = struct {
             const after_statement = switch (try vm.evalStatement(offset)) {
                 .not_statement => |token| {
                     if (token.tag == .r_brace) return token.end;
-                    return vm.err.set(.{ .unexpected_token = .{
+                    return vm.setError(.{ .unexpected_token = .{
                         .expected = "a statement",
                         .token = token,
                     } });
@@ -1512,7 +1582,7 @@ const VmEat = struct {
                 const second_token = lex(vm.text, first_token.end);
                 if (second_token.tag == .@"=") {
                     const expr_first_token = lex(vm.text, second_token.end);
-                    const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                    const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                         .expected = "an expresson",
                         .token = expr_first_token,
                     } });
@@ -1527,7 +1597,7 @@ const VmEat = struct {
                     "a '(' to start the if conditional",
                 );
                 const first_expr_token = lex(vm.text, after_lparen);
-                const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expression inside the if conditional",
                     .token = first_expr_token,
                 } });
@@ -1538,9 +1608,13 @@ const VmEat = struct {
                 );
                 return .{ .statement_end = try vm.evalBlock(after_rparen, .@"if") };
             },
+            .keyword_startloop,
+            .keyword_endloop,
+            .keyword_continue,
+            => return .{ .statement_end = first_token.end },
             .keyword_yield => {
                 const expr_first_token = lex(vm.text, first_token.end);
-                const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expression after yield",
                     .token = expr_first_token,
                 } });
@@ -1584,11 +1658,11 @@ const VmEat = struct {
         const suffix_op_token = lex(vm.text, suffix_start);
         return switch (suffix_op_token.tag) {
             .l_bracket => {
-                return vm.err.set(.{ .not_implemented = "array index" });
+                return vm.setError(.{ .not_implemented = "array index" });
             },
             .period => {
                 const id_token = lex(vm.text, suffix_op_token.end);
-                if (id_token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after '.'",
                     .token = id_token,
                 } });
@@ -1626,7 +1700,7 @@ const VmEat = struct {
                 offset = first_token.end;
                 break;
             }
-            offset = try vm.evalExpr(first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+            offset = try vm.evalExpr(first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression",
                 .token = first_token,
             } });
@@ -1636,7 +1710,7 @@ const VmEat = struct {
                 switch (token.tag) {
                     .r_paren => break,
                     .comma => {},
-                    else => return vm.err.set(.{ .unexpected_token = .{
+                    else => return vm.setError(.{ .unexpected_token = .{
                         .expected = "a ',' or close paren ')'",
                         .token = token,
                     } }),
@@ -1657,19 +1731,19 @@ const VmEat = struct {
             switch (first_token.tag) {
                 .r_paren => return .{ .count = param_count, .end = first_token.end },
                 .identifier => {},
-                else => return vm.err.set(.{ .unexpected_token = .{
+                else => return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier or close paren ')'",
                     .token = first_token,
                 } }),
             }
-            if (param_count == std.math.maxInt(u16)) return vm.err.set(.{ .not_implemented = "more than 65535 args" });
+            if (param_count == std.math.maxInt(u16)) return vm.setError(.{ .not_implemented = "more than 65535 args" });
             param_count += 1;
             const second_token = lex(vm.text, offset);
             offset = second_token.end;
             switch (second_token.tag) {
                 .r_paren => return .{ .count = param_count, .end = second_token.end },
                 .comma => {},
-                else => return vm.err.set(.{ .unexpected_token = .{
+                else => return vm.setError(.{ .unexpected_token = .{
                     .expected = "an comma ',' or close paren ')'",
                     .token = first_token,
                 } }),
@@ -1686,18 +1760,18 @@ fn executeBinaryOp(
     right_text_pos: usize,
     right_addr: Memory.Addr,
 ) error{Vm}!void {
-    if (left_addr.eql(right_addr)) return vm.err.set(.{ .binary_operand_nothing = .{
+    if (left_addr.eql(right_addr)) return vm.setError(.{ .binary_operand_nothing = .{
         .pos = left_text_pos,
         .op = op,
     } });
-    if (right_addr.eql(vm.mem.top())) return vm.err.set(.{ .binary_operand_nothing = .{
+    if (right_addr.eql(vm.mem.top())) return vm.setError(.{ .binary_operand_nothing = .{
         .pos = right_text_pos,
         .op = op,
     } });
     const right_value = vm.pop(right_addr);
     const right_i64 = switch (right_value) {
         .integer => |i| i,
-        else => |t| return vm.err.set(.{ .binary_operand_type = .{
+        else => |t| return vm.setError(.{ .binary_operand_type = .{
             .pos = right_text_pos,
             .op = op,
             .expects = "integers",
@@ -1707,7 +1781,7 @@ fn executeBinaryOp(
     const left_value = vm.pop(left_addr);
     const left_i64 = switch (left_value) {
         .integer => |i| i,
-        else => |t| return vm.err.set(.{ .binary_operand_type = .{
+        else => |t| return vm.setError(.{ .binary_operand_type = .{
             .pos = left_text_pos,
             .op = op,
             .expects = "integers",
@@ -1717,7 +1791,7 @@ fn executeBinaryOp(
     const value: i64, const overflow: u1 = blk: switch (op) {
         .@"+" => @addWithOverflow(left_i64, right_i64),
         .@"/" => {
-            if (right_i64 == 0) return vm.err.set(.{
+            if (right_i64 == 0) return vm.setError(.{
                 .divide_by_0 = .{ .pos = right_text_pos },
             });
             break :blk .{ @divTrunc(left_i64, right_i64), 0 };
@@ -1729,7 +1803,7 @@ fn executeBinaryOp(
         .@">" => .{ if (left_i64 > right_i64) 1 else 0, 0 },
         .@">=" => .{ if (left_i64 >= right_i64) 1 else 0, 0 },
     };
-    if (overflow == 1) return vm.err.set(.{ .overflow_i64 = .{
+    if (overflow == 1) return vm.setError(.{ .overflow_i64 = .{
         .pos = right_text_pos,
         .op = op,
         .left_i64 = left_i64,
@@ -1798,6 +1872,7 @@ const Builtin = enum {
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // temporary builtin, remove this later
     @"@Nothing",
+    @"@Exit",
     @"@Log",
     @"@LogAssemblies",
     @"@Assembly",
@@ -1808,6 +1883,7 @@ const Builtin = enum {
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
             .@"@Nothing" => &.{},
+            .@"@Exit" => &.{},
             .@"@Log" => null,
             .@"@LogAssemblies" => &.{},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
@@ -1820,6 +1896,7 @@ const Builtin = enum {
 };
 pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Nothing", .@"@Nothing" },
+    .{ "@Exit", .@"@Exit" },
     .{ "@Log", .@"@Log" },
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@Assembly", .@"@Assembly" },
@@ -1869,10 +1946,13 @@ const BinaryOp = enum {
             .period,
             .comma,
             .number_literal,
+            .keyword_continue,
+            .keyword_endloop,
             .keyword_fn,
             .keyword_if,
             .keyword_new,
             .keyword_var,
+            .keyword_startloop,
             .keyword_yield,
             => null,
             .plus => if (priority == .math) .@"+" else null,
@@ -1978,10 +2058,13 @@ const Token = struct {
         number_literal,
         // doc_comment,
         // container_doc_comment,
+        keyword_continue,
+        keyword_endloop,
         keyword_fn,
         keyword_if,
         keyword_new,
         keyword_var,
+        keyword_startloop,
         keyword_yield,
     };
     pub const Loc = struct {
@@ -1994,9 +2077,10 @@ const Token = struct {
         // .{ "break", .keyword_break },
         // .{ "catch", .keyword_catch },
         // .{ "const", .keyword_const },
-        // .{ "continue", .keyword_continue },
+        .{ "continue", .keyword_continue },
         // .{ "defer", .keyword_defer },
         // .{ "else", .keyword_else },
+        .{ "endloop", .keyword_endloop },
         // .{ "enum", .keyword_enum },
         // .{ "errdefer", .keyword_errdefer },
         // .{ "error", .keyword_error },
@@ -2018,6 +2102,7 @@ const Token = struct {
         // .{ "resume", .keyword_resume },
         // .{ "return", .keyword_return },
         // .{ "linksection", .keyword_linksection },
+        .{ "startloop", .keyword_startloop },
         // .{ "struct", .keyword_struct },
         // .{ "suspend", .keyword_suspend },
         // .{ "switch", .keyword_switch },
@@ -2063,10 +2148,13 @@ const TokenFmt = struct {
             .@"<=" => try writer.writeAll("a less than or equal '<=' operator"),
             .@">" => try writer.writeAll("a greater than '>' operator"),
             .@">=" => try writer.writeAll("a greater than or equal '>=' operator"),
+            .keyword_continue => try writer.writeAll("the 'continue' keyword"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
+            .keyword_endloop => try writer.writeAll("the 'endloop' keyword"),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
             .keyword_if => try writer.writeAll("the 'if' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
+            .keyword_startloop => try writer.writeAll("the 'startloop' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
             .keyword_yield => try writer.writeAll("the 'yield' keyword"),
         }
@@ -3401,7 +3489,6 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
         .mono_funcs = mono_funcs,
-        .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
@@ -3413,20 +3500,19 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
     var resume_offset: usize = 0;
     while (true) {
         vm.verifyStack();
-        if (vm.evalRoot(resume_offset)) |result| switch (result) {
-            .done => return error.TestUnexpectedSuccess,
-            .yield => |yield| {
-                resume_offset = yield.resume_offset;
+        const yield = vm.evalRoot(resume_offset) catch switch (vm.error_result) {
+            .exit => return error.TestUnexpectedSuccess,
+            .err => |err| {
+                var buf: [2000]u8 = undefined;
+                const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text)});
+                if (!std.mem.eql(u8, expected_error, actual_error)) {
+                    std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
+                    return error.TestUnexpectedError;
+                }
+                break;
             },
-        } else |_| {
-            var buf: [2000]u8 = undefined;
-            const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{vm.err.fmt(text)});
-            if (!std.mem.eql(u8, expected_error, actual_error)) {
-                std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
-                return error.TestUnexpectedError;
-            }
-            break;
-        }
+        };
+        resume_offset = yield.resume_offset;
     }
 }
 
@@ -3513,6 +3599,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
     try testBadCode(mono_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
     try testBadCode(mono_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
+    try testBadCode(mono_funcs, "startloop startloop", "1: startloop cannot be inside startloop, need endloop first");
+    try testBadCode(mono_funcs, "endloop", "1: endloop must correspond to a startloop");
+    try testBadCode(mono_funcs, "continue", "1: continue must correspond to a startloop");
+    try testBadCode(mono_funcs, "startloop endloop continue", "1: continue must correspond to a startloop");
+    try testBadCode(mono_funcs, "startloop endloop endloop", "1: endloop must correspond to a startloop");
 }
 
 const TestDomain = struct {
@@ -3562,25 +3653,23 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
         .mono_funcs = mono_funcs,
-        .err = undefined,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
     var resume_offset: usize = 0;
     while (true) {
         vm.verifyStack();
-        switch (vm.evalRoot(resume_offset) catch {
-            std.debug.print(
-                "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
-                .{ text, vm.err.fmt(text) },
-            );
-            return error.VmError;
-        }) {
-            .done => break,
-            .yield => |yield| {
-                resume_offset = yield.resume_offset;
+        const yield = vm.evalRoot(resume_offset) catch switch (vm.error_result) {
+            .exit => break,
+            .err => |err| {
+                std.debug.print(
+                    "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
+                    .{ text, err.fmt(text) },
+                );
+                return error.VmError;
             },
-        }
+        };
+        resume_offset = yield.resume_offset;
     }
     vm.logStack();
     vm.verifyStack();
@@ -3684,14 +3773,17 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     //     \\RepeatMe()
     // );
     try testCode(mono_funcs, "yield 0");
+    try testCode(mono_funcs, "startloop");
+    try testCode(mono_funcs, "startloop endloop");
+    try testCode(mono_funcs, "startloop endloop startloop");
     try testCode(mono_funcs,
         \\var counter = 0
-        \\// while (counter < 5) {
-        \\if (1) {
-        \\    @Log("loop ", counter)
-        \\    counter = counter + 1
-        \\    //yield 0
-        \\}
+        \\startloop
+        \\  @Log("loop ", counter)
+        \\  counter = counter + 1
+        \\  if (counter == 5) { @Exit() }
+        \\  yield 0
+        \\continue
     );
 }
 

@@ -1393,6 +1393,23 @@ const VmEat = struct {
     }
 
     fn evalExpr(vm: VmEat, first_token: Token) error{Vm}!?usize {
+        return vm.evalExprBinary(first_token, .comparison);
+    }
+
+    fn evalExprBinary(vm: VmEat, first_token: Token, maybe_priority: ?BinaryOpPriority) error{Vm}!?usize {
+        const priority = maybe_priority orelse return vm.evalExprSingle(first_token);
+        var left_expr_pos = first_token.start;
+        var after_expr = try vm.evalExprBinary(first_token, priority.next()) orelse return null;
+        while (true) {
+            const op_token = lex(vm.text, after_expr);
+            _ = BinaryOp.init(op_token.tag, priority) orelse return after_expr;
+            const right_token = lex(vm.text, op_token.end);
+            after_expr = try vm.evalExprBinary(right_token, priority.next()) orelse return after_expr;
+            left_expr_pos = right_token.start;
+        }
+    }
+
+    fn evalExprSingle(vm: VmEat, first_token: Token) error{Vm}!?usize {
         var offset = try vm.evalPrimaryTypeExpr(first_token) orelse return null;
         while (true) {
             offset = try vm.evalExprSuffix(offset) orelse return offset;
@@ -3434,7 +3451,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var counter = 0
         \\fn RepeatMe() {
         \\    @Log("Repeat ", counter)
-        \\    //counter = counter + 1
+        \\    counter = counter + 1
         \\    //if (counter < 5) {
         \\    //    @ScheduleMs(RepeatMe, 0)
         \\    //}

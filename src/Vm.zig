@@ -1466,7 +1466,44 @@ fn executeBinaryOp(
         .pos = right_text_pos,
         .op = op,
     } });
-    return vm.err.set(.{ .not_implemented = "binary expressions" });
+    const right_value = vm.pop(right_addr);
+    const right_i64 = switch (right_value) {
+        .integer => |i| i,
+        else => |t| return vm.err.set(.{ .binary_operand_type = .{
+            .pos = right_text_pos,
+            .op = op,
+            .expects = "integers",
+            .actual = t.getType(),
+        } }),
+    };
+    const left_value = vm.pop(left_addr);
+    const left_i64 = switch (left_value) {
+        .integer => |i| i,
+        else => |t| return vm.err.set(.{ .binary_operand_type = .{
+            .pos = left_text_pos,
+            .op = op,
+            .expects = "integers",
+            .actual = t.getType(),
+        } }),
+    };
+    const value: i64, const overflow: u1 = blk: switch (op) {
+        .@"+" => @addWithOverflow(left_i64, right_i64),
+        .@"/" => {
+            if (right_i64 == 0) return vm.err.set(.{
+                .divide_by_0 = .{ .pos = right_text_pos },
+            });
+            break :blk .{ @divTrunc(left_i64, right_i64), 0 };
+        },
+    };
+    if (overflow == 1) return vm.err.set(.{ .overflow_i64 = .{
+        .pos = right_text_pos,
+        .op = op,
+        .left_i64 = left_i64,
+        .right_i64 = right_i64,
+    } });
+
+    (try vm.push(Type)).* = .integer;
+    (try vm.push(i64)).* = value;
 }
 
 const FindAssembly = struct {
@@ -2784,6 +2821,21 @@ pub const Error = union(enum) {
         pos: usize,
         op: BinaryOp,
     },
+    binary_operand_type: struct {
+        pos: usize,
+        op: BinaryOp,
+        expects: [:0]const u8,
+        actual: Type,
+    },
+    overflow_i64: struct {
+        pos: usize,
+        op: BinaryOp,
+        left_i64: i64,
+        right_i64: i64,
+    },
+    divide_by_0: struct {
+        pos: usize,
+    },
     static_error: struct {
         pos: usize,
         string: [:0]const u8,
@@ -2963,6 +3015,25 @@ const ErrorFmt = struct {
                 "{d}: one side of binary operation '{t}' is nothing",
                 .{ getLineNum(f.text, e.pos), e.op },
             ),
+            .binary_operand_type => |e| try writer.print(
+                "{d}: binary operation '{t}' expects {s} but got {s}",
+                .{
+                    getLineNum(f.text, e.pos),
+                    e.op,
+                    e.expects,
+                    e.actual.what(),
+                },
+            ),
+            .overflow_i64 => |o| try writer.print(
+                "{d}: i64 overflow from '{t}' operator on {} and {}",
+                .{
+                    getLineNum(f.text, o.pos),
+                    o.op,
+                    o.left_i64,
+                    o.right_i64,
+                },
+            ),
+            .divide_by_0 => |d| try writer.print("{d}: divide by 0", .{getLineNum(f.text, d.pos)}),
             .static_error => |e| try writer.print(
                 "{d}: {s}",
                 .{ getLineNum(f.text, e.pos), e.string },
@@ -3075,6 +3146,12 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
     try testBadCode(mono_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
     try testBadCode(mono_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
+    try testBadCode(mono_funcs, "0+\"hello\"", "1: binary operation '+' expects integers but got a string literal");
+    try testBadCode(mono_funcs, "\"hello\"+0", "1: binary operation '+' expects integers but got a string literal");
+    try testBadCode(mono_funcs, "0/0", "1: divide by 0");
+    try testBadCode(mono_funcs, "1/0", "1: divide by 0");
+    try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
+    try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
 }
 
 const TestDomain = struct {
@@ -3208,9 +3285,9 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     );
     try testCode(mono_funcs, "@Log((0))");
     try testCode(mono_funcs, "@Log(((0)))");
-    if (false) try testCode(mono_funcs, "@Log(3+4)");
-    if (false) try testCode(mono_funcs, "@Log(3/4)");
-    if (false) try testCode(mono_funcs, "@Log(3/(1+4))");
+    try testCode(mono_funcs, "@Log(3+4)");
+    try testCode(mono_funcs, "@Log(3/4)");
+    try testCode(mono_funcs, "@Log(15/(1+4))");
     if (false) try testCode(mono_funcs,
         \\counter = 0
         \\fn RepeatMe() {

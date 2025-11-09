@@ -156,7 +156,7 @@ const MockClass = struct {
 };
 const MockMethod = struct {
     name: [:0]const u8,
-    sig: MockMethodSignature,
+    impl: MethodImpl,
     pub fn fromMono(method: *const mono.Method) *const MockMethod {
         return @ptrCast(@alignCast(method));
     }
@@ -164,6 +164,32 @@ const MockMethod = struct {
         return @ptrCast(method);
     }
 };
+
+const MethodImpl = union(enum) {
+    return_void: *const fn () void,
+    return_i4: *const fn () i32,
+    pub fn sig(impl: *const MethodImpl) *const MockMethodSignature {
+        return switch (impl.*) {
+            inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
+        };
+    }
+};
+
+const types = struct {
+    pub const @"void": MockType = .{ .kind = .void };
+    pub const @"i4": MockType = .{ .kind = .i4 };
+};
+const method_sigs = struct {
+    const return_void: MockMethodSignature = .{
+        .return_type = types.void,
+        .param_count = 0,
+    };
+    const return_i4: MockMethodSignature = .{
+        .return_type = types.i4,
+        .param_count = 0,
+    };
+};
+
 const MockMethodSignature = struct {
     return_type: MockType,
     param_count: c_int,
@@ -198,51 +224,66 @@ const MockObject = struct {
     }
 };
 
+fn @"System.Console.WriteLine0"() void {
+    const result = std.fs.File.stdout().write("\n") catch |e| std.debug.panic(
+        "write newline to stdout failed with {s}",
+        .{@errorName(e)},
+    );
+    if (result != 1) std.debug.panic(
+        "write newline to stdout returned {}",
+        .{result},
+    );
+}
+fn @"System.Console.Beep"() void {
+    if (builtin.os.tag == .windows) {
+        win32.ConsoleBeep();
+    }
+}
+fn @"System.Environment.get_TickCount"() i32 {
+    if (builtin.os.tag == .windows) {
+        return win32.GetTickCount();
+    } else {
+        return @truncate(std.time.timestamp());
+    }
+}
+
+// .{ .name = "Object", .methods = &[_]MockMethod{
+//     .{ .name = ".ctor", .sig = .{
+//         .return_type = .{ .kind = .object },
+//         .param_count = 0,
+//     } },
+// } },
+// .{ .name = "WriteLine", .sig = .{
+//     .return_type = .{ .kind = .void },
+//     .param_count = 1,
+// } },
 const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
-                .{ .name = "Object", .methods = &[_]MockMethod{
-                    .{ .name = ".ctor", .sig = .{
-                        .return_type = .{ .kind = .object },
-                        .param_count = 0,
-                    } },
+                .{ .name = "Console", .methods = &[_]MockMethod{
+                    .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
+                    .{ .name = "Beep", .impl = .{ .return_void = &@"System.Console.Beep" } },
                 } },
                 .{ .name = "Environment", .methods = &[_]MockMethod{
-                    .{ .name = "get_TickCount", .sig = .{
-                        .return_type = .{ .kind = .i4 },
-                        .param_count = 0,
-                    } },
+                    .{ .name = "get_TickCount", .impl = .{ .return_i4 = &@"System.Environment.get_TickCount" } },
                 } },
-                .{ .name = "Console", .methods = &[_]MockMethod{
-                    .{ .name = "WriteLine", .sig = .{
-                        .return_type = .{ .kind = .void },
-                        .param_count = 0,
-                    } },
-                    .{ .name = "WriteLine", .sig = .{
-                        .return_type = .{ .kind = .void },
-                        .param_count = 1,
-                    } },
-                    .{ .name = "Beep", .sig = .{
-                        .return_type = .{ .kind = .void },
-                        .param_count = 0,
-                    } },
-                } },
+                .{ .name = "Object", .methods = &[_]MockMethod{} },
             } },
         },
     } },
-    .{ .name = .{ .cstr = "ExAssembly" }, .image = .{
-        .namespaces = &[_]Namespace{
-            .{ .prefix = "ExNs", .classes = &[_]MockClass{
-                .{ .name = "ExClass", .methods = &[_]MockMethod{
-                    .{ .name = "ExMethod", .sig = .{
-                        .return_type = .{ .kind = .void },
-                        .param_count = 0,
-                    } },
-                } },
-            } },
-        },
-    } },
+    // .{ .name = .{ .cstr = "ExAssembly" }, .image = .{
+    //     .namespaces = &[_]Namespace{
+    //         .{ .prefix = "ExNs", .classes = &[_]MockClass{
+    //             .{ .name = "ExClass", .methods = &[_]MockMethod{
+    //                 .{ .name = "ExMethod", .sig = .{
+    //                     .return_type = .{ .kind = .void },
+    //                     .param_count = 0,
+    //                 } },
+    //             } },
+    //         } },
+    //     },
+    // } },
 };
 
 fn mock_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
@@ -288,7 +329,7 @@ fn mock_class_get_method_from_name(
     const class: *const MockClass = .fromMono(c);
     const name = std.mem.span(name_ptr);
     for (class.methods) |*method| {
-        if (method.sig.param_count != param_count) continue;
+        if (method.impl.sig().param_count != param_count) continue;
         if (std.mem.eql(u8, method.name, name)) return method.toMono();
     }
     return null;
@@ -306,7 +347,7 @@ fn mock_method_get_flags(
 
 fn mock_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
     const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
-    return method.sig.toMono();
+    return method.impl.sig().toMono();
 }
 
 fn mock_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
@@ -362,18 +403,17 @@ fn mock_runtime_invoke(
 ) callconv(.c) ?*const mono.Object {
     const method: *const MockMethod = .fromMono(method_opaque);
     // std.debug.print("monomock: MockMethod '{s}' has been called\n", .{method.name});
-    if (method.sig.param_count != 0) @panic("todo: implement params");
+    if (method.impl.sig().param_count != 0) @panic("todo: implement params");
     _ = obj;
     _ = params;
     _ = exception;
-    switch (method.sig.return_type.kind) {
-        .void => return null,
-        .i4 => {
-            const domain = domain_get().?;
-            // TODO: we should actually implement the real method
-            return domain.new(.{ .i4 = 0x12345678 }).toMono();
+    const domain = domain_get().?;
+    switch (method.impl) {
+        .return_void => |f| {
+            f();
+            return null;
         },
-        else => std.debug.panic("todo: implement non-void return type", .{}),
+        .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
     }
 }
 
@@ -381,5 +421,7 @@ fn oom(e: error{OutOfMemory}) noreturn {
     @panic(@errorName(e));
 }
 
+const builtin = @import("builtin");
 const std = @import("std");
+const win32 = @import("win32").everything;
 const mono = @import("mono.zig");

@@ -159,8 +159,8 @@ fn discardValues(vm: *Vm, first_type_addr: Memory.Addr) void {
     var type_addr = first_type_addr;
     while (!type_addr.eql(vm.mem.top())) {
         const value_type, const value_addr = vm.readValue(Type, type_addr);
-        // if we have a type, we *should* always have a value I think?
-        std.debug.assert(!value_addr.eql(vm.mem.top()));
+        // seems like we need to handle this case
+        if (value_addr.eql(vm.mem.top())) return;
         var value, const after_value = vm.readAnyValue(value_type, value_addr);
         value.discard(vm.mono_funcs);
         type_addr = after_value;
@@ -944,7 +944,7 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .class_member;
             // const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
             // (try vm.push(*const mono.Class)).* = class_ptr.*;
-            return vm.setError(.{ .not_implemented = "pushValueFromAddr assembly_field" });
+            return vm.setError(.{ .not_implemented = "pushValueFromAddr class_member" });
         },
         .object => {
             (try vm.push(Type)).* = .object;

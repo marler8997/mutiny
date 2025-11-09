@@ -440,13 +440,17 @@ fn updateMods(
                 var vm: Vm = .{
                     .mono_funcs = mono_funcs,
                     .text = state.text,
-                    .err = undefined,
                     .mem = .{ .allocator = scratch },
                 };
                 defer vm.deinit();
-                vm.evalRoot() catch {
-                    std.log.err("{s}:{f}", .{ mod.name(), vm.err.fmt(state.text) });
-                };
+                if (vm.evalRoot(0)) |yield| {
+                    std.log.err("TODO: implement yield {}", .{yield});
+                } else |_| switch (vm.error_result) {
+                    .exit => {},
+                    .err => |err| {
+                        std.log.err("{s}:{f}", .{ mod.name(), err.fmt(state.text) });
+                    },
+                }
                 run_tests_ref.* = run_tests_ref.* or vm.tests_scheduled;
                 // TODO: call vm.verifyStack?
                 state.processed = true;

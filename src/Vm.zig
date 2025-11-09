@@ -355,6 +355,35 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
+        .identifier => {
+            const second_token = lex(vm.text, first_token.end);
+            if (second_token.tag == .equal) {
+                const entry = vm.lookup(vm.text[first_token.start..first_token.end]) orelse return vm.err.set(.{
+                    .undefined_identifier = first_token.extent(),
+                });
+                const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
+                const value_addr = vm.mem.top();
+                const expr_first_token = lex(vm.text, second_token.end);
+                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an expresson to follow '='",
+                    .token = expr_first_token,
+                } });
+                if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
+                    .id_extent = first_token.extent(),
+                } });
+                const src = vm.pop(value_addr);
+                if (src.getType() != symbol_type) return vm.err.set(.{ .assign_type = .{
+                    .id_extent = first_token.extent(),
+                    .dst = symbol_type,
+                    .src = src.getType(),
+                } });
+                switch (src) {
+                    .integer => |value| vm.mem.toPointer(i64, symbol_value_addr).* = value,
+                    else => @panic("todo: overwrite the value"),
+                }
+                return .{ .statement_end = after_expr };
+            }
+        },
         .keyword_fn => {
             const id_extent = blk: {
                 const token = lex(vm.text, first_token.end);
@@ -2810,6 +2839,11 @@ pub const Error = union(enum) {
     void_assignment: struct {
         id_extent: Extent,
     },
+    assign_type: struct {
+        id_extent: Extent,
+        dst: Type,
+        src: Type,
+    },
     void_argument: struct {
         arg_index: u32,
         first_arg_token: Token,
@@ -2972,6 +3006,15 @@ const ErrorFmt = struct {
                 .{
                     getLineNum(f.text, v.id_extent.start),
                     f.text[v.id_extent.start..v.id_extent.end],
+                },
+            ),
+            .assign_type => |e| try writer.print(
+                "{d}: cannot assign {s} to identifier '{s}' which is {s}",
+                .{
+                    getLineNum(f.text, e.id_extent.start),
+                    e.src.what(),
+                    f.text[e.id_extent.start..e.id_extent.end],
+                    e.dst.what(),
                 },
             ),
             .void_argument => |v| try writer.print(
@@ -3169,6 +3212,8 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
     try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
     try testBadCode(mono_funcs, "foo=0", "1: undefined identifier 'foo'");
+    try testBadCode(mono_funcs, "fn foo(){}foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
+    try testBadCode(mono_funcs, "var foo = \"hello\" foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
 }
 
 const TestDomain = struct {
@@ -3256,6 +3301,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     // try testCode(mono_funcs, "\"foo\"[0]");
     // try testCode(mono_funcs, "@Assembly(\"mscorlib\") =");
     try testCode(mono_funcs, "fn foo(x) { }");
+    try testCode(mono_funcs, "var a = 0 a = 1 @Log(\"a is now \", a)");
+    try testCode(mono_funcs, "var a = 0 a = 1234 @Log(\"a is now \", a)");
     // try testCode(mono_funcs, "fn foo(x) { }foo(0)");
     // try testCode(mono_funcs, "fn foo(x,y) { }foo(0,1)");
     if (false) try testCode(mono_funcs,

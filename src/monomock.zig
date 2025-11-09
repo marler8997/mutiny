@@ -31,6 +31,8 @@ pub const funcs: mono.Funcs = .{
     .object_new = mock_object_new,
     .object_unbox = mock_object_unbox,
     .runtime_invoke = mock_runtime_invoke,
+    .string_to_utf8 = mock_string_to_utf8,
+    .free = mock_free,
 };
 
 pub const Domain = struct {
@@ -240,13 +242,17 @@ fn @"System.Console.WriteLine0"() void {
 }
 fn @"System.Console.Beep"() void {
     if (builtin.os.tag == .windows) {
-        if (0 == win32.Beep(800, 200)) std.debug.panic(
-            "Beep failed, error={f}",
-            .{win32.GetLastError()},
-        );
-    } else {
-        std.debug.print("monomock: Console Beep!\n", .{});
+        const actually_beep = false;
+        if (actually_beep) {
+            if (0 == win32.Beep(800, 200)) std.debug.panic(
+                "Beep failed, error={f}",
+                .{win32.GetLastError()},
+            );
+            return;
+        }
     }
+
+    std.debug.print("monomock: Console Beep!\n", .{});
 }
 fn @"System.Environment.get_TickCount"() i32 {
     if (builtin.os.tag == .windows) {
@@ -424,6 +430,17 @@ fn mock_runtime_invoke(
         },
         .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
     }
+}
+
+fn mock_string_to_utf8(object_mono: *const mono.Object) callconv(.c) ?[*:0]const u8 {
+    const object: *const MockObject = .fromMono(object_mono);
+    _ = object;
+    @panic("todo");
+}
+
+fn mock_free(ptr: *anyopaque) callconv(.c) void {
+    _ = ptr;
+    @panic("todo");
 }
 
 fn oom(e: error{OutOfMemory}) noreturn {

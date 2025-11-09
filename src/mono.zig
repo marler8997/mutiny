@@ -39,6 +39,9 @@ pub const Funcs = struct {
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
 
     runtime_invoke: *const fn (*const Method, obj: ?*anyopaque, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
+
+    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+    free: *const fn (*anyopaque) callconv(.c) void,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try monoload.get(mod, .get_root_domain, proc_ref),
@@ -61,6 +64,8 @@ pub const Funcs = struct {
             .object_new = try monoload.get(mod, .object_new, proc_ref),
             .object_unbox = try monoload.get(mod, .object_unbox, proc_ref),
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
+            .string_to_utf8 = try monoload.get(mod, .string_to_utf8, proc_ref),
+            .free = try monoload.get(mod, .free, proc_ref),
         };
     }
 };

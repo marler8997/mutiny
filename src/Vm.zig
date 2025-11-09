@@ -33,6 +33,7 @@ const ReturnStorage = struct {
 const Type = enum {
     integer,
     string_literal,
+    c_string,
     script_function,
     assembly,
     assembly_field,
@@ -43,6 +44,7 @@ const Type = enum {
         return switch (t) {
             .integer => "an integer",
             .string_literal => "a string literal",
+            .c_string => "a string",
             .script_function => "a function",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
@@ -55,6 +57,7 @@ const Type = enum {
         return switch (t) {
             .integer => true,
             .string_literal => true,
+            .c_string => true,
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
             // can store/save the data required on the stack
@@ -113,7 +116,7 @@ pub fn deinit(vm: *Vm) void {
             previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
         }
         var value = vm.pop(type_addr);
-        value.discard();
+        value.discard(vm.mono_funcs);
         _ = vm.mem.discardFrom(id_addr);
         if (id_addr.eql(.zero)) break;
         id_addr = previous_id_addr;
@@ -145,7 +148,7 @@ fn discardValues(vm: *Vm, first_type_addr: Memory.Addr) void {
         // if we have a type, we *should* always have a value I think?
         std.debug.assert(!value_addr.eql(vm.mem.top()));
         var value, const after_value = vm.readAnyValue(value_type, value_addr);
-        value.discard();
+        value.discard(vm.mono_funcs);
         type_addr = after_value;
     }
 }
@@ -446,6 +449,7 @@ fn evalExprSuffix(
             return switch (expr_type_ptr.*) {
                 .integer,
                 .string_literal,
+                .c_string,
                 .script_function,
                 => vm.err.set(.{ .no_field = .{
                     .start = suffix_op_token.start,
@@ -570,6 +574,18 @@ fn evalExprSuffix(
                             (try vm.push(Type)).* = .integer;
                             (try vm.push(i64)).* = unboxed.*;
                         },
+                        .string => {
+                            const result = maybe_result orelse return vm.err.set(.{ .not_implemented = "error message for calling managed function with string return type that returned null" });
+                            const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.err.set(.{
+                                .static_error = .{
+                                    .pos = suffix_op_token.start,
+                                    .string = "managed string to native returned null",
+                                },
+                            });
+                            errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
+                            (try vm.push(Type)).* = .c_string;
+                            (try vm.push([*:0]const u8)).* = c_string;
+                        },
                         else => |kind| {
                             std.debug.print("ReturnTypeKind={t}\n", .{kind});
                             return vm.err.set(.{ .not_implemented = "managed return value of this type" });
@@ -616,6 +632,9 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .string_literal;
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
+        },
+        .c_string => {
+            return vm.err.set(.{ .not_implemented = "pushValueFromAddr c_string" });
         },
         .script_function => {
             (try vm.push(Type)).* = .script_function;
@@ -903,7 +922,7 @@ fn evalBuiltin(
         },
         .@"@Discard" => {
             var value = vm.pop(args_addr);
-            value.discard();
+            value.discard(vm.mono_funcs);
         },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
@@ -992,6 +1011,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .{ .string_literal = token.extent() }, end };
         },
+        .c_string => {
+            const ptr, const end = vm.readValue([*:0]const u8, addr);
+            return .{ .{ .c_string = ptr }, end };
+        },
         .script_function => {
             const param_start, const end = vm.readValue(usize, addr);
             return .{ .{ .script_function = param_start }, end };
@@ -1020,7 +1043,7 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
                 .id_start = id_start,
             } }, end };
         },
-        else => |t| std.debug.panic("todo: implement readValue2 for type '{s}'", .{@tagName(t)}),
+        .object => @panic("implement readValue2 for object"),
     }
 }
 
@@ -1042,6 +1065,7 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 const Value = union(enum) {
     integer: i64,
     string_literal: Extent,
+    c_string: [*:0]const u8,
     script_function: usize,
     assembly: *const mono.Assembly,
     assembly_field: struct {
@@ -1053,21 +1077,24 @@ const Value = union(enum) {
         class: *const mono.Class,
         id_start: usize,
     },
-    pub fn discard(value: *Value) void {
+    pub fn discard(value: *Value, mono_funcs: *const mono.Funcs) void {
         switch (value.*) {
             .integer => {},
             .string_literal => {},
+            .c_string => |ptr| mono_funcs.free(@ptrCast(@constCast(ptr))),
             .script_function => {},
             .assembly => {},
             .assembly_field => {},
             .class => {},
             .class_member => {},
         }
+        value.* = undefined;
     }
     pub fn getType(value: *const Value) Type {
         return switch (value.*) {
             .integer => .integer,
             .string_literal => .string_literal,
+            .c_string => .c_string,
             .script_function => .script_function,
             .assembly => .assembly,
             .assembly_field => .assembly_field,
@@ -2559,6 +2586,10 @@ pub const Error = union(enum) {
         pos: usize,
         type: Type,
     },
+    static_error: struct {
+        pos: usize,
+        string: [:0]const u8,
+    },
     oom,
     pub fn set(err: *Error, value: Error) error{Vm} {
         err.* = value;
@@ -2725,6 +2756,10 @@ const ErrorFmt = struct {
             .cant_marshal => |c| try writer.print(
                 "{d}: can't marshal {s} to a managed method",
                 .{ getLineNum(f.text, c.pos), c.type.what() },
+            ),
+            .static_error => |e| try writer.print(
+                "{d}: {s}",
+                .{ getLineNum(f.text, e.pos), e.string },
             ),
             .oom => try writer.writeAll("out of memory"),
         }

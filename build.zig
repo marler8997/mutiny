@@ -94,6 +94,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+        if (target.result.os.tag == .windows) {
+            t.root_module.addImport("win32", win32_mod);
+        }
         const run = b.addRunArtifact(t);
         b.step("test", "").dependOn(&run.step);
     }

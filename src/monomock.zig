@@ -225,23 +225,32 @@ const MockObject = struct {
 };
 
 fn @"System.Console.WriteLine0"() void {
-    const result = std.fs.File.stdout().write("\n") catch |e| std.debug.panic(
-        "write newline to stdout failed with {s}",
-        .{@errorName(e)},
-    );
-    if (result != 1) std.debug.panic(
-        "write newline to stdout returned {}",
-        .{result},
-    );
+    if (builtin.is_test) {
+        std.debug.print("suppressing WriteLine for test\n", .{});
+    } else {
+        const result = std.fs.File.stdout().write("\n") catch |e| std.debug.panic(
+            "write newline to stdout failed with {s}",
+            .{@errorName(e)},
+        );
+        if (result != 1) std.debug.panic(
+            "write newline to stdout returned {}",
+            .{result},
+        );
+    }
 }
 fn @"System.Console.Beep"() void {
     if (builtin.os.tag == .windows) {
-        win32.ConsoleBeep();
+        if (0 == win32.Beep(800, 200)) std.debug.panic(
+            "Beep failed, error={f}",
+            .{win32.GetLastError()},
+        );
+    } else {
+        @panic("todo");
     }
 }
 fn @"System.Environment.get_TickCount"() i32 {
     if (builtin.os.tag == .windows) {
-        return win32.GetTickCount();
+        return @bitCast(win32.GetTickCount());
     } else {
         return @truncate(std.time.timestamp());
     }

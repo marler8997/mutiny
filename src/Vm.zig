@@ -236,6 +236,7 @@ fn endSymbol(vm: *Vm) error{Vm}!void {
 }
 
 pub fn verifyStack(vm: *Vm) void {
+    // TODO: implement this
     _ = vm;
     // if (vm.symbols.first == null) {
     //     std.debug.assert(vm.mem.top().eql(.zero));

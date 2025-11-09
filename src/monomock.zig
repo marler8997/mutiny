@@ -226,7 +226,7 @@ const MockObject = struct {
 
 fn @"System.Console.WriteLine0"() void {
     if (builtin.is_test) {
-        std.debug.print("suppressing WriteLine for test\n", .{});
+        std.debug.print("monomock: suppressing WriteLine() for test\n", .{});
     } else {
         const result = std.fs.File.stdout().write("\n") catch |e| std.debug.panic(
             "write newline to stdout failed with {s}",
@@ -245,7 +245,7 @@ fn @"System.Console.Beep"() void {
             .{win32.GetLastError()},
         );
     } else {
-        @panic("todo");
+        std.debug.print("monomock: Console Beep!\n", .{});
     }
 }
 fn @"System.Environment.get_TickCount"() i32 {

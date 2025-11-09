@@ -79,8 +79,126 @@ fn getLineNum(text: []const u8, offset: usize) u32 {
 }
 
 pub fn deinit(vm: *Vm) void {
+    const maybe_id_addr: ?Memory.Addr = blk: switch (vm.symbol_state) {
+        .none => {
+            vm.discardValues(.zero);
+            _ = vm.mem.discardFrom(.zero);
+            break :blk null;
+        },
+        .evaluating => |e| {
+            const maybe_previous = vm.discardTopSymbol(e.next_newest);
+            if (maybe_previous) |p|
+                std.debug.assert(p.eql(e.maybe_previous_newest.?))
+            else
+                std.debug.assert(e.maybe_previous_newest == null);
+            break :blk e.maybe_previous_newest;
+        },
+        .stable => |s| break :blk vm.discardTopSymbol(s.newest),
+    };
+    var id_addr = maybe_id_addr orelse {
+        std.debug.assert(vm.mem.top().eql(.zero));
+        vm.mem.deinit();
+        vm.* = undefined;
+        return;
+    };
+    while (true) {
+        const id_start, const after_id_addr = vm.readValue(usize, id_addr);
+        const id = lex(vm.text, id_start);
+        std.debug.assert(id.tag == .identifier);
+        var previous_id_addr: Memory.Addr = undefined;
+        var type_addr: Memory.Addr = undefined;
+        if (id_addr.eql(.zero)) {
+            type_addr = after_id_addr;
+        } else {
+            previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
+        }
+        var value = vm.pop(type_addr);
+        value.discard();
+        _ = vm.mem.discardFrom(id_addr);
+        if (id_addr.eql(.zero)) break;
+        id_addr = previous_id_addr;
+    }
     vm.mem.deinit();
     vm.* = undefined;
+}
+
+fn discardTopSymbol(vm: *Vm, addr: Memory.Addr) ?Memory.Addr {
+    const id_start, const after_id_addr = vm.readValue(usize, addr);
+    const id = lex(vm.text, id_start);
+    std.debug.assert(id.tag == .identifier);
+    var previous_id_addr: ?Memory.Addr = null;
+    var type_addr: Memory.Addr = undefined;
+    if (addr.eql(.zero)) {
+        type_addr = after_id_addr;
+    } else {
+        previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
+    }
+    vm.discardValues(type_addr);
+    _ = vm.mem.discardFrom(addr);
+    return previous_id_addr;
+}
+
+fn discardValues(vm: *Vm, first_type_addr: Memory.Addr) void {
+    var type_addr = first_type_addr;
+    while (!type_addr.eql(vm.mem.top())) {
+        const value_type, const value_addr = vm.readValue(Type, type_addr);
+        // if we have a type, we *should* always have a value I think?
+        std.debug.assert(!value_addr.eql(vm.mem.top()));
+        var value, const after_value = vm.readAnyValue(value_type, value_addr);
+        value.discard();
+        type_addr = after_value;
+    }
+}
+
+fn logStack(vm: *Vm) void {
+    const maybe_newest_symbol_addr: ?Memory.Addr = switch (vm.symbol_state) {
+        .none => null,
+        .evaluating => |e| e.next_newest,
+        .stable => |s| s.next,
+    };
+    std.debug.print("STACK: top={f}\n", .{vm.mem.top()});
+    std.debug.print("------------------------------\n", .{});
+    defer std.debug.print("------------------------------\n", .{});
+    var next_addr: Memory.Addr = .zero;
+    if (maybe_newest_symbol_addr) |newest_symbol_addr| {
+        while (true) {
+            const is_newest = next_addr.eql(newest_symbol_addr);
+            if (next_addr.eql(vm.mem.top())) break;
+            const id_addr = next_addr;
+            const id_start, next_addr = vm.readValue(usize, id_addr);
+            const id = lex(vm.text, id_start);
+            std.debug.assert(id.tag == .identifier);
+            const id_text = vm.text[id.start..id.end];
+            std.debug.print("{f}: symbol '{s}'\n", .{ id_addr, id_text });
+            if (next_addr.eql(vm.mem.top())) break;
+            if (!id_addr.eql(.zero)) {
+                const previous_id_addr_addr = next_addr;
+                const previous_id_addr, next_addr = vm.readValue(Memory.Addr, previous_id_addr_addr);
+                std.debug.print("{f}: previous symbol addr {f}\n", .{ previous_id_addr_addr, previous_id_addr });
+                if (next_addr.eql(vm.mem.top())) break;
+            }
+            const value_type_addr = next_addr;
+            const value_type, next_addr = vm.readValue(Type, value_type_addr);
+            std.debug.print("{f}: type '{t}'\n", .{ value_type_addr, value_type });
+            if (next_addr.eql(vm.mem.top())) break;
+            const value_addr = next_addr;
+            const value, next_addr = vm.readAnyValue(value_type, value_addr);
+            std.debug.print("{f}: value '{}'\n", .{ value_addr, value });
+            if (next_addr.eql(vm.mem.top())) break;
+            if (is_newest) break;
+        }
+    }
+    while (!next_addr.eql(vm.mem.top())) {
+        const value_type_addr = next_addr;
+        const value_type, next_addr = vm.readValue(Type, value_type_addr);
+        std.debug.print("{f}: type '{t}'\n", .{ value_type_addr, value_type });
+        if (next_addr.eql(vm.mem.top())) break;
+        const value_addr = next_addr;
+        const value, next_addr = vm.readAnyValue(value_type, value_addr);
+        std.debug.print("{f}: value '{}'\n", .{ value_addr, value });
+        if (next_addr.eql(vm.mem.top())) break;
+    }
+    std.debug.print("{f}: (end of stack)\n", .{vm.mem.top()});
 }
 
 fn startSymbol(vm: *Vm, id_start: usize) error{Vm}!void {
@@ -848,6 +966,7 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
             .id_extent = id.extent(),
             .type_addr = type_addr,
         };
+        if (id_addr.eql(.zero)) break;
         id_addr = previous_id_addr;
     }
     return null;
@@ -856,73 +975,61 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
 fn push(vm: *Vm, comptime T: type) error{Vm}!*T {
     return vm.mem.push(T) catch return vm.err.set(.oom);
 }
-fn pop(vm: *Vm, addr: Memory.Addr) Value {
-    const value_type, const value_addr = vm.readValue(Type, addr);
+
+fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Memory.Addr } {
     switch (value_type) {
         .integer => {
-            const value, const end = vm.readValue(i64, value_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .integer = value };
+            const value, const end = vm.readValue(i64, addr);
+            return .{ .{ .integer = value }, end };
         },
         .string_literal => {
-            const start, const end = vm.readValue(usize, value_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
+            const start, const end = vm.readValue(usize, addr);
             std.debug.assert(vm.text[start] == '"');
             const token = lex(vm.text, start);
             std.debug.assert(token.start == start);
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
-            return .{ .string_literal = token.extent() };
+            return .{ .{ .string_literal = token.extent() }, end };
         },
         .script_function => {
-            const param_start, const end = vm.readValue(usize, value_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .script_function = param_start };
+            const param_start, const end = vm.readValue(usize, addr);
+            return .{ .{ .script_function = param_start }, end };
         },
         .assembly => {
-            const assembly, const end = vm.readValue(*const mono.Assembly, value_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .assembly = assembly };
+            const assembly, const end = vm.readValue(*const mono.Assembly, addr);
+            return .{ .{ .assembly = assembly }, end };
         },
         .assembly_field => {
-            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, value_addr);
-            const id_start, var end = vm.readValue(usize, id_start_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .assembly_field = .{
+            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, addr);
+            const id_start, const end = vm.readValue(usize, id_start_addr);
+            return .{ .{ .assembly_field = .{
                 .assembly = assembly,
                 .id_start = id_start,
-            } };
+            } }, end };
         },
         .class => {
-            const class, const end = vm.readValue(*const mono.Class, value_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .class = class };
+            const class, const end = vm.readValue(*const mono.Class, addr);
+            return .{ .{ .class = class }, end };
         },
         .class_member => {
-            const class, const id_start_addr = vm.readValue(*const mono.Class, value_addr);
-            const id_start, var end = vm.readValue(usize, id_start_addr);
-            std.debug.assert(end.eql(vm.mem.top()));
-            // TODO: add check that scans to see if anyone is pointing to discarded memory?
-            _ = vm.mem.discardFrom(addr);
-            return .{ .class_member = .{
+            const class, const id_start_addr = vm.readValue(*const mono.Class, addr);
+            const id_start, const end = vm.readValue(usize, id_start_addr);
+            return .{ .{ .class_member = .{
                 .class = class,
                 .id_start = id_start,
-            } };
+            } }, end };
         },
-        else => |t| std.debug.panic("todo: implement pop for type '{s}'", .{@tagName(t)}),
+        else => |t| std.debug.panic("todo: implement readValue2 for type '{s}'", .{@tagName(t)}),
     }
+}
+
+fn pop(vm: *Vm, addr: Memory.Addr) Value {
+    const value_type, const value_addr = vm.readValue(Type, addr);
+    const value, const end = vm.readAnyValue(value_type, value_addr);
+    std.debug.assert(end.eql(vm.mem.top()));
+    // TODO: add check that scans to see if anyone is pointing to discarded memory?
+    _ = vm.mem.discardFrom(addr);
+    return value;
 }
 fn readPointer(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { *T, Memory.Addr } {
     return .{ vm.mem.toPointer(T, addr), vm.mem.after(T, addr) };
@@ -2649,8 +2756,12 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
+    defer {
+        // vm.logStack();
+        // vm.verifyStack();
+        vm.deinit();
+    }
     vm.verifyStack();
-    defer vm.deinit();
     if (vm.evalRoot()) {
         return error.TestUnexpectedSuccess;
     } else |_| {
@@ -2678,7 +2789,6 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "@Nothing().foo", "1: void has no fields");
     try testBadCode(mono_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
     try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")()", "1: can't call an assembly");
-    // try testCode("@Class(@Assembly(\"mscorlib\"), \"" ++ ("a" ** (dotnet_max_id)) ++ "\")");
     try testBadCode(
         mono_funcs,
         "@Class(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
@@ -2780,6 +2890,7 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
         );
         return error.VmError;
     };
+    vm.logStack();
     vm.verifyStack();
     vm.deinit();
     // try std.testing.expectEqual(0, vm_fixed_fba.end_index);

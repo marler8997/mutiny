@@ -355,23 +355,6 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
-        .identifier => {
-            const second_token = lex(vm.text, first_token.end);
-            if (second_token.tag == .equal) {
-                try vm.startSymbol(first_token.start);
-                const value_addr = vm.mem.top();
-                const expr_first_token = lex(vm.text, second_token.end);
-                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
-                    .expected = "an expresson",
-                    .token = expr_first_token,
-                } });
-                if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
-                    .id_extent = first_token.extent(),
-                } });
-                try vm.endSymbol();
-                return .{ .statement_end = after_expr };
-            }
-        },
         .keyword_fn => {
             const id_extent = blk: {
                 const token = lex(vm.text, first_token.end);
@@ -397,6 +380,36 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
             (try vm.push(usize)).* = arg_start;
             try vm.endSymbol();
             return .{ .statement_end = after_definition };
+        },
+        .keyword_var => {
+            const id_extent = blk: {
+                const id_token = lex(vm.text, first_token.end);
+                if (id_token.tag != .identifier) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an identifier after 'var'",
+                    .token = id_token,
+                } });
+                break :blk id_token.extent();
+            };
+            const after_equal = blk: {
+                const token = lex(vm.text, id_extent.end);
+                if (token.tag != .equal) return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an '=' to initialize new var",
+                    .token = token,
+                } });
+                break :blk token.end;
+            };
+            try vm.startSymbol(id_extent.start);
+            const value_addr = vm.mem.top();
+            const expr_first_token = lex(vm.text, after_equal);
+            const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expresson to initialize new var",
+                .token = expr_first_token,
+            } });
+            if (value_addr.eql(vm.mem.top())) return vm.err.set(.{ .void_assignment = .{
+                .id_extent = id_extent,
+            } });
+            try vm.endSymbol();
+            return .{ .statement_end = after_expr };
         },
         else => {},
     }
@@ -1617,6 +1630,7 @@ const BinaryOp = enum {
             .number_literal,
             .keyword_fn,
             .keyword_new,
+            .keyword_var,
             => null,
             .plus => .@"+",
             .slash => .@"/",
@@ -1724,6 +1738,7 @@ const Token = struct {
         // container_doc_comment,
         keyword_fn,
         keyword_new,
+        keyword_var,
     };
     pub const Loc = struct {
         start: usize,
@@ -1767,7 +1782,7 @@ const Token = struct {
         // .{ "try", .keyword_try },
         // .{ "union", .keyword_union },
         // .{ "unreachable", .keyword_unreachable },
-        // .{ "var", .keyword_var },
+        .{ "var", .keyword_var },
         // .{ "volatile", .keyword_volatile },
         // .{ "while", .keyword_while },
     });
@@ -1799,6 +1814,7 @@ const TokenFmt = struct {
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
             .keyword_fn => try writer.writeAll("the 'fn' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
+            .keyword_var => try writer.writeAll("the 'var' keyword"),
         }
     }
 };
@@ -3088,16 +3104,16 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
 }
 
 fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
-    try testBadCode(mono_funcs, "example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
+    try testBadCode(mono_funcs, "var example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
     try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
     try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
     try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' to start function args but got EOF");
     try testBadCode(mono_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' to start function args but got a string literal \"hello\"");
     try testBadCode(mono_funcs, "fn foo )", "1: syntax error: expected an open paren '(' to start function args but got a close paren ')'");
     try testBadCode(mono_funcs, "foo()", "1: undefined identifier 'foo'");
-    try testBadCode(mono_funcs, "foo = \"hello\" foo()", "1: can't call a string literal");
+    try testBadCode(mono_funcs, "var foo = \"hello\" foo()", "1: can't call a string literal");
     try testBadCode(mono_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
-    try testBadCode(mono_funcs, "mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
+    try testBadCode(mono_funcs, "var mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
     try testBadCode(mono_funcs, "fn foo(){}foo.\"wat\"", "1: syntax error: expected an identifier after '.' but got a string literal \"wat\"");
     try testBadCode(mono_funcs, "@Nothing().foo", "1: void has no fields");
     try testBadCode(mono_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
@@ -3130,14 +3146,14 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "fn a(x){} a()", "1: expected 1 args but got 0");
     try testBadCode(mono_funcs, "@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
     try testBadCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
-        \\Console = @Class(mscorlib.System.Console)
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Console = @Class(mscorlib.System.Console)
         \\fn foo() {}
         \\Console.Write(foo);
     , "4: can't marshal a function to a managed method");
     try testBadCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
-        \\Console = @Class(mscorlib.System.Console)
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Console = @Class(mscorlib.System.Console)
         \\Console.ThisMethodShouldNotExist();
     , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
     try testBadCode(mono_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
@@ -3152,6 +3168,7 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "1/0", "1: divide by 0");
     try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
     try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
+    try testBadCode(mono_funcs, "foo=0", "");
 }
 
 const TestDomain = struct {
@@ -3229,11 +3246,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\"))");
     try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\").System)");
     try testCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
+        \\var mscorlib = @Assembly("mscorlib")
         \\@Discard(@Class(mscorlib.System.Object))
     );
-    try testCode(mono_funcs, "ms = @Assembly(\"mscorlib\")");
-    try testCode(mono_funcs, "foo_string = \"foo\"");
+    try testCode(mono_funcs, "var ms = @Assembly(\"mscorlib\")");
+    try testCode(mono_funcs, "var foo_string = \"foo\"");
     try testCode(mono_funcs, "fn foo(){}@Discard(foo)");
     try testCode(mono_funcs, "fn foo(){}foo()");
     // try testCode(mono_funcs, "\"foo\"[0]");
@@ -3251,8 +3268,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(0)");
     try testCode(mono_funcs, "@Log(\"Hello @Log!\")");
     try testCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
-        \\Environment = @Class(mscorlib.System.Environment)
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Environment = @Class(mscorlib.System.Environment)
         \\@Log(Environment.get_TickCount())
         \\@Log("TickCount: ", Environment.get_TickCount())
         \\//@Log(Environment.get_MachineName())
@@ -3263,20 +3280,20 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\@Log(Environment.Foo)
     );
     try testCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
-        \\Object = @Class(mscorlib.System.Object)
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Object = @Class(mscorlib.System.Object)
         \\//mscorlib.System.Console.WriteLine()
         \\//mscorlib.System.Console.Beep()
         \\//example_obj = new Object()
         \\
     );
     try testCode(mono_funcs,
-        \\mscorlib = @Assembly("mscorlib")
-        \\Console = @Class(mscorlib.System.Console)
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
         \\Console.WriteLine()
         \\//Console.WriteLine("Hello")
-        \\Environment = @Class(mscorlib.System.Environment)
+        \\var Environment = @Class(mscorlib.System.Environment)
         \\@Discard(Environment.get_TickCount())
         \\//@Discard(Environment.get_MachineName())
         \\
@@ -3289,7 +3306,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(3/4)");
     try testCode(mono_funcs, "@Log(15/(1+4))");
     if (false) try testCode(mono_funcs,
-        \\counter = 0
+        \\var counter = 0
         \\fn RepeatMe() {
         \\    @Log("Repeat ", counter)
         \\    counter = counter + 1

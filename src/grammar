@@ -2,7 +2,8 @@ Root <- Statement*
 Statement
    <- IfStatement
     / fn IDENTIFIER ParamDeclList Block
-    / IDENTIFIER EQUAL Expr
+    / var IDENTIFIER EQUAL Expr
+    / IDENTIFIER EQUAL EXPR
     / Expr
 
 Expr <- Expr2 (BinaryOp Expr2)*

@@ -3,8 +3,7 @@ Statement
    <- IfStatement
     / fn IDENTIFIER ParamDeclList Block
     / var IDENTIFIER EQUAL Expr
-    / IDENTIFIER EQUAL EXPR
-    / Expr
+    / Expr ('=' Expr)?
 
 Expr <- Expr2 (BinaryOp Expr2)*
 

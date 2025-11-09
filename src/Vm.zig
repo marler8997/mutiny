@@ -756,6 +756,19 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             try vm.evalBuiltin(first_token.extent(), builtin, args_addr);
             return args_end;
         },
+        .l_paren => {
+            const first_expr_token = lex(vm.text, first_token.end);
+            const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                .expected = "an expression after '('",
+                .token = first_expr_token,
+            } });
+            const t = lex(vm.text, after_expr);
+            if (t.tag != .r_paren) return vm.err.set(.{ .unexpected_token = .{
+                .expected = "a close paren ')' to end expression",
+                .token = t,
+            } });
+            return t.end;
+        },
         .number_literal => {
             const str = vm.text[first_token.start..first_token.end];
             const value = std.fmt.parseInt(i64, str, 10) catch |err| switch (err) {
@@ -1249,33 +1262,21 @@ const VmEat = struct {
         l_paren,
         l_brace,
         identifier,
-        identifier_from,
     }) error{Vm}!usize {
         const t = lex(vm.text, start);
         const expected_tag: Token.Tag = switch (what) {
             .l_paren => .l_paren,
             .l_brace => .l_brace,
             .identifier => .identifier,
-            .identifier_from => .identifier,
         };
         if (t.tag != expected_tag) return vm.err.set(.{ .unexpected_token = .{
             .expected = switch (what) {
                 .l_paren => "an open paren '('",
                 .l_brace => "an open brace '{'",
                 .identifier => "an identifier",
-                .identifier_from => "the 'from' keyword",
             },
             .token = t,
         } });
-        switch (what) {
-            .l_paren, .l_brace, .identifier => {},
-            .identifier_from => if (!std.mem.eql(u8, vm.text[t.start..t.end], "from")) return vm.err.set(.{
-                .unexpected_token = .{
-                    .expected = "the 'from' keyword",
-                    .token = t,
-                },
-            }),
-        }
         return t.end;
     }
 
@@ -1532,6 +1533,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
 });
 
 const BinaryOp = enum {
+    add,
     divide,
     pub fn init(tag: Token.Tag) ?BinaryOp {
         return switch (tag) {
@@ -1554,6 +1556,7 @@ const BinaryOp = enum {
             .keyword_fn,
             .keyword_new,
             => null,
+            .plus => .add,
             .slash => .divide,
         };
     }
@@ -1615,7 +1618,7 @@ const Token = struct {
         // ellipsis3,
         // caret,
         // caret_equal,
-        // plus,
+        plus,
         // plus_plus,
         // plus_equal,
         // plus_percent,
@@ -1728,6 +1731,7 @@ const TokenFmt = struct {
             .l_bracket => try writer.writeAll("an open bracket '['"),
             .r_bracket => try writer.writeAll("a close bracket ']'"),
             .period => try writer.writeAll("a period '.'"),
+            .plus => try writer.writeAll("a plus '+'"),
             .slash => try writer.writeAll("a slash '/'"),
             .comma => try writer.writeAll("a comma ','"),
             .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
@@ -1804,7 +1808,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     // },
                     // '%' => continue :state .percent,
                     // '*' => continue :state .asterisk,
-                    // '+' => continue :state .plus,
+                    '+' => return .{ .tag = .plus, .start = index, .end = index + 1 },
                     // '<' => continue :state .angle_bracket_left,
                     // '>' => continue :state .angle_bracket_right,
                     // '^' => continue :state .caret,
@@ -3034,6 +3038,8 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
     try testBadCode(mono_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
     try testBadCode(mono_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
+    try testBadCode(mono_funcs, "(", "1: syntax error: expected an expression after '(' but got EOF");
+    try testBadCode(mono_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
 }
 
 const TestDomain = struct {
@@ -3165,7 +3171,10 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
     );
+    try testCode(mono_funcs, "@Log((0))");
+    try testCode(mono_funcs, "@Log(((0)))");
     if (false) try testCode(mono_funcs, "@Log(3/4)");
+    if (false) try testCode(mono_funcs, "@Log(3/(1+4))");
     if (false) try testCode(mono_funcs,
         \\counter = 0
         \\fn RepeatMe() {

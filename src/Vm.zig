@@ -419,6 +419,16 @@ fn evalStatement(vm: *Vm, start: usize) error{Vm}!union(enum) {
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
+    var offset = try vm.evalExpr2(first_token) orelse null;
+    while (true) {
+        const op_token = lex(vm.text, offset);
+        if (!isBinaryOp(op_token)) return offset;
+        const next_token = lex(vm.text, token.start);
+        try vm.evalExpr2(next_token) orelse return offset;
+        return vm.err.set(.{ .not_implemented = "binary operators" });
+    }
+}
+fn evalExpr2(vm: *Vm, first_token: Token) error{Vm}!?usize {
     const expr_addr = vm.mem.top();
     var offset = try vm.evalPrimaryTypeExpr(first_token) orelse return null;
     while (true) {
@@ -3122,6 +3132,17 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
+    );
+    try testCode(mono_funcs,
+        \\counter = 0
+        \\fn RepeatMe() {
+        \\    @Log("Repeat ", counter)
+        \\    counter = counter + 1
+        \\    if (counter < 5) {
+        \\        @ScheduleMe(RepeatMe, 0)
+        \\    }
+        \\}
+        \\RepeatMe()
     );
 }
 

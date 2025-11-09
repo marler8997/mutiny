@@ -1439,6 +1439,24 @@ const VmEat = struct {
                 }
             },
             .keyword_fn => @panic("todo"),
+            .keyword_if => {
+                const after_lparen = try vm.eatToken(
+                    first_token.end,
+                    .l_paren,
+                    "a '(' to start the if conditional",
+                );
+                const first_expr_token = lex(vm.text, after_lparen);
+                const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.err.set(.{ .unexpected_token = .{
+                    .expected = "an expression inside the if conditional",
+                    .token = first_expr_token,
+                } });
+                const after_rparen = try vm.eatToken(
+                    after_expr,
+                    .r_paren,
+                    "a ')' to finish the if conditional",
+                );
+                return .{ .statement_end = try vm.evalBlock(after_rparen, .@"if") };
+            },
             else => {},
         }
 
@@ -3533,9 +3551,10 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\fn RepeatMe() {
         \\    @Log("Repeat ", counter)
         \\    counter = counter + 1
-        \\    //if (counter < 5) {
-        \\    //    @ScheduleMs(RepeatMe, 0)
-        \\    //}
+        \\    if (counter < 5) {
+        \\        //@ScheduleMs(RepeatMe, 0)
+        \\        @Log("here")
+        \\    }
         \\}
         \\RepeatMe()
     );

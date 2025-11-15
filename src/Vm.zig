@@ -176,9 +176,9 @@ fn logStack(vm: *Vm) void {
     const maybe_newest_symbol_addr: ?Memory.Addr = switch (vm.symbol_state) {
         .none => null,
         .evaluating => |e| e.next_newest,
-        .stable => |s| s.next,
+        .stable => |s| s.newest,
     };
-    std.debug.print("STACK: top={f}\n", .{vm.mem.top()});
+    std.debug.print("STACK: top={f} newest_symbol={?f}\n", .{ vm.mem.top(), maybe_newest_symbol_addr });
     std.debug.print("------------------------------\n", .{});
     defer std.debug.print("------------------------------\n", .{});
     var next_addr: Memory.Addr = .zero;
@@ -3657,30 +3657,30 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
-    defer {
-        // vm.logStack();
-        // vm.verifyStack();
-        vm.deinit();
-    }
+    defer vm.deinit();
 
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // TODO: maybe run the tests twice so we can test that reset works
-    var block_resume: BlockResume = .{};
-    while (true) {
+    // run twice to make sure vm reset works
+    for (0..2) |_| {
+        var block_resume: BlockResume = .{};
+        while (true) {
+            vm.verifyStack();
+            const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
+                .exit => return error.TestUnexpectedSuccess,
+                .err => |err| {
+                    var buf: [2000]u8 = undefined;
+                    const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text)});
+                    if (!std.mem.eql(u8, expected_error, actual_error)) {
+                        std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
+                        return error.TestUnexpectedError;
+                    }
+                    break;
+                },
+            };
+            block_resume = yield.block_resume;
+        }
+        vm.logStack();
         vm.verifyStack();
-        const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
-            .exit => return error.TestUnexpectedSuccess,
-            .err => |err| {
-                var buf: [2000]u8 = undefined;
-                const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text)});
-                if (!std.mem.eql(u8, expected_error, actual_error)) {
-                    std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
-                    return error.TestUnexpectedError;
-                }
-                break;
-            },
-        };
-        block_resume = yield.block_resume;
+        vm.reset();
     }
 }
 

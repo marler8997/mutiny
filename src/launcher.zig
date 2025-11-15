@@ -10,34 +10,40 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, all_args);
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MARLER_MOD_NATIVE_DLL MARLER_MOD_MANAGED_DLL EXE\n");
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL EXE\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
-    if (args.len != 3) {
-        std.log.err("expected 3 cmdline args but got {}", .{args.len});
+    if (args.len < 2) {
+        std.log.err("expected at least 2 cmdline args (MUTINY_DLL/EXE) but got {}", .{args.len});
         std.process.exit(0xff);
     }
-    const marler_mod_native_dll = args[0];
-    const marler_mod_managed_dll = args[1];
-    const exe = args[2];
+    const mutiny_dll_path = args[0];
+    const exe_path = args[1];
+    const exe_args = args[2..];
+    if (exe_args.len > 0) @panic("TODO: support extra exe cmdline args");
 
-    // std.fs.accessAbsolute(marler_mod_native_dll, .{}) catch {
-    //     std.log.err("{s} not found", .{marler_mod_native_dll});
-    //     std.process.exit(0xff);
-    // };
-    // std.fs.accessAbsolute(marler_mod_managed_dll, .{}) catch {
-    //     std.log.err("{s} not found", .{marler_mod_managed_dll});
-    //     std.process.exit(0xff);
-    // };
-    _ = marler_mod_managed_dll;
+    std.fs.accessAbsolute(mutiny_dll_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.err("mutiny dll '{s}' not found", .{mutiny_dll_path});
+            std.process.exit(0xff);
+        },
+        else => |e| return e,
+    };
+    std.fs.accessAbsolute(exe_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.err("'{s}' not found", .{exe_path});
+            std.process.exit(0xff);
+        },
+        else => |e| return e,
+    };
 
-    std.log.info("launching '{s}'...", .{exe});
+    std.log.info("launching '{s}'...", .{exe_path});
 
-    const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe);
+    const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe_path);
     defer gpa.free(exe_w);
 
-    try launchAndInject(gpa, exe_w, marler_mod_native_dll);
+    try launchAndInject(gpa, exe_w, mutiny_dll_path);
     std.log.info("Success! Game launched with framework injected.", .{});
     std.log.info("Check logs/ folder for framework output.", .{});
 }

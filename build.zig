@@ -7,21 +7,6 @@ pub fn build(b: *std.Build) void {
     const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
-    const marler_mod_native_dll = b.addLibrary(.{
-        .name = "MarlerModNative",
-        .linkage = .dynamic,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/marlermodnative.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "win32", .module = win32_mod },
-            },
-        }),
-    });
-    const install_marler_mod_native_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
-    b.getInstallStep().dependOn(&install_marler_mod_native_dll.step);
-
     const marler_mod_managed_dll = blk: {
         const compile = b.addSystemCommand(&.{
             "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
@@ -31,11 +16,28 @@ pub fn build(b: *std.Build) void {
         compile.addFileArg(b.path("managed/MarlerModManaged.cs"));
         break :blk out_dll;
     };
-    const install_marler_mod_managed_dll = b.addInstallBinFile(
+    const install_marler_mod_managed_dll = b.addInstallLibFile(
         marler_mod_managed_dll,
         "MarlerModManaged.dll",
     );
-    b.getInstallStep().dependOn(&install_marler_mod_managed_dll.step);
+
+    const marler_mod_native_dll = b.addLibrary(.{
+        .name = "MarlerModNative",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/marlermodnative.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "win32", .module = win32_mod },
+                .{ .name = "managed_dll", .module = b.createModule(.{
+                    .root_source_file = marler_mod_managed_dll,
+                }) },
+            },
+        }),
+    });
+    const install_marler_mod_native_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
+    b.getInstallStep().dependOn(&install_marler_mod_native_dll.step);
 
     const test_game = b.addExecutable(.{
         .name = "TestGame",

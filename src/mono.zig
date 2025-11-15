@@ -103,17 +103,17 @@ pub const Protection = enum(u3) {
 
 pub const ClassFieldFlags = packed struct(u16) {
     protection: Protection,
-    // Property Attributes (Bits 3-8)
+    unused1: bool = false,
     static: bool = false, // 0x0008 (Bit 3)
     init_only: bool = false, // 0x0010 (Bit 4) - Equivalent to C# 'readonly'
     literal: bool = false, // 0x0020 (Bit 5) - Equivalent to C# 'const'
     not_serialized: bool = false, // 0x0040 (Bit 6)
     special_name: bool = false, // 0x0080 (Bit 7) - For compiler-generated fields (e.g., backing fields for properties)
-    unused1: u2 = 0, // 0x0100, 0x0200
+    unused2: u2 = 0, // 0x0100, 0x0200
     pin_marshal_rts: bool = false, // 0x0400 (Bit 10) - Field has marshaling information
     has_field_rva: bool = false, // 0x0800 (Bit 11) - Field has a relative virtual address (RVA)
     has_default: bool = false, // 0x1000 (Bit 12) - Field has a default value (e.g., for optional parameters)
-    reserved_mask: u3 = 0, // 0x2000, 0x4000, 0x8000 (Bits 13-15) - Reserved flags
+    reserved_mask: u2 = 0, // 0x2000, 0x4000, 0x8000 (Bits 13-15) - Reserved flags
 };
 
 pub const MethodFlags = packed struct(u32) {

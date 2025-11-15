@@ -181,9 +181,11 @@ const MockClassField = struct {
     kind: Kind,
 
     pub const Kind = union(enum) {
-        instance: MockType,
-        pub fn getType(kind: *const Kind) MockType {
+        static: MockValue,
+        instance: *const MockType,
+        pub fn getType(kind: *const Kind) *const MockType {
             return switch (kind.*) {
+                .static => |*s| s.getType(),
                 .instance => |t| t,
             };
         }
@@ -325,9 +327,11 @@ const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
-                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{} },
+                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
+                    .{ .name = "MaxValue", .protection = .public, .kind = .{ .static = .{ .i4 = std.math.maxInt(i32) } } },
+                } },
                 .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = .i4 } },
+                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &MockType.i4 } },
                 } },
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
@@ -418,14 +422,16 @@ fn mock_class_get_field_from_name(
 fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldFlags {
     const field: *const MockClassField = .fromMono(f);
     return switch (field.kind) {
+        .static => .{ .protection = .public, .unused1 = false, .static = true, .init_only = false, .literal = true, .not_serialized = false, .special_name = false, .unused2 = 0, .pin_marshal_rts = false, .has_field_rva = false, .has_default = false, .reserved_mask = 2 },
         .instance => .{
             .protection = field.protection,
+            .unused1 = false,
             .static = false,
             .init_only = false, // TODO
             .literal = true, // TODO
             .not_serialized = false,
             .special_name = false,
-            .unused1 = 0,
+            .unused2 = 0,
             .pin_marshal_rts = false,
             .has_field_rva = false,
             .has_default = false,
@@ -444,9 +450,13 @@ fn mock_field_get_value(
 ) callconv(.c) void {
     if (maybe_obj != null) @panic("todo: non-static fields");
     const field: *const MockClassField = .fromMono(f);
-    _ = field;
-    _ = out_value;
-    @panic("todo");
+    switch (field.kind) {
+        .static => |*static_value| switch (static_value.*) {
+            .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
+            // else => |kind| std.debug.panic("todo: implement field_get_value for type kind '{s}'", .{@tagName(kind)}),
+        },
+        .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),
+    }
 }
 
 fn mock_method_get_flags(

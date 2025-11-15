@@ -58,6 +58,7 @@ pub fn panic(
 
 pub const std_options: std.Options = .{
     .logFn = log,
+    .log_level = .info,
 };
 pub export fn _DllMainCRTStartup(
     hinst: win32.HINSTANCE,

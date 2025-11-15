@@ -779,6 +779,7 @@ fn evalExprSuffix(
                     const class, const end = vm.readValue(*const mono.Class, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     const name = try vm.managedId(id_extent);
+                    monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
                     if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
                         _ = vm.mem.discardFrom(expr_addr);
                         const flags = vm.mono_funcs.field_get_flags(field);
@@ -790,24 +791,23 @@ fn evalExprSuffix(
                         } });
                         switch (vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) {
                             .i4 => {
-                                @panic("todo");
-                                // var value: i32 = undefined;
-                                // vm.mono_funcs.field_get_value(null, field, &storage);
-                                // (try vm.push(Type)).* = .integer;
-                                // (try vm.push(i64)).* = value;
+                                var value: i32 = undefined;
+                                vm.mono_funcs.field_get_value(null, field, &value);
+                                (try vm.push(Type)).* = .integer;
+                                (try vm.push(i64)).* = value;
                             },
                             else => |kind| {
                                 std.debug.print("todo: field type kind={t}\n", .{kind});
                                 return vm.setError(.{ .not_implemented = "class field of this type" });
                             },
                         }
+                    } else {
+                        // if it's not a field, then we'll assume it's a method
+                        // TODO: should we lookup the method or just assume it must be a method?
+                        expr_type_ptr.* = .class_method;
+                        // class already pushed
+                        (try vm.push(usize)).* = id_extent.start;
                     }
-
-                    // if it's not a field, then we'll assume it's a method
-                    // TODO: should we lookup the method or just assume it must be a method?
-                    expr_type_ptr.* = .class_method;
-                    // class already pushed
-                    (try vm.push(usize)).* = id_extent.start;
                     return id_extent.end;
                 },
                 .object => vm.setError(.{ .not_implemented = "object fields" }),
@@ -1260,6 +1260,13 @@ fn evalBuiltin(
     args_addr: Memory.Addr,
 ) error{Vm}!void {
     switch (builtin) {
+        .@"@Assert" => {
+            const integer = switch (vm.pop(args_addr)) {
+                .integer => |i| i,
+                else => unreachable,
+            };
+            if (integer == 0) return vm.setError(.{ .assert = builtin_extent.start });
+        },
         .@"@Nothing" => {},
         .@"@Exit" => {
             vm.error_result = .exit;
@@ -1322,6 +1329,10 @@ fn evalBuiltin(
                 .assembly = field.assembly,
                 .id_start = field.id_start,
             } });
+            monolog.debug(
+                "class_from_name namespace='{s}' name='{s}' => 0x{x}",
+                .{ namespace.slice(), name.slice(), @intFromPtr(class) },
+            );
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
         },
@@ -1976,6 +1987,7 @@ const BuiltinParamType = union(enum) {
 };
 
 const Builtin = enum {
+    @"@Assert",
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // temporary builtin, remove this later
     @"@Nothing",
@@ -1989,6 +2001,7 @@ const Builtin = enum {
     @"@ScheduleTests",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
+            .@"@Assert" => &.{.{ .concrete = .integer }},
             .@"@Nothing" => &.{},
             .@"@Exit" => &.{},
             .@"@Log" => null,
@@ -2002,6 +2015,7 @@ const Builtin = enum {
     }
 };
 pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
+    .{ "@Assert", .@"@Assert" },
     .{ "@Nothing", .@"@Nothing" },
     .{ "@Exit", .@"@Exit" },
     .{ "@Log", .@"@Log" },
@@ -3240,6 +3254,7 @@ const MethodNameKind = enum { id, new };
 
 pub const Error = union(enum) {
     not_implemented: [:0]const u8,
+    assert: usize,
     log_error: struct {
         pos: usize,
         err: std.fs.File.WriteError,
@@ -3371,6 +3386,7 @@ const ErrorFmt = struct {
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
             .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
+            .assert => |e| try writer.print("{d}: assert", .{getLineNum(f.text, e)}),
             .log_error => |e| try writer.print(
                 "{d}: @Log failed with {t}",
                 .{ getLineNum(f.text, e.pos), e.err },
@@ -3912,9 +3928,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
-        \\//@Log("Int: ", Int32.MaxValue)
+        \\@Assert(2147483647 == Int32.MaxValue)
     );
 }
+
+const monolog = std.log.scoped(.mono);
 
 const is_test = @import("builtin").is_test;
 

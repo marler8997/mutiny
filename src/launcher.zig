@@ -65,8 +65,8 @@ fn launchAndInject(
 
     std.log.info("Init Thread running!", .{});
 
-    const stdout_path = win32.L("C:\\temp\\marlermod-stdout.log");
-    const stderr_path = win32.L("C:\\temp\\marlermod-stderr.log");
+    const stdout_path = win32.L("C:\\temp\\mutiny-stdout.log");
+    const stderr_path = win32.L("C:\\temp\\mutiny-stderr.log");
 
     var security_attrs: win32.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),

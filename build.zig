@@ -21,11 +21,11 @@ pub fn build(b: *std.Build) void {
         "MarlerModManaged.dll",
     );
 
-    const marler_mod_native_dll = b.addLibrary(.{
-        .name = "MarlerModNative",
+    const mutiny_native_dll = b.addLibrary(.{
+        .name = "Mutiny",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/marlermodnative.zig"),
+            .root_source_file = b.path("src/mutinydll.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -36,8 +36,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const install_marler_mod_native_dll = b.addInstallArtifact(marler_mod_native_dll, .{});
-    b.getInstallStep().dependOn(&install_marler_mod_native_dll.step);
+    const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{});
+    b.getInstallStep().dependOn(&install_mutiny_native_dll.step);
 
     const test_game = b.addExecutable(.{
         .name = "TestGame",
@@ -78,11 +78,11 @@ pub fn build(b: *std.Build) void {
 
         const run = b.addRunArtifact(launcher);
         run.step.dependOn(&install.step);
-        run.step.dependOn(&install_marler_mod_native_dll.step);
+        run.step.dependOn(&install_mutiny_native_dll.step);
         run.step.dependOn(&install_marler_mod_managed_dll.step);
         run.step.dependOn(&install_test_game.step);
 
-        run.addArtifactArg(marler_mod_native_dll);
+        run.addArtifactArg(mutiny_native_dll);
         run.addFileArg(marler_mod_managed_dll);
         run.addArtifactArg(test_game);
         b.step("testgame", "").dependOn(&run.step);

@@ -30,6 +30,10 @@ pub const Funcs = struct {
     class_get_method_from_name: *const fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method,
     class_get_field_from_name: *const fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField,
 
+    field_get_flags: *const fn (*const ClassField) callconv(.c) ClassFieldFlags,
+    field_get_type: *const fn (*const ClassField) callconv(.c) *const Type,
+    field_get_value: *const fn (?*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
+
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
     method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
     method_get_class: *const fn (*const Method) callconv(.c) ?*const Class,
@@ -65,6 +69,9 @@ pub const Funcs = struct {
             .class_from_name = try monoload.get(mod, .class_from_name, proc_ref),
             .class_get_method_from_name = try monoload.get(mod, .class_get_method_from_name, proc_ref),
             .class_get_field_from_name = try monoload.get(mod, .class_get_field_from_name, proc_ref),
+            .field_get_flags = try monoload.get(mod, .field_get_flags, proc_ref),
+            .field_get_type = try monoload.get(mod, .field_get_type, proc_ref),
+            .field_get_value = try monoload.get(mod, .field_get_value, proc_ref),
             .method_signature = try monoload.get(mod, .method_signature, proc_ref),
             .method_get_flags = try monoload.get(mod, .method_get_flags, proc_ref),
             .method_get_class = try monoload.get(mod, .method_get_class, proc_ref),
@@ -82,6 +89,31 @@ pub const Funcs = struct {
             .free = try monoload.get(mod, .free, proc_ref),
         };
     }
+};
+
+pub const Protection = enum(u3) {
+    compiler_controlled = 0x0, // 000
+    private = 0x1, // 001
+    fam_and_assem = 0x2, // 010 - family AND assembly (internal protected)
+    assem = 0x3, // 011 - assembly (internal)
+    family = 0x4, // 100 - family (protected)
+    fam_or_assem = 0x5, // 101 - family OR assembly (protected internal)
+    public = 0x6, // 110
+};
+
+pub const ClassFieldFlags = packed struct(u16) {
+    protection: Protection,
+    // Property Attributes (Bits 3-8)
+    static: bool = false, // 0x0008 (Bit 3)
+    init_only: bool = false, // 0x0010 (Bit 4) - Equivalent to C# 'readonly'
+    literal: bool = false, // 0x0020 (Bit 5) - Equivalent to C# 'const'
+    not_serialized: bool = false, // 0x0040 (Bit 6)
+    special_name: bool = false, // 0x0080 (Bit 7) - For compiler-generated fields (e.g., backing fields for properties)
+    unused1: u2 = 0, // 0x0100, 0x0200
+    pin_marshal_rts: bool = false, // 0x0400 (Bit 10) - Field has marshaling information
+    has_field_rva: bool = false, // 0x0800 (Bit 11) - Field has a relative virtual address (RVA)
+    has_default: bool = false, // 0x1000 (Bit 12) - Field has a default value (e.g., for optional parameters)
+    reserved_mask: u3 = 0, // 0x2000, 0x4000, 0x8000 (Bits 13-15) - Reserved flags
 };
 
 pub const MethodFlags = packed struct(u32) {

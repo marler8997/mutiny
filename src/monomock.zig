@@ -23,6 +23,9 @@ pub const funcs: mono.Funcs = .{
     .class_from_name = mock_class_from_name,
     .class_get_method_from_name = mock_class_get_method_from_name,
     .class_get_field_from_name = mock_class_get_field_from_name,
+    .field_get_flags = mock_field_get_flags,
+    .field_get_type = mock_field_get_type,
+    .field_get_value = mock_field_get_value,
     .method_get_flags = mock_method_get_flags,
     .method_signature = mock_method_signature,
     .method_get_class = mock_method_get_class,
@@ -174,7 +177,18 @@ const MockMethod = struct {
 };
 const MockClassField = struct {
     name: [:0]const u8,
-    value: MockValue,
+    protection: mono.Protection,
+    kind: Kind,
+
+    pub const Kind = union(enum) {
+        instance: MockType,
+        pub fn getType(kind: *const Kind) MockType {
+            return switch (kind.*) {
+                .instance => |t| t,
+            };
+        }
+    };
+
     pub fn fromMono(class_field: *const mono.ClassField) *const MockClassField {
         return @ptrCast(@alignCast(class_field));
     }
@@ -196,24 +210,24 @@ const MethodImpl = union(enum) {
 
 const MockValue = union(enum) {
     i4: i32,
+    pub fn getType(self: *const MockValue) *const MockType {
+        return switch (self.*) {
+            inline else => |_, tag| &@field(MockType, @tagName(tag)),
+        };
+    }
 };
 
-const types = struct {
-    pub const @"void": MockType = .{ .kind = .void };
-    pub const @"i4": MockType = .{ .kind = .i4 };
-    pub const string: MockType = .{ .kind = .string };
-};
 const method_sigs = struct {
     const return_void: MockMethodSignature = .{
-        .return_type = types.void,
+        .return_type = .void,
         .param_count = 0,
     };
     const return_i4: MockMethodSignature = .{
-        .return_type = types.i4,
+        .return_type = .i4,
         .param_count = 0,
     };
     const return_static_string: MockMethodSignature = .{
-        .return_type = types.string,
+        .return_type = .string,
         .param_count = 0,
     };
 };
@@ -230,6 +244,11 @@ const MockMethodSignature = struct {
 };
 const MockType = struct {
     kind: mono.TypeKind,
+
+    pub const @"void": MockType = .{ .kind = .void };
+    pub const @"i4": MockType = .{ .kind = .i4 };
+    pub const string: MockType = .{ .kind = .string };
+
     pub fn fromMono(t: *const mono.Type) *const MockType {
         return @ptrCast(@alignCast(t));
     }
@@ -306,8 +325,9 @@ const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
-                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "MaxValue", .value = .{ .i4 = std.math.maxInt(i32) } },
+                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{} },
+                .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
+                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = .i4 } },
                 } },
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
@@ -393,6 +413,40 @@ fn mock_class_get_field_from_name(
         if (std.mem.eql(u8, field.name, name)) return field.toMono();
     }
     return null;
+}
+
+fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldFlags {
+    const field: *const MockClassField = .fromMono(f);
+    return switch (field.kind) {
+        .instance => .{
+            .protection = field.protection,
+            .static = false,
+            .init_only = false, // TODO
+            .literal = true, // TODO
+            .not_serialized = false,
+            .special_name = false,
+            .unused1 = 0,
+            .pin_marshal_rts = false,
+            .has_field_rva = false,
+            .has_default = false,
+            .reserved_mask = 0,
+        },
+    };
+}
+fn mock_field_get_type(f: *const mono.ClassField) callconv(.c) *const mono.Type {
+    const field: *const MockClassField = .fromMono(f);
+    return field.kind.getType().toMono();
+}
+fn mock_field_get_value(
+    maybe_obj: ?*const mono.Object,
+    f: *const mono.ClassField,
+    out_value: *anyopaque,
+) callconv(.c) void {
+    if (maybe_obj != null) @panic("todo: non-static fields");
+    const field: *const MockClassField = .fromMono(f);
+    _ = field;
+    _ = out_value;
+    @panic("todo");
 }
 
 fn mock_method_get_flags(

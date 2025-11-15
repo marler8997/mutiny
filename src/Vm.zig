@@ -779,10 +779,28 @@ fn evalExprSuffix(
                     const class, const end = vm.readValue(*const mono.Class, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     const name = try vm.managedId(id_extent);
-
                     if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
-                        _ = field;
-                        return vm.setError(.{ .not_implemented = "class fields" });
+                        _ = vm.mem.discardFrom(expr_addr);
+                        const flags = vm.mono_funcs.field_get_flags(field);
+                        // std.debug.print("flags {}\n", .{flags});
+                        // NOTE: if we don't check this flag, then calling field_get_value with
+                        //       a null object will crash
+                        if (!flags.static) return vm.setError(.{ .non_static_field = .{
+                            .id_extent = id_extent,
+                        } });
+                        switch (vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) {
+                            .i4 => {
+                                @panic("todo");
+                                // var value: i32 = undefined;
+                                // vm.mono_funcs.field_get_value(null, field, &storage);
+                                // (try vm.push(Type)).* = .integer;
+                                // (try vm.push(i64)).* = value;
+                            },
+                            else => |kind| {
+                                std.debug.print("todo: field type kind={t}\n", .{kind});
+                                return vm.setError(.{ .not_implemented = "class field of this type" });
+                            },
+                        }
                     }
 
                     // if it's not a field, then we'll assume it's a method
@@ -3298,6 +3316,9 @@ pub const Error = union(enum) {
         id_extent: Extent,
         arg_count: u16,
     },
+    non_static_field: struct {
+        id_extent: Extent,
+    },
     new_failed: struct {
         pos: usize,
         class: *const mono.Class,
@@ -3509,6 +3530,13 @@ const ErrorFmt = struct {
                     m.arg_count,
                 },
             ),
+            .non_static_field => |e| try writer.print(
+                "{d}: cannot access non-static field '{s}' on class, need an object",
+                .{
+                    getLineNum(f.text, e.id_extent.start),
+                    f.text[e.id_extent.start..e.id_extent.end],
+                },
+            ),
             .new_failed => |n| try writer.print("{d}: new failed", .{
                 getLineNum(f.text, n.pos),
             }),
@@ -3693,6 +3721,11 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "loop break break", "1: break must correspond to a loop");
     try testBadCode(mono_funcs, "loop break continue", "1: continue must correspond to a loop");
     try testBadCode(mono_funcs, "if (1) { break }", "1: break must correspond to a loop");
+    try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Decimal = @Class(mscorlib.System.Decimal)
+        \\@Log(Decimal.flags)
+    , "3: cannot access non-static field 'flags' on class, need an object");
 }
 
 const TestDomain = struct {

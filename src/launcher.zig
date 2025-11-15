@@ -10,19 +10,33 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, all_args);
 
     if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL EXE\n");
+        try std.fs.File.stderr().writeAll("Usage: launcher.exe MUTINY_DLL [pid PID][exe EXE...]\n");
         std.process.exit(0xff);
     }
     const args = all_args[1..];
     if (args.len < 2) {
-        std.log.err("expected at least 2 cmdline args (MUTINY_DLL/EXE) but got {}", .{args.len});
+        std.log.err("expected at least 2 cmdline args but got {}", .{args.len});
         std.process.exit(0xff);
     }
     const mutiny_dll_path = args[0];
-    const exe_path = args[1];
-    const exe_args = args[2..];
-    if (exe_args.len > 0) @panic("TODO: support extra exe cmdline args");
-
+    const kind_string = args[1];
+    const kind: union(enum) { pid: u32, exe: struct {
+        path: [:0]const u8,
+        args: []const [:0]const u8,
+    } } = blk: {
+        if (std.mem.eql(u8, kind_string, "pid")) {
+            if (args.len < 3) errExit("missing the pid number after 'pid' on the cmdline", .{});
+            const pid_string = args[2];
+            const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit("invalid pid '{s}'", .{pid_string});
+            if (args.len > 3) errExit("too many cmdline args (nothing expected after pid number)", .{});
+            break :blk .{ .pid = pid };
+        }
+        if (std.mem.eql(u8, kind_string, "exe")) break :blk .{ .exe = .{
+            .path = args[2],
+            .args = args[3..],
+        } };
+        errExit("expected 'pid' or 'exe' cmdline arg but got '{s}'", .{kind_string});
+    };
     std.fs.accessAbsolute(mutiny_dll_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             std.log.err("mutiny dll '{s}' not found", .{mutiny_dll_path});
@@ -30,21 +44,26 @@ pub fn main() !void {
         },
         else => |e| return e,
     };
-    std.fs.accessAbsolute(exe_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            std.log.err("'{s}' not found", .{exe_path});
-            std.process.exit(0xff);
+    switch (kind) {
+        .pid => |pid| {
+            errExit("todo: attach to pid {}", .{pid});
         },
-        else => |e| return e,
-    };
-
-    std.log.info("launching '{s}'...", .{exe_path});
-
-    const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe_path);
-    defer gpa.free(exe_w);
-
-    try launchAndInject(gpa, exe_w, mutiny_dll_path);
-    std.log.info("success", .{});
+        .exe => |exe| {
+            if (exe.args.len > 0) @panic("TODO: support extra exe cmdline args");
+            std.fs.accessAbsolute(exe.path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    std.log.err("'{s}' not found", .{exe.path});
+                    std.process.exit(0xff);
+                },
+                else => |e| return e,
+            };
+            std.log.info("launching '{s}'...", .{exe.path});
+            const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, exe.path);
+            defer gpa.free(exe_w);
+            try launchAndInject(gpa, exe_w, mutiny_dll_path);
+            std.log.info("success", .{});
+        },
+    }
 }
 
 fn getDirname(path: []const u16) ?[]const u16 {
@@ -264,4 +283,9 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         "{f}: Loaded at address 0x{x} (might be truncated)",
         .{ std.unicode.fmtUtf16Le(dll_path), exit_code },
     );
+}
+
+fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
+    std.log.err(fmt, args);
+    std.process.exit(0xff);
 }

@@ -87,6 +87,7 @@ pub export fn _DllMainCRTStartup(
         win32.DLL_THREAD_ATTACH => {},
         win32.DLL_THREAD_DETACH => {},
         win32.DLL_PROCESS_DETACH => {
+            // std.log.info("process detach", .{});
             // I don't think I need to lock the global mutex here
             // restoreAllWindows();
             // global.arena_instance.deinit();
@@ -125,6 +126,7 @@ pub export fn _DllMainCRTStartup(
 fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
+
     // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
     //     std.log.info("AddVectoredExceptionHandler success", .{});
     // } else {
@@ -154,7 +156,9 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
                 );
                 return 0xffffffff;
             }
-            std.Thread.sleep(std.time.ns_per_s * 1);
+            const sleep_ms = 1;
+            if (false) std.log.info("sleeping for {} ms", .{sleep_ms});
+            win32.Sleep(sleep_ms);
         }
     };
     std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_mod) });

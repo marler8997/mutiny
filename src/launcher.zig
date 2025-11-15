@@ -44,8 +44,7 @@ pub fn main() !void {
     defer gpa.free(exe_w);
 
     try launchAndInject(gpa, exe_w, mutiny_dll_path);
-    std.log.info("Success! Game launched with framework injected.", .{});
-    std.log.info("Check logs/ folder for framework output.", .{});
+    std.log.info("success", .{});
 }
 
 fn getDirname(path: []const u16) ?[]const u16 {

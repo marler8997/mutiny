@@ -7,18 +7,18 @@ pub fn build(b: *std.Build) void {
     const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
-    const marler_mod_managed_dll = blk: {
+    const mutiny_managed_dll = blk: {
         const compile = b.addSystemCommand(&.{
             "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
             "/target:library",
         });
-        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MarlerModManaged.dll");
-        compile.addFileArg(b.path("managed/MarlerModManaged.cs"));
+        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MutinyManaged.dll");
+        compile.addFileArg(b.path("managed/MutinyManaged.cs"));
         break :blk out_dll;
     };
-    const install_marler_mod_managed_dll = b.addInstallLibFile(
-        marler_mod_managed_dll,
-        "MarlerModManaged.dll",
+    const install_mutiny_managed_dll = b.addInstallLibFile(
+        mutiny_managed_dll,
+        "MutinyManaged.dll",
     );
 
     const mutiny_native_dll = b.addLibrary(.{
@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "win32", .module = win32_mod },
                 .{ .name = "managed_dll", .module = b.createModule(.{
-                    .root_source_file = marler_mod_managed_dll,
+                    .root_source_file = mutiny_managed_dll,
                 }) },
             },
         }),
@@ -79,11 +79,11 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(launcher);
         run.step.dependOn(&install.step);
         run.step.dependOn(&install_mutiny_native_dll.step);
-        run.step.dependOn(&install_marler_mod_managed_dll.step);
+        run.step.dependOn(&install_mutiny_managed_dll.step);
         run.step.dependOn(&install_test_game.step);
 
         run.addArtifactArg(mutiny_native_dll);
-        run.addFileArg(marler_mod_managed_dll);
+        run.addFileArg(mutiny_managed_dll);
         run.addArtifactArg(test_game);
         b.step("testgame", "").dependOn(&run.step);
     }

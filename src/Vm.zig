@@ -95,6 +95,12 @@ fn getLineNum(text: []const u8, offset: usize) u32 {
 }
 
 pub fn deinit(vm: *Vm) void {
+    vm.reset();
+    vm.mem.deinit();
+    vm.* = undefined;
+}
+
+pub fn reset(vm: *Vm) void {
     const maybe_id_addr: ?Memory.Addr = blk: switch (vm.symbol_state) {
         .none => {
             vm.discardValues(.zero);
@@ -111,10 +117,10 @@ pub fn deinit(vm: *Vm) void {
         },
         .stable => |s| break :blk vm.discardTopSymbol(s.newest),
     };
+    vm.symbol_state = .none;
     var id_addr = maybe_id_addr orelse {
         std.debug.assert(vm.mem.top().eql(.zero));
-        vm.mem.deinit();
-        vm.* = undefined;
+        _ = vm.mem.discardFrom(.zero);
         return;
     };
     while (true) {
@@ -134,8 +140,7 @@ pub fn deinit(vm: *Vm) void {
         if (id_addr.eql(.zero)) break;
         id_addr = previous_id_addr;
     }
-    vm.mem.deinit();
-    vm.* = undefined;
+    _ = vm.mem.discardFrom(.zero);
 }
 
 fn discardTopSymbol(vm: *Vm, addr: Memory.Addr) ?Memory.Addr {
@@ -3635,6 +3640,9 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
         // vm.verifyStack();
         vm.deinit();
     }
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // TODO: maybe run the tests twice so we can test that reset works
     var block_resume: BlockResume = .{};
     while (true) {
         vm.verifyStack();

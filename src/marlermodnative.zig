@@ -388,15 +388,15 @@ const Mod = struct {
             .initial, .err_no_text => {},
             .have_text => |*state| {
                 if (std.mem.eql(u8, state.text, new_text)) return;
-                std.log.info("mod '{s}' text updated", .{mod.name()});
+                std.log.info(
+                    "mod '{s}' text updated (size went from {} to {})",
+                    .{ mod.name(), state.text.len, new_text.len },
+                );
                 if (std.heap.page_allocator.resize(state.text, new_text.len)) {
-                    std.log.debug("  resized from {} to {}!", .{ state.text.len, new_text.len });
-                    @memcpy(state.text.ptr[0..new_text.len], new_text);
+                    std.log.debug("  resized text buffer in place", .{ state.text.len, new_text.len });
                     const text = state.deinitTakeText();
-                    mod.state = .{ .have_text = .{
-                        .text = text.ptr[0..new_text.len],
-                        .vm_state = null,
-                    } };
+                    @memcpy(text.ptr[0..new_text.len], new_text);
+                    state.* = .{ .text = text.ptr[0..new_text.len] };
                     return;
                 }
                 std.log.debug("  can't resize", .{});
@@ -549,7 +549,11 @@ fn runMod(
                 .block_resume = yield.block_resume,
             };
         } else |_| switch (eval.vm.error_result) {
-            .exit => std.log.info("{s} has exited", .{mod_name}),
+            .exit => {
+                std.log.info("{s} has exited", .{mod_name});
+                eval.vm.reset();
+                have_text.vm_state.?.yielded = null;
+            },
             .err => |err| {
                 std.log.err("{s}:{f}", .{ mod_name, err.fmt(have_text.text) });
             },

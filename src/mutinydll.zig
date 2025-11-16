@@ -4,35 +4,6 @@ const global = struct {
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 
     var mods: std.DoublyLinkedList = .{};
-
-    var write_log_mutex: Mutex = .{};
-
-    var get_log_file_mutex: Mutex = .{};
-    var log_file_cached: ?std.fs.File = null;
-    pub fn getLogFile(open_error: *?win32.WIN32_ERROR) std.fs.File {
-        std.debug.assert(open_error.* == null);
-        get_log_file_mutex.lock();
-        defer get_log_file_mutex.unlock();
-        if (log_file_cached == null) {
-            log_file_cached = blk: {
-                if (builtin.os.tag == .windows) {
-                    const handle = win32.CreateFileW(
-                        win32.L("C:\\temp\\mutiny.log"),
-                        .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
-                        .{ .READ = 1 },
-                        null,
-                        .CREATE_ALWAYS, // always create and truncate the file
-                        .{ .FILE_ATTRIBUTE_NORMAL = 1 },
-                        null,
-                    );
-                    if (handle != win32.INVALID_HANDLE_VALUE) break :blk .{ .handle = handle };
-                    open_error.* = win32.GetLastError();
-                } else @compileError("todo");
-                break :blk std.fs.File.stderr();
-            };
-        }
-        return log_file_cached.?;
-    }
 };
 
 const OpenFileError = switch (builtin.os.tag) {
@@ -50,7 +21,7 @@ pub fn panic(
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
         var maybe_open_error: ?OpenFileError = null;
-        const log_file = global.getLogFile(&maybe_open_error);
+        const log_file = logfile.global.get(&maybe_open_error);
         var buffer: [1024]u8 = undefined;
         var file_writer = log_file.writer(&buffer);
         writeStackTrace(
@@ -630,12 +601,12 @@ fn log(
     const level_scope = level_txt ++ scope_suffix;
 
     var maybe_open_error: ?OpenFileError = null;
-    const log_file = global.getLogFile(&maybe_open_error);
+    const log_file = logfile.global.get(&maybe_open_error);
     var buffer: [1024]u8 = undefined;
     var file_writer = log_file.writer(&buffer);
 
-    global.write_log_mutex.lock();
-    defer global.write_log_mutex.unlock();
+    logfile.global.write_log_mutex.lock();
+    defer logfile.global.write_log_mutex.unlock();
     writeFlushLog(level_scope ++ "|" ++ format, args, &file_writer.interface, maybe_open_error) catch std.debug.panic(
         "write log failed with {s}",
         .{@errorName(file_writer.err orelse error.Unexpected)},
@@ -714,4 +685,5 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const Mutex = @import("Mutex.zig");
 const Vm = @import("Vm.zig");
+const logfile = @import("logfile.zig");
 const mono = @import("mono.zig");

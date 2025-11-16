@@ -256,7 +256,8 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
                 sleep_time_ms = @min(sleep_time_ms, mod.nextYieldSleepMs(now));
             }
         }
-        std.Thread.sleep(sleep_time_ms);
+        // std.log.info("sleep time ms {}", .{sleep_time_ms});
+        std.Thread.sleep(sleep_time_ms * std.time.ns_per_ms);
     }
 
     return 0;
@@ -396,15 +397,17 @@ const Mod = struct {
                     "mod '{s}' text updated (size went from {} to {})",
                     .{ mod.name(), state.text.len, new_text.len },
                 );
-                if (std.heap.page_allocator.resize(state.text, new_text.len)) {
+                // NOTE: we need to de-initialize the VM before we resize the text buffer
+                const text = state.deinitTakeText();
+                if (std.heap.page_allocator.resize(text, new_text.len)) {
                     std.log.debug("  resized text buffer in place", .{ state.text.len, new_text.len });
-                    const text = state.deinitTakeText();
                     @memcpy(text.ptr[0..new_text.len], new_text);
                     state.* = .{ .text = text.ptr[0..new_text.len] };
                     return;
                 }
-                std.log.debug("  can't resize", .{});
-                state.deinitFreeText();
+                std.log.debug("  can't resize, freeing old text at 0x{x} of size {}", .{ @intFromPtr(text.ptr), text.len });
+                std.heap.page_allocator.free(text);
+                mod.state = .initial;
             },
         }
         const copy = std.heap.page_allocator.dupe(u8, new_text) catch |e| switch (e) {

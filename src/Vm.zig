@@ -950,7 +950,6 @@ fn evalExprSuffix(
                         .i4 => {
                             const result = maybe_result orelse return vm.setError(.{ .not_implemented = "error message for calling managed function with i4 return type that returned null" });
                             const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(result));
-                            std.log.info("Unboxed 32-bit return value {} (0x{0x})", .{unboxed.*});
                             (try vm.push(Type)).* = .integer;
                             (try vm.push(i64)).* = unboxed.*;
                         },

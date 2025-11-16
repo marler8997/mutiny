@@ -9,22 +9,35 @@ const global = struct {
 
     var get_log_file_mutex: Mutex = .{};
     var log_file_cached: ?std.fs.File = null;
-    pub fn getLogFile(open_error: *?std.fs.File.OpenError) std.fs.File {
+    pub fn getLogFile(open_error: *?win32.WIN32_ERROR) std.fs.File {
         std.debug.assert(open_error.* == null);
         get_log_file_mutex.lock();
         defer get_log_file_mutex.unlock();
         if (log_file_cached == null) {
             log_file_cached = blk: {
-                if (std.fs.openFileAbsolute("C:\\temp\\mutiny.log", .{})) |file| {
-                    break :blk file;
-                } else |err| {
-                    open_error.* = err;
-                    break :blk std.fs.File.stderr();
-                }
+                if (builtin.os.tag == .windows) {
+                    const handle = win32.CreateFileW(
+                        win32.L("C:\\temp\\mutiny.log"),
+                        .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
+                        .{ .READ = 1 },
+                        null,
+                        .CREATE_ALWAYS, // always create and truncate the file
+                        .{ .FILE_ATTRIBUTE_NORMAL = 1 },
+                        null,
+                    );
+                    if (handle != win32.INVALID_HANDLE_VALUE) break :blk .{ .handle = handle };
+                    open_error.* = win32.GetLastError();
+                } else @compileError("todo");
+                break :blk std.fs.File.stderr();
             };
         }
         return log_file_cached.?;
     }
+};
+
+const OpenFileError = switch (builtin.os.tag) {
+    .windows => win32.WIN32_ERROR,
+    else => std.fs.File.OpenError,
 };
 
 pub fn panic(
@@ -36,7 +49,7 @@ pub fn panic(
         std.log.err("panic: {s}", .{msg});
     }
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
-        var maybe_open_error: ?std.fs.File.OpenError = null;
+        var maybe_open_error: ?OpenFileError = null;
         const log_file = global.getLogFile(&maybe_open_error);
         var buffer: [1024]u8 = undefined;
         var file_writer = log_file.writer(&buffer);
@@ -238,7 +251,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         std.log.err("mono_thread_attach failed!", .{});
         return 0xffffffff;
     };
-    std.log.info("thread attach succes 0x{x}", .{@intFromPtr(thread)});
+    std.log.info("thread attach success 0x{x}", .{@intFromPtr(thread)});
 
     // domain_get is how the Vm accesses the domain, make sure it's
     // what we expect after attaching our thread to it
@@ -615,14 +628,14 @@ fn log(
     const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
     const level_scope = level_txt ++ scope_suffix;
 
-    var maybe_open_error: ?std.fs.File.OpenError = null;
+    var maybe_open_error: ?OpenFileError = null;
     const log_file = global.getLogFile(&maybe_open_error);
     var buffer: [1024]u8 = undefined;
     var file_writer = log_file.writer(&buffer);
 
     global.write_log_mutex.lock();
     defer global.write_log_mutex.unlock();
-    writeFlushLog(level_scope ++ format, args, &file_writer.interface, maybe_open_error) catch std.debug.panic(
+    writeFlushLog(level_scope ++ "|" ++ format, args, &file_writer.interface, maybe_open_error) catch std.debug.panic(
         "write log failed with {s}",
         .{@errorName(file_writer.err orelse error.Unexpected)},
     );
@@ -636,7 +649,7 @@ fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
     var time: win32.SYSTEMTIME = undefined;
     win32.GetSystemTime(&time);
     try writer.print(
-        "mod: {:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|",
+        "{:0>2}:{:0>2}:{:0>2}.{:0>3}|{}|{}|",
         .{ time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, win32.GetCurrentProcessId(), win32.GetCurrentThreadId() },
     );
 }
@@ -644,11 +657,14 @@ fn writeFlushLog(
     comptime format: []const u8,
     args: anytype,
     writer: *std.Io.Writer,
-    maybe_open_error: ?std.fs.File.OpenError,
+    maybe_open_error: ?OpenFileError,
 ) error{WriteFailed}!void {
     if (maybe_open_error) |open_error| {
         try writeLogPrefix(writer);
-        try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
+        if (builtin.os.tag == .windows)
+            try writer.print("open log file failed, error={f}\n", .{open_error})
+        else
+            try writer.print("open log file failed with {s}\n", .{@errorName(open_error)});
     }
     try writeLogPrefix(writer);
     try writer.print(format ++ "\n", args);
@@ -692,6 +708,7 @@ fn fmtMsgbox(
     return win32.MessageBoxA(null, msg, title, style);
 }
 
+const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
 const Mutex = @import("Mutex.zig");

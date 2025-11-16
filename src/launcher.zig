@@ -18,7 +18,7 @@ pub fn main() !void {
         std.log.err("expected at least 2 cmdline args but got {}", .{args.len});
         std.process.exit(0xff);
     }
-    const mutiny_dll_path = args[0];
+    const mutiny_dll_arg = args[0];
     const kind_string = args[1];
     const kind: union(enum) { pid: u32, exe: struct {
         path: [:0]const u8,
@@ -39,15 +39,23 @@ pub fn main() !void {
     };
     // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
     //       overriden by something else?
-    std.fs.cwd().access(mutiny_dll_path, .{}) catch |err| switch (err) {
+    std.fs.cwd().access(mutiny_dll_arg, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            std.log.err("mutiny dll '{s}' not found", .{mutiny_dll_path});
+            std.log.err("mutiny dll '{s}' not found", .{mutiny_dll_arg});
             std.process.exit(0xff);
         },
         else => |e| return e,
     };
-    const mutiny_dll_path_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, mutiny_dll_path);
-    defer gpa.free(mutiny_dll_path_w);
+    // convert the mutiny DLL path to a real absolute path so that it can be loaded by the
+    // game process.
+    const mutiny_dll_realpath = std.fs.cwd().realpathAlloc(gpa, mutiny_dll_arg) catch |err| errExit(
+        "convert mutiny dll path '{s}' to realpath failed with {s}",
+        .{ mutiny_dll_arg, @errorName(err) },
+    );
+    defer gpa.free(mutiny_dll_realpath);
+
+    const mutiny_dll_realpath_w = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, mutiny_dll_realpath);
+    defer gpa.free(mutiny_dll_realpath_w);
 
     const process: ProcessResult = blk: switch (kind) {
         .pid => |pid| {
@@ -88,7 +96,7 @@ pub fn main() !void {
     }
 
     const inject_dll = true;
-    if (inject_dll) injectDLL(process.process, mutiny_dll_path_w) catch |err| {
+    if (inject_dll) injectDLL(process.process, mutiny_dll_realpath_w) catch |err| {
         return err;
     };
 

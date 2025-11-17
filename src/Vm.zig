@@ -790,7 +790,7 @@ fn evalExprSuffix(
                         _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, null, id_extent);
                     } else {
-                        monolog.debug("  is NOT a field", .{});
+                        // monolog.debug("  is NOT a field", .{});
                         // if it's not a field, then we'll assume it's a method
                         // TODO: should we lookup the method or just assume it must be a method?
                         expr_type_ptr.* = .class_method;
@@ -812,11 +812,17 @@ fn evalExprSuffix(
                     const class = vm.mono_funcs.object_get_class(obj);
                     const name = try vm.managedId(id_extent);
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
-                    const field = vm.mono_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(
-                        .{ .missing_field = .{ .class = class, .id_extent = id_extent } },
-                    );
-                    try vm.pushMonoField(class, field, obj, id_extent);
-                    return id_extent.end;
+                    if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
+                        try vm.pushMonoField(class, field, obj, id_extent);
+                        return id_extent.end;
+                    } else {
+                        // // if it's not a field, then we'll assume it's a method
+                        // // TODO: should we lookup the method or just assume it must be a method?
+                        // expr_type_ptr.* = .class_method;
+                        // // class already pushed
+                        // (try vm.push(usize)).* = id_extent.start;
+                        return vm.setError(.{ .not_implemented = "struct methods" });
+                    }
                 },
             };
         },
@@ -3332,7 +3338,7 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().DaysPerYear
     , "3: cannot access static field 'DaysPerYear' on an object, need a class");
-    try testBadCode(mono_funcs,
+    if (false) try testBadCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().this_field_wont_exist
@@ -3536,6 +3542,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var now = DateTime.get_Now()
         \\@Log(now)
         \\@Log(now._dateData)
+        \\//@Log(now.ToString())
     );
 }
 

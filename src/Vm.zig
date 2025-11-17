@@ -1061,7 +1061,6 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(mono.GcHandle)).* = handle;
         },
-        .valuetype => {},
         else => {
             std.log.warn("todo: support pushing mono type {t}", .{object_type});
             return vm.setError(.{ .not_implemented = "managed return value of this type" });
@@ -2900,7 +2899,7 @@ const ErrorFmt = struct {
                 },
             ),
             .void_argument => |v| try writer.print(
-                "{d}: nothing was assigned function argument {}",
+                "{d}: nothing was assigned to function argument {}",
                 .{
                     getLineNum(f.text, v.first_arg_token.start),
                     v.arg_index + 1,
@@ -3336,6 +3335,11 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
+    );
+    if (false) try testCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\@Log(DateTime.get_Now())
     );
 }
 

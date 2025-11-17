@@ -59,8 +59,11 @@ pub const Domain = struct {
         .thread_safe = false,
     }) = .{},
     objects: std.SinglyLinkedList = .{},
+    gc_handles: std.ArrayListUnmanaged(?*const mono.Object) = .{},
 
     pub fn deinit(domain: *Domain) void {
+        domain.gc_handles.deinit(domain.gpa.allocator());
+
         {
             var maybe_node = domain.objects.first;
             while (maybe_node) |node| {
@@ -218,8 +221,7 @@ const MethodImpl = union(enum) {
     return_void: *const fn () void,
     return_i4: *const fn () i32,
     return_static_string: *const fn () [:0]const u8,
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    return_datetime: *const fn () void,
+    return_datetime: *const fn () i64,
     pub fn sig(impl: *const MethodImpl) *const MockMethodSignature {
         return switch (impl.*) {
             inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
@@ -296,12 +298,20 @@ const MockObject = struct {
     pub const Data = union(enum) {
         i4: i32,
         static_string: [:0]const u8,
+        datetime: i64,
     };
     pub fn fromMono(t: *const mono.Object) *const MockObject {
         return @ptrCast(@alignCast(t));
     }
     pub fn toMono(t: *const MockObject) *const mono.Object {
         return @ptrCast(t);
+    }
+    pub fn getClass(o: *const MockObject) *const MockClass {
+        return switch (o.data) {
+            .i4 => &mock_class.@"System.Int32",
+            .static_string => &mock_class.@"System.String",
+            .datetime => &mock_class.@"System.DateTime",
+        };
     }
 };
 
@@ -343,29 +353,39 @@ fn @"System.Environment.get_TickCount"() i32 {
 fn @"System.Environment.get_MachineName"() [:0]const u8 {
     return "MonoMockDummyMachine";
 }
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-fn @"System.DateTime.get_Now"() void {}
+fn @"System.DateTime.get_Now"() i64 {
+    return std.time.milliTimestamp();
+}
 
-// .{ .name = "Object", .methods = &[_]MockMethod{
-//     .{ .name = ".ctor", .sig = .{
-//         .return_type = .{ .kind = .object },
-//         .param_count = 0,
-//     } },
-// } },
-// .{ .name = "WriteLine", .sig = .{
-//     .return_type = .{ .kind = .void },
-//     .param_count = 1,
-// } },
+const mock_class = struct {
+    const @"System.Int32": MockClass = .{
+        .name = "Int32",
+        .methods = &[_]MockMethod{},
+        .fields = &[_]MockClassField{
+            .{ .name = "MaxValue", .protection = .public, .kind = .{ .static = .{ .i4 = std.math.maxInt(i32) } } },
+        },
+    };
+    const @"System.String": MockClass = .{
+        .name = "String",
+        .methods = &[_]MockMethod{},
+        .fields = &[_]MockClassField{},
+    };
+    const @"System.DateTime": MockClass = .{
+        .name = "DateTime",
+        .methods = &[_]MockMethod{
+            .{ .name = "get_Now", .impl = .{ .return_datetime = &@"System.DateTime.get_Now" } },
+        },
+        .fields = &[_]MockClassField{},
+    };
+};
+
 const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
-                .{ .name = "DateTime", .methods = &[_]MockMethod{
-                    .{ .name = "get_Now", .impl = .{ .return_datetime = &@"System.DateTime.get_Now" } },
-                }, .fields = &[_]MockClassField{} },
-                .{ .name = "Int32", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "MaxValue", .protection = .public, .kind = .{ .static = .{ .i4 = std.math.maxInt(i32) } } },
-                } },
+                mock_class.@"System.Int32",
+                mock_class.@"System.String",
+                mock_class.@"System.DateTime",
                 .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
                     .{ .name = "flags", .protection = .private, .kind = .{ .instance = &types.i4 } },
                 } },
@@ -600,26 +620,38 @@ fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
     return switch (object.data) {
         .i4 => |*value| @ptrCast(@constCast(value)),
         .static_string => @panic("codebug?"),
+        .datetime => @panic("todo: unbox datetime"),
     };
 }
 fn mock_object_get_class(o: *const mono.Object) callconv(.c) *const mono.Class {
     const object: *const MockObject = .fromMono(o);
-    _ = object;
-    @panic("todo");
+    return object.getClass().toMonoClass();
 }
 
 fn mock_gchandle_new(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandle {
-    _ = o;
     _ = pinned;
-    @panic("todo");
+    const domain = domain_get().?;
+    for (domain.gc_handles.items, 0..) |*slot, index| {
+        if (slot.* == null) {
+            slot.* = o;
+            return @enumFromInt(@as(u32, @intCast(index)));
+        }
+    }
+    domain.gc_handles.append(domain.gpa.allocator(), o) catch |e| oom(e);
+    return @enumFromInt(@as(u32, @intCast(domain.gc_handles.items.len - 1)));
 }
 fn mock_gchandle_free(handle: mono.GcHandle) callconv(.c) void {
-    _ = handle;
-    @panic("todo");
+    const domain = domain_get().?;
+    const index: u32 = @intFromEnum(handle);
+    std.debug.assert(index < domain.gc_handles.items.len);
+    std.debug.assert(domain.gc_handles.items[index] != null);
+    domain.gc_handles.items[index] = null;
 }
 fn mock_gchandle_get_target(handle: mono.GcHandle) callconv(.c) *const mono.Object {
-    _ = handle;
-    @panic("todo");
+    const domain = domain_get().?;
+    const index: u32 = @intFromEnum(handle);
+    std.debug.assert(index < domain.gc_handles.items.len);
+    return domain.gc_handles.items[index].?;
 }
 
 fn mock_runtime_invoke(
@@ -641,10 +673,8 @@ fn mock_runtime_invoke(
             return null;
         },
         .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
-        .return_static_string => |f| {
-            return domain.new(.{ .static_string = f() }).toMono();
-        },
-        .return_datetime => @panic("todo"),
+        .return_static_string => |f| return domain.new(.{ .static_string = f() }).toMono(),
+        .return_datetime => |f| return domain.new(.{ .datetime = f() }).toMono(),
     }
 }
 

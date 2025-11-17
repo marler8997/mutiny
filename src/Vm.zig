@@ -837,7 +837,15 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .object => vm.setError(.{ .not_implemented = "object fields" }),
-                .managed_struct => vm.setError(.{ .not_implemented = "managed struct fields" }),
+                .managed_struct => {
+                    const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    const name = try vm.managedId(id_extent);
+                    _ = gc_handle;
+                    _ = name;
+                    // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
+                    return vm.setError(.{ .not_implemented = "managed struct fields" });
+                },
             };
         },
         .l_paren => {
@@ -1128,7 +1136,13 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(*const mono.Object)).* = object_ptr.*;
         },
         .managed_struct => {
-            return vm.setError(.{ .not_implemented = "pushValueFromAddr managed_struct" });
+            // NOTE: we could make a new type that doesn't create a new GC handle and
+            //       just relies on the value higher up in the stack to keep it alive
+            const src_gc_handle = vm.mem.toPointer(mono.GcHandle, value_addr).*;
+            const obj = vm.mono_funcs.gchandle_get_target(src_gc_handle);
+            const new_gc_handle = vm.mono_funcs.gchandle_new(obj, 0);
+            (try vm.push(Type)).* = .managed_struct;
+            (try vm.push(mono.GcHandle)).* = new_gc_handle;
         },
     }
 }
@@ -1745,7 +1759,6 @@ const Value = union(enum) {
         switch (value.*) {
             .integer => {},
             .string_literal => {},
-            // .c_string => |ptr| mono_funcs.free(@ptrCast(@constCast(ptr))),
             .managed_string => |handle| mono_funcs.gchandle_free(handle),
             .script_function => {},
             .assembly => {},
@@ -3421,10 +3434,12 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
     );
-    if (false) try testCode(mono_funcs,
+    try testCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
-        \\@Log(DateTime.get_Now())
+        \\var now = DateTime.get_Now()
+        \\@Log(now)
+        \\//@Log(now._dateData)
     );
 }
 

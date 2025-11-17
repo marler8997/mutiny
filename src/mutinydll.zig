@@ -245,11 +245,6 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     // what we expect after attaching our thread to it
     std.debug.assert(mono_funcs.domain_get() == root_domain);
 
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    if (true) {
-        std.log.err("!!!!!!!!!! TODO: we need a way to filter mods !!!!!!!!!!!!!", .{});
-    }
-
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var last_update_mods_error: ?UpdateModsError = null;
 

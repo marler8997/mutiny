@@ -1131,16 +1131,6 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(i64)).* = unboxed.*;
         },
         .string => {
-            // const c_string = vm.mono_funcs.string_to_utf8(result) orelse return vm.setError(.{
-            //     .static_error = .{
-            //         .pos = suffix_op_token.start,
-            //         .string = "managed string to native returned null",
-            //     },
-            // });
-            // errdefer vm.mono_funcs.free(@ptrCast(@constCast(c_string)));
-            // (try vm.push(Type)).* = .c_string;
-            // (try vm.push([*:0]const u8)).* = c_string;
-
             // 0 means we don't require pinning
             const handle = vm.mono_funcs.gchandle_new(object, 0);
             errdefer vm.mono_funcs.gchandle_free(handle);

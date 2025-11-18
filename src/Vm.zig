@@ -1165,7 +1165,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(mono.GcHandle)).* = handle;
         },
-        .valuetype => {
+        .class, .valuetype => {
             const handle = vm.mono_funcs.gchandle_new(object, 0);
             errdefer vm.mono_funcs.gchandle_free(handle);
             (try vm.push(Type)).* = .object;

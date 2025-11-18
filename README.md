@@ -8,9 +8,10 @@ Launch the game like normal. At any point you can inject `Mutiny.dll`. Once inje
 
 # Example Script
 
-Here's a very "hacky" example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".
+Here's a hacky example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".
 
 ```typescript
+// save this script to C:\mutiny\mods\REPO\godmode
 var Steamworks = @Assembly("Facepunch.Steamworks.Win64")
 var SteamClient = @Class(Steamworks.Steamworks.SteamClient)
 
@@ -23,10 +24,9 @@ loop
     yield 2000
 continue
 
-var steam_id = @ToString(SteamClient.get_SteamId().Value)
-// uncomment these line and save to re-run the script for Danny/Zach, the
+// comment/uncomment the following lines to re-run the script for Danny/Zach, their
 // upgrades won't apply until the next level.
-// (I haven't added functions nor very good support for loops yet)
+var steam_id = @ToString(SteamClient.get_SteamId().Value)
 //var steam_id = @ToString(76561197963995344) // danny
 //var steam_id = @ToString(76561199195454462) // Zach
 @Log("steam id is '", steam_id, "'")

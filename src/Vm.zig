@@ -940,10 +940,6 @@ fn callMethod(
             },
             .managed_string => |handle| {
                 const str = vm.mono_funcs.gchandle_get_target(handle);
-                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                // const c_str = vm.mono_funcs.string_to_utf8(@ptrCast(@constCast(managed_args_buf[arg_index]))) orelse @panic("here");
-                // defer vm.mono_funcs.free(@ptrCast(@constCast(c_str)));
-                // std.log.warn("ManagedString value is '{s}'", .{std.mem.span(c_str)});
                 break :blk @constCast(str);
             },
             else => |a| {
@@ -2334,9 +2330,7 @@ const BuiltinParamType = union(enum) {
 
 const Builtin = enum {
     @"@Assert",
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // temporary builtin, remove this later
-    @"@Nothing",
+    @"@Nothing", // temporary builtin for testing, remove this later
     @"@Exit",
     @"@Log",
     @"@LogAssemblies",
@@ -2345,7 +2339,6 @@ const Builtin = enum {
     @"@Class",
     @"@ClassOf",
     @"@Discard",
-    // @"@ScheduleMs",
     @"@ScheduleTests",
     @"@ToString",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
@@ -2360,7 +2353,6 @@ const Builtin = enum {
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@ClassOf" => &.{.{ .concrete = .object }},
             .@"@Discard" => &.{.anything},
-            // .@"@ScheduleMs" => null,
             .@"@ScheduleTests" => &.{},
             .@"@ToString" => &.{.anything},
         };
@@ -2377,7 +2369,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Class", .@"@Class" },
     .{ "@ClassOf", .@"@ClassOf" },
     .{ "@Discard", .@"@Discard" },
-    // .{ "@ScheduleMs", .@"@ScheduleMs" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
     .{ "@ToString", .@"@ToString" },
 });
@@ -2462,80 +2453,38 @@ const Token = struct {
         return .{ .token = t, .text = text };
     }
 
-    // pub fn isVoid(t: Token, text: []const u8) bool {
-    //     return switch (t.tag) {
-    //         .identifier => std.mem.eql(u8, text[t.start..t.end], "void"),
-    //         else => false,
-    //     };
-    // }
-
     pub const Tag = enum {
         invalid,
-        // invalid_periodasterisks,
         identifier,
         string_literal,
-        // multiline_string_literal_line,
         // char_literal,
         eof,
         builtin,
         @"!",
         // pipe,
         // pipe_pipe,
-        // pipe_equal,
         @"=",
         @"==",
         @"!=",
         l_paren,
         r_paren,
-        // semicolon,
         // percent,
-        // percent_equal,
         l_brace,
         r_brace,
         l_bracket,
         r_bracket,
         period,
-        // period_asterisk,
-        // ellipsis2,
-        // ellipsis3,
-        // caret,
-        // caret_equal,
         plus,
-        // plus_plus,
-        // plus_equal,
-        // plus_percent,
-        // plus_percent_equal,
-        // plus_pipe,
-        // plus_pipe_equal,
         minus,
-        // minus_equal,
-        // minus_percent,
-        // minus_percent_equal,
-        // minus_pipe,
-        // minus_pipe_equal,
-        // asterisk,
-        // asterisk_equal,
-        // asterisk_asterisk,
-        // asterisk_percent,
-        // asterisk_percent_equal,
-        // asterisk_pipe,
-        // asterisk_pipe_equal,
-        // arrow,
         // colon,
         slash,
-        // slash_equal,
         comma,
         // ampersand,
-        // ampersand_equal,
-        // question_mark,
         @"<",
         @"<=",
         @">",
         @">=",
-        // tilde,
         number_literal,
-        // doc_comment,
-        // container_doc_comment,
         keyword_break,
         keyword_continue,
         keyword_fn,
@@ -2551,46 +2500,13 @@ const Token = struct {
     };
 
     pub const keywords = std.StaticStringMap(Tag).initComptime(.{
-        // .{ "and", .keyword_and },
         .{ "break", .keyword_break },
-        // .{ "catch", .keyword_catch },
-        // .{ "const", .keyword_const },
         .{ "continue", .keyword_continue },
-        // .{ "defer", .keyword_defer },
-        // .{ "else", .keyword_else },
-        // .{ "enum", .keyword_enum },
-        // .{ "errdefer", .keyword_errdefer },
-        // .{ "error", .keyword_error },
-        // .{ "export", .keyword_export },
-        // .{ "extern", .keyword_extern },
         .{ "fn", .keyword_fn },
-        // .{ "for", .keyword_for },
         .{ "if", .keyword_if },
-        // .{ "inline", .keyword_inline },
         .{ "loop", .keyword_loop },
         .{ "new", .keyword_new },
-        // .{ "noalias", .keyword_noalias },
-        // .{ "noinline", .keyword_noinline },
-        // .{ "nosuspend", .keyword_nosuspend },
-        // .{ "opaque", .keyword_opaque },
-        // .{ "or", .keyword_or },
-        // .{ "orelse", .keyword_orelse },
-        // .{ "packed", .keyword_packed },
-        // .{ "pub", .keyword_pub },
-        // .{ "resume", .keyword_resume },
-        // .{ "return", .keyword_return },
-        // .{ "linksection", .keyword_linksection },
-        // .{ "struct", .keyword_struct },
-        // .{ "suspend", .keyword_suspend },
-        // .{ "switch", .keyword_switch },
-        // .{ "test", .keyword_test },
-        // .{ "threadlocal", .keyword_threadlocal },
-        // .{ "try", .keyword_try },
-        // .{ "union", .keyword_union },
-        // .{ "unreachable", .keyword_unreachable },
         .{ "var", .keyword_var },
-        // .{ "volatile", .keyword_volatile },
-        // .{ "while", .keyword_while },
         .{ "yield", .keyword_yield },
     });
     pub fn getKeyword(bytes: []const u8) ?Tag {
@@ -2677,7 +2593,6 @@ fn lex(text: []const u8, lex_start: usize) Token {
         };
         switch (state) {
             .start => {
-                // index += 1;
                 switch (text[index]) {
                     ' ', '\n', '\t', '\r' => index += 1,
                     '"' => {
@@ -2705,21 +2620,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     ')' => return .{ .tag = .r_paren, .start = index, .end = index + 1 },
                     '[' => return .{ .tag = .l_bracket, .start = index, .end = index + 1 },
                     ']' => return .{ .tag = .r_bracket, .start = index, .end = index + 1 },
-                    // ';' => {
-                    //     result.tag = .semicolon;
-                    //     self.index += 1;
-                    // },
                     ',' => return .{ .tag = .comma, .start = index, .end = index + 1 },
-                    // '?' => {
-                    //     result.tag = .question_mark;
-                    //     self.index += 1;
-                    // },
-                    // ':' => {
-                    //     result.tag = .colon;
-                    //     self.index += 1;
-                    // },
-                    // '%' => continue :state .percent,
-                    // '*' => continue :state .asterisk,
+                    // ':'
+                    // '%'
+                    // '*'
                     '+' => return .{ .tag = .plus, .start = index, .end = index + 1 },
                     '<' => {
                         state = .{ .angle_bracket_left = index };
@@ -2729,17 +2633,10 @@ fn lex(text: []const u8, lex_start: usize) Token {
                         state = .{ .angle_bracket_right = index };
                         index += 1;
                     },
-                    // '^' => continue :state .caret,
-                    // '\\' => {
-                    //     result.tag = .multiline_string_literal_line;
-                    //     continue :state .backslash;
-                    // },
+                    // '^'
+                    // '\\'
                     '{' => return .{ .tag = .l_brace, .start = index, .end = index + 1 },
                     '}' => return .{ .tag = .r_brace, .start = index, .end = index + 1 },
-                    // '~' => {
-                    //     result.tag = .tilde;
-                    //     self.index += 1;
-                    // },
                     '.' => return .{ .tag = .period, .start = index, .end = index + 1 },
                     '-' => return .{ .tag = .minus, .start = index, .end = index + 1 },
                     '/' => {
@@ -2765,11 +2662,6 @@ fn lex(text: []const u8, lex_start: usize) Token {
             },
             .saw_at_sign => |start| {
                 switch (text[index]) {
-                    '"' => {
-                        @panic("todo");
-                        // result.tag = .identifier;
-                        // continue :state .string_literal;
-                    },
                     'a'...'z', 'A'...'Z', '_' => {
                         state = .{ .builtin = start };
                         index += 1;
@@ -2785,12 +2677,6 @@ fn lex(text: []const u8, lex_start: usize) Token {
                 '"' => return .{ .tag = .string_literal, .start = start, .end = index + 1 },
                 '\n' => return .{ .tag = .invalid, .start = start, .end = index },
                 else => index += 1,
-                // '\\' => continue :state .string_literal_backslash,
-                // '"' => self.index += 1,
-                // 0x01...0x09, 0x0b...0x1f, 0x7f => {
-                //     continue :state .invalid;
-                // },
-                // else => continue :state .string_literal,
             },
             .equal => |start| switch (text[index]) {
                 '=' => return .{ .tag = .@"==", .start = start, .end = index + 1 },
@@ -3370,12 +3256,6 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
     // try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    // try testBadCode(mono_funcs, "new", "1: syntax error: expected an identifier to follow 'new' but got EOF");
-    // try testBadCode(mono_funcs, "new 0", "1: syntax error: expected an identifier to follow 'new' but got a number literal 0");
-    // try testBadCode(mono_funcs, "new foo(", "");
-    // try testBadCode(mono_funcs, "new foo()", "1: undefined identifier 'foo'");
-    // try testBadCode(mono_funcs, "foo=0 new foo()", "1: cannot new 'foo' which is an integer");
-
     try testBadCode(mono_funcs, "0n", "1: invalid integer literal '0n'");
 
     try testBadCode(mono_funcs, "fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
@@ -3418,10 +3298,6 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
     try testBadCode(mono_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
     try testBadCode(mono_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
-    // try testBadCode(mono_funcs, "@ScheduleMs()", "1: @ScheduleMs requires at least 2 args (millisecond count and function id) but got 0");
-    // try testBadCode(mono_funcs, "@ScheduleMs(\"hello\")", "1: expected argument 0 to be an integer but got a string literal");
-    // try testBadCode(mono_funcs, "@ScheduleMs(0)", "1: @ScheduleMs requires at least 2 args (millisecond count and function id) but got 1");
-    // try testBadCode(mono_funcs, "@ScheduleMs(0, 0)", "");
     try testBadCode(mono_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
     try testBadCode(mono_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
     try testBadCode(mono_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
@@ -3517,7 +3393,6 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
     vm.logStack();
     vm.verifyStack();
     vm.deinit();
-    // try std.testing.expectEqual(0, vm_fixed_fba.end_index);
 }
 
 fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
@@ -3537,13 +3412,9 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "var foo_string = \"foo\"");
     try testCode(mono_funcs, "fn foo(){}@Discard(foo)");
     try testCode(mono_funcs, "fn foo(){}foo()");
-    // try testCode(mono_funcs, "\"foo\"[0]");
-    // try testCode(mono_funcs, "@Assembly(\"mscorlib\") =");
     try testCode(mono_funcs, "fn foo(x) { }");
     try testCode(mono_funcs, "var a = 0 a = 1 @Log(\"a is now \", a)");
     try testCode(mono_funcs, "var a = 0 a = 1234 @Log(\"a is now \", a)");
-    // try testCode(mono_funcs, "fn foo(x) { }foo(0)");
-    // try testCode(mono_funcs, "fn foo(x,y) { }foo(0,1)");
     if (false) try testCode(mono_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n

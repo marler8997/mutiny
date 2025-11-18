@@ -359,6 +359,7 @@ pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
                     .pos = child_block.break_pos,
                     .string = "break must correspond to a loop",
                 } });
+                loop_text_offset = null;
                 // find the end of the loop (break, continue or EOF)
                 var offset: usize = child_block.end;
                 _ = &offset;
@@ -3585,6 +3586,22 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\@Log("now=", now)
         \\@Log("now._dateData=", now._dateData)
         \\//@Log(now.ToString())
+    );
+    try testCode(mono_funcs,
+        \\var counter = 0
+        \\loop
+        \\  @Log("first loop, counter=", counter)
+        \\  yield 0
+        \\  counter = counter + 1
+        \\  if (counter == 3) { break }
+        \\continue
+        \\counter=0
+        \\loop
+        \\  @Log("second loop, counter=", counter)
+        \\  yield 0
+        \\  counter = counter + 1
+        \\  if (counter == 7) { break }
+        \\continue
     );
 }
 

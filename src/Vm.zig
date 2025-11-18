@@ -917,9 +917,12 @@ fn callMethod(
 
     var next_arg_addr = args_addr;
     for (0..args.count) |arg_index| {
-        const arg_type, next_arg_addr = vm.readValue(Type, next_arg_addr);
-        const arg_value, next_arg_addr = vm.readAnyValue(arg_type, next_arg_addr);
+        const arg_type, const value_addr = vm.readValue(Type, next_arg_addr);
+        // TODO: maybe we should call readAnyValue because some types we need the
+        //       address of the value in memory
+        const arg_value, next_arg_addr = vm.readAnyValue(arg_type, value_addr);
         managed_args_buf[arg_index] = blk: switch (arg_value) {
+            .integer => break :blk vm.mem.toPointer(i64, value_addr),
             .string_literal => |extent| {
                 const slice = vm.text[extent.start + 1 .. extent.end - 1];
                 const str = vm.mono_funcs.string_new_len(
@@ -951,9 +954,7 @@ fn callMethod(
     }
     std.debug.assert(next_arg_addr.eql(vm.mem.top()));
 
-    // const params: ?**anyopaque = null;
     var maybe_exception: ?*const mono.Object = null;
-
     const maybe_result = vm.mono_funcs.runtime_invoke(
         method,
         maybe_object,
@@ -966,8 +967,9 @@ fn callMethod(
         "Result=0x{x} Exception=0x{x}",
         .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
     );
-    if (maybe_exception) |e| {
-        std.log.err("TODO: handle exception 0x{x}", .{@intFromPtr(e)});
+    if (maybe_exception) |exception| {
+        const exception_class = vm.mono_funcs.object_get_class(exception);
+        std.log.err("{s} exception!", .{vm.mono_funcs.class_get_name(exception_class)});
         return vm.setError(.{ .not_implemented = "handle exception" });
     }
 
@@ -1025,7 +1027,7 @@ const MonoObjectType = enum {
             .valuetype => .valuetype,
             .class => .class,
             .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
-                std.log.warn("unsure if type '{s}' should be supported", .{@tagName(t)});
+                std.log.warn("unsure if type '{s}' should be supported (MonoObjectType)", .{@tagName(t)});
                 return null;
             },
             _ => null,
@@ -1037,8 +1039,10 @@ const MonoValue = union(enum) {
     boolean: c_int,
     i4: i32,
     u8: u64,
-    string: *mono.Object,
-    class: *mono.Object,
+    object: *mono.Object,
+    // string: *mono.Object,
+    // class: *mono.Object,
+    // genericinst: *mono.Object,
     pub fn initUndefined(kind: mono.TypeKind) ?MonoValue {
         return switch (kind) {
             .end => null,
@@ -1055,12 +1059,16 @@ const MonoValue = union(enum) {
             .u8 => .{ .u8 = undefined },
             // .r4 => .{ .r4 = undefined },
             // .r8 => .{ .r8 = undefined },
-            .string => .{ .string = undefined },
+            // .string => .{ .string = undefined },
+            .string => .{ .object = undefined },
             // .ptr => .{ .ptr = undefined },
             // .valuetype => .{ .valuetype = undefined },
             // .class => .{ .class = undefined },
-            .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .class, .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
-                std.log.warn("unsure if type '{s}' should be supported", .{@tagName(t)});
+            .class => .{ .object = undefined },
+            // .genericinst => .{ .genericinst = undefined },
+            .genericinst => .{ .object = undefined },
+            .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+                std.log.warn("unsure if type '{s}' should be supported (MonoValue)", .{@tagName(t)});
                 return null;
             },
             _ => null,
@@ -1089,12 +1097,11 @@ fn pushMonoValue(vm: *Vm, value: *const MonoValue) error{Vm}!void {
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value_i64;
         },
-        .string => @panic("todo: push mono string"),
-        .class => {
-            @panic("todo: push mono value class");
-            // TODO: need to create a GC handle
-            // (try vm.push(Type)).* = .integer;
-            // (try vm.push(*const mono.Object)).* = value;
+        .object => {
+            const handle = vm.mono_funcs.gchandle_new(value.object, 0);
+            errdefer vm.mono_funcs.gchandle_free(handle);
+            (try vm.push(Type)).* = .object;
+            (try vm.push(mono.GcHandle)).* = handle;
         },
     }
 }
@@ -1566,6 +1573,15 @@ fn evalBuiltin(
             );
             (try vm.push(Type)).* = .class;
             (try vm.push(*const mono.Class)).* = class;
+        },
+        .@"@ClassOf" => {
+            const gc_handle = switch (vm.pop(args_addr)) {
+                .object => |gc_handle| gc_handle,
+                else => unreachable,
+            };
+            const object = vm.mono_funcs.gchandle_get_target(gc_handle);
+            (try vm.push(Type)).* = .class;
+            (try vm.push(*const mono.Class)).* = vm.mono_funcs.object_get_class(object);
         },
         .@"@Discard" => {
             var value = vm.pop(args_addr);
@@ -2292,6 +2308,7 @@ const Builtin = enum {
     @"@LogClass",
     @"@Assembly",
     @"@Class",
+    @"@ClassOf",
     @"@Discard",
     // @"@ScheduleMs",
     @"@ScheduleTests",
@@ -2305,6 +2322,7 @@ const Builtin = enum {
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
+            .@"@ClassOf" => &.{.{ .concrete = .object }},
             .@"@Discard" => &.{.anything},
             // .@"@ScheduleMs" => null,
             .@"@ScheduleTests" => &.{},
@@ -2320,6 +2338,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@Class", .@"@Class" },
+    .{ "@ClassOf", .@"@ClassOf" },
     .{ "@Discard", .@"@Discard" },
     // .{ "@ScheduleMs", .@"@ScheduleMs" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },

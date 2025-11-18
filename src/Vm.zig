@@ -1184,7 +1184,13 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(usize)).* = token_start_ptr.*;
         },
         .managed_string => {
-            return vm.setError(.{ .not_implemented = "pushValueFromAddr managed_string" });
+            // NOTE: we could make a new type that doesn't create a new GC handle and
+            //       just relies on the value higher up in the stack to keep it alive
+            const src_gc_handle = vm.mem.toPointer(mono.GcHandle, value_addr).*;
+            const obj = vm.mono_funcs.gchandle_get_target(src_gc_handle);
+            const new_gc_handle = vm.mono_funcs.gchandle_new(obj, 0);
+            (try vm.push(Type)).* = .managed_string;
+            (try vm.push(mono.GcHandle)).* = new_gc_handle;
         },
         .script_function => {
             (try vm.push(Type)).* = .script_function;
@@ -3576,8 +3582,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
-        \\@Log(now)
-        \\@Log(now._dateData)
+        \\@Log("now=", now)
+        \\@Log("now._dateData=", now._dateData)
         \\//@Log(now.ToString())
     );
 }

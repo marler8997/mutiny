@@ -2253,6 +2253,7 @@ fn executeBinaryOp(
     };
     const value: i64, const overflow: u1 = blk: switch (op) {
         .@"+" => @addWithOverflow(left_i64, right_i64),
+        .@"-" => @subWithOverflow(left_i64, right_i64),
         .@"/" => {
             if (right_i64 == 0) return vm.setError(.{
                 .divide_by_0 = .{ .pos = right_text_pos },
@@ -2394,6 +2395,7 @@ const BinaryOpPriority = enum {
 const BinaryOp = enum {
     // math
     @"+",
+    @"-",
     @"/",
     // comparison
     @"==",
@@ -2431,6 +2433,7 @@ const BinaryOp = enum {
             .keyword_yield,
             => null,
             .plus => if (priority == .math) .@"+" else null,
+            .minus => if (priority == .math) .@"-" else null,
             .slash => if (priority == .math) .@"/" else null,
             .@"==" => if (priority == .comparison) .@"==" else null,
             .@"!=" => if (priority == .comparison) .@"!=" else null,
@@ -2504,7 +2507,7 @@ const Token = struct {
         // plus_percent_equal,
         // plus_pipe,
         // plus_pipe_equal,
-        // minus,
+        minus,
         // minus_equal,
         // minus_percent,
         // minus_percent_equal,
@@ -2616,6 +2619,7 @@ const TokenFmt = struct {
             .r_bracket => try writer.writeAll("a close bracket ']'"),
             .period => try writer.writeAll("a period '.'"),
             .plus => try writer.writeAll("a plus '+'"),
+            .minus => try writer.writeAll("a minus '-'"),
             .slash => try writer.writeAll("a slash '/'"),
             .comma => try writer.writeAll("a comma ','"),
             .@"<" => try writer.writeAll("a less than '<' operator"),
@@ -2737,7 +2741,7 @@ fn lex(text: []const u8, lex_start: usize) Token {
                     //     self.index += 1;
                     // },
                     '.' => return .{ .tag = .period, .start = index, .end = index + 1 },
-                    // '-' => continue :state .minus,
+                    '-' => return .{ .tag = .minus, .start = index, .end = index + 1 },
                     '/' => {
                         state = .{ .slash = index };
                         index += 1;
@@ -3442,6 +3446,7 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().this_field_wont_exist
     , "3: missing field 'this_field_wont_exist'");
+    try testBadCode(mono_funcs, "@Assert(0 == 1 - 2)", "1: assert");
 }
 
 const TestDomain = struct {
@@ -3660,6 +3665,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\continue
     );
     if (false) try testCode(mono_funcs, "@ToString(1234)");
+    try testCode(mono_funcs, "@Assert(0 == 1 - 1)");
 }
 
 const monolog = std.log.scoped(.mono);

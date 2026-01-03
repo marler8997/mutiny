@@ -45,10 +45,15 @@ const Type = enum {
     string_literal,
     managed_string,
     script_function,
+    null_assembly,
+    /// A .NET assembly that is NOT null
     assembly,
     assembly_field,
     class,
     class_method,
+    /// A null object that pushes a reference to its type on the stack
+    null_object,
+    /// A .NET object that is NOT null
     object,
     object_method,
     pub fn what(t: Type) []const u8 {
@@ -58,10 +63,12 @@ const Type = enum {
             // .c_string => "a string",
             .managed_string => "a managed string",
             .script_function => "a function",
+            .null_assembly => "a null assembly",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
             .class => "a class",
             .class_method => "a class method",
+            .null_object => "a null object",
             .object => "an object",
             .object_method => "an object method",
         };
@@ -75,10 +82,12 @@ const Type = enum {
             // sort of @CompileFunction() builtin or something so we
             // can store/save the data required on the stack
             .script_function => false,
+            .null_assembly => false,
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
             .class => true,
             .class_method => true,
+            .null_object => true,
             .object => true,
             .object_method => true,
         };
@@ -753,6 +762,14 @@ fn evalExprSuffix(
                     .field = id_extent,
                     .unexpected_type = expr_type_ptr.*,
                 } }),
+                .null_assembly => {
+                    const string_start, const end = vm.readValue(usize, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    return vm.setError(.{ .null_field_access = .{
+                        .field_extent = id_extent,
+                        .kind = .{ .assembly = string_start },
+                    } });
+                },
                 .assembly => {
                     _, const end = vm.readValue(*const mono.Assembly, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
@@ -799,6 +816,14 @@ fn evalExprSuffix(
                         (try vm.push(usize)).* = id_extent.start;
                     }
                     return id_extent.end;
+                },
+                .null_object => {
+                    const class, const end = vm.readValue(*const mono.Class, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    return vm.setError(.{ .null_field_access = .{
+                        .field_extent = id_extent,
+                        .kind = .{ .class = class },
+                    } });
                 },
                 .object => {
                     const gc_handle, const end = vm.readValue(mono.GcHandle, value_addr);
@@ -1035,7 +1060,7 @@ const MonoValue = union(enum) {
     boolean: c_int,
     i4: i32,
     u8: u64,
-    object: *mono.Object,
+    maybe_object: ?*mono.Object,
     // string: *mono.Object,
     // class: *mono.Object,
     // genericinst: *mono.Object,
@@ -1056,13 +1081,13 @@ const MonoValue = union(enum) {
             // .r4 => .{ .r4 = undefined },
             // .r8 => .{ .r8 = undefined },
             // .string => .{ .string = undefined },
-            .string => .{ .object = undefined },
+            .string => .{ .maybe_object = undefined },
             // .ptr => .{ .ptr = undefined },
             // .valuetype => .{ .valuetype = undefined },
             // .class => .{ .class = undefined },
-            .class => .{ .object = undefined },
+            .class => .{ .maybe_object = undefined },
             // .genericinst => .{ .genericinst = undefined },
-            .genericinst => .{ .object = undefined },
+            .genericinst => .{ .maybe_object = undefined },
             .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
                 std.log.warn("unsure if type '{s}' should be supported (MonoValue)", .{@tagName(t)});
                 return null;
@@ -1076,7 +1101,7 @@ const MonoValue = union(enum) {
         };
     }
 };
-fn pushMonoValue(vm: *Vm, value: *const MonoValue) error{Vm}!void {
+fn pushMonoValue(vm: *Vm, class: *const mono.Class, value: *const MonoValue) error{Vm}!void {
     switch (value.*) {
         .boolean => {
             (try vm.push(Type)).* = .integer;
@@ -1093,11 +1118,17 @@ fn pushMonoValue(vm: *Vm, value: *const MonoValue) error{Vm}!void {
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value_i64;
         },
-        .object => {
-            const handle = vm.mono_funcs.gchandle_new(value.object, 0);
-            errdefer vm.mono_funcs.gchandle_free(handle);
-            (try vm.push(Type)).* = .object;
-            (try vm.push(mono.GcHandle)).* = handle;
+        .maybe_object => |maybe_object| {
+            if (maybe_object) |object| {
+                const handle = vm.mono_funcs.gchandle_new(object, 0);
+                // std.debug.assert(handle != .null);
+                errdefer vm.mono_funcs.gchandle_free(handle);
+                (try vm.push(Type)).* = .object;
+                (try vm.push(mono.GcHandle)).* = handle;
+            } else {
+                (try vm.push(Type)).* = .null_object;
+                (try vm.push(*const mono.Class)).* = class;
+            }
         },
     }
 }
@@ -1139,7 +1170,7 @@ fn pushMonoField(
             value.getPtr(),
         ),
     }
-    try vm.pushMonoValue(&value);
+    try vm.pushMonoValue(class, &value);
 }
 
 fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Object) error{Vm}!void {
@@ -1200,6 +1231,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .script_function;
             (try vm.push(usize)).* = vm.mem.toPointer(usize, value_addr).*;
         },
+        .null_assembly => {
+            (try vm.push(Type)).* = .null_assembly;
+            const token_start_ptr = vm.mem.toPointer(usize, value_addr);
+            (try vm.push(usize)).* = token_start_ptr.*;
+        },
         .assembly => {
             (try vm.push(Type)).* = .assembly;
             const assembly_ptr = vm.mem.toPointer(*const mono.Assembly, value_addr);
@@ -1224,6 +1260,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .class_method;
             (try vm.push(*const mono.Class)).* = class;
             (try vm.push(usize)).* = id_start;
+        },
+        .null_object => {
+            (try vm.push(Type)).* = .null_object;
+            const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
+            (try vm.push(*const mono.Class)).* = class_ptr.*;
         },
         .object => {
             // NOTE: we could make a new type that doesn't create a new GC handle and
@@ -1542,6 +1583,26 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .assembly;
             (try vm.push(*const mono.Assembly)).* = match;
         },
+        .@"@TryAssembly" => {
+            const extent = switch (vm.pop(args_addr)) {
+                .string_literal => |e| e,
+                else => unreachable,
+            };
+            var context: FindAssembly = .{
+                .vm = vm,
+                .index = 0,
+                .needle = vm.text[extent.start + 1 .. extent.end - 1],
+                .match = null,
+            };
+            vm.mono_funcs.assembly_foreach(&findAssembly, &context);
+            if (context.match) |match| {
+                (try vm.push(Type)).* = .assembly;
+                (try vm.push(*const mono.Assembly)).* = match;
+            } else {
+                (try vm.push(Type)).* = .null_assembly;
+                (try vm.push(usize)).* = extent.start;
+            }
+        },
         .@"@Class" => {
             const field = switch (vm.pop(args_addr)) {
                 .assembly_field => |f| f,
@@ -1602,6 +1663,48 @@ fn evalBuiltin(
                 inline else => |_, tag| return vm.setError(.{ .not_implemented = "@ToString " ++ @tagName(tag) }),
             }
         },
+        .@"@IsNull" => {
+            var value = vm.pop(args_addr);
+            defer value.discard(vm.mono_funcs);
+            const is_null: i64 = switch (value) {
+                .null_assembly => 1,
+                .assembly => 0,
+                .null_object => 1,
+                .object => 0,
+                else => return vm.setError(.{
+                    .arg_type = .{
+                        // NOTE: this position is pointing to the builtin, not the arg
+                        .arg_pos = builtin_extent.start,
+                        .arg_index = 0,
+                        .expected = .object,
+                        .actual = value.getType(),
+                    },
+                }),
+            };
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = is_null;
+        },
+        .@"@NotNull" => {
+            var value = vm.pop(args_addr);
+            defer value.discard(vm.mono_funcs);
+            const not_null: i64 = switch (value) {
+                .null_assembly => 0,
+                .assembly => 1,
+                .null_object => 0,
+                .object => 1,
+                else => return vm.setError(.{
+                    .arg_type = .{
+                        // NOTE: this position is pointing to the builtin, not the arg
+                        .arg_pos = builtin_extent.start,
+                        .arg_index = 0,
+                        .expected = .object,
+                        .actual = value.getType(),
+                    },
+                }),
+            };
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = not_null;
+        },
     }
 }
 
@@ -1659,10 +1762,12 @@ fn log(
                     }
                 },
                 .script_function => |start| try writer.print("<script function:{}>", .{start}),
+                .null_assembly => |e| try writer.print("<null-assembly {s}>", .{vm.text[e.start..e.end]}),
                 .assembly => try writer.print("<assembly>", .{}),
                 .assembly_field => try writer.print("<assembly-field>", .{}),
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
+                .null_object => try writer.print("<null-object>", .{}),
                 .object => |gc_handle| try writeObject(vm.mono_funcs, writer, gc_handle),
                 .object_method => |method| {
                     const method_token = lex(vm.text, method.id_start);
@@ -1837,6 +1942,15 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const param_start, const end = vm.readValue(usize, addr);
             return .{ .{ .script_function = param_start }, end };
         },
+        .null_assembly => {
+            const start, const end = vm.readValue(usize, addr);
+            std.debug.assert(vm.text[start] == '"');
+            const token = lex(vm.text, start);
+            std.debug.assert(token.start == start);
+            std.debug.assert(token.tag == .string_literal);
+            std.debug.assert(vm.text[token.end - 1] == '"');
+            return .{ .{ .null_assembly = token.extent() }, end };
+        },
         .assembly => {
             const assembly, const end = vm.readValue(*const mono.Assembly, addr);
             return .{ .{ .assembly = assembly }, end };
@@ -1857,6 +1971,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const class, const id_start_addr = vm.readValue(*const mono.Class, addr);
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
+        },
+        .null_object => {
+            const class, const end = vm.readValue(*const mono.Class, addr);
+            return .{ .{ .null_object = class }, end };
         },
         .object => {
             const handle, const end = vm.readValue(mono.GcHandle, addr);
@@ -1898,6 +2016,7 @@ const Value = union(enum) {
     // c_string: [*:0]const u8,
     managed_string: mono.GcHandle,
     script_function: usize,
+    null_assembly: Extent,
     assembly: *const mono.Assembly,
     assembly_field: struct {
         assembly: *const mono.Assembly,
@@ -1908,6 +2027,7 @@ const Value = union(enum) {
         class: *const mono.Class,
         id_start: usize,
     },
+    null_object: *const mono.Class,
     object: mono.GcHandle,
     object_method: struct {
         gc_handle: mono.GcHandle,
@@ -1919,10 +2039,12 @@ const Value = union(enum) {
             .string_literal => {},
             .managed_string => |handle| mono_funcs.gchandle_free(handle),
             .script_function => {},
+            .null_assembly => {},
             .assembly => {},
             .assembly_field => {},
             .class => {},
             .class_method => {},
+            .null_object => {},
             .object => |handle| mono_funcs.gchandle_free(handle),
             .object_method => |method| mono_funcs.gchandle_free(method.gc_handle),
         }
@@ -1935,10 +2057,12 @@ const Value = union(enum) {
             // .c_string => .c_string,
             .managed_string => .managed_string,
             .script_function => .script_function,
+            .null_assembly => .null_assembly,
             .assembly => .assembly,
             .assembly_field => .assembly_field,
             .class => .class,
             .class_method => .class_method,
+            .null_object => .null_object,
             .object => .object,
             .object_method => .object_method,
         };
@@ -2071,6 +2195,16 @@ const VmEat = struct {
             .keyword_break,
             .keyword_continue,
             => return .{ .loop_escape = first_token.end },
+            .keyword_var => {
+                const after_id = try vm.eatToken(first_token.end, .identifier, "an identifier after 'var'");
+                const after_equal = try vm.eatToken(after_id, .@"=", "an '=' to initialize new var");
+                const expr_first_token = lex(vm.text, after_equal);
+                const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
+                    .expected = "an expression to initialize new var",
+                    .token = expr_first_token,
+                } });
+                return .{ .statement_end = expr_end };
+            },
             .keyword_yield => {
                 const expr_first_token = lex(vm.text, first_token.end);
                 const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
@@ -2336,11 +2470,14 @@ const Builtin = enum {
     @"@LogAssemblies",
     @"@LogClass",
     @"@Assembly",
+    @"@TryAssembly",
     @"@Class",
     @"@ClassOf",
     @"@Discard",
     @"@ScheduleTests",
     @"@ToString",
+    @"@IsNull",
+    @"@NotNull",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
             .@"@Assert" => &.{.{ .concrete = .integer }},
@@ -2350,11 +2487,14 @@ const Builtin = enum {
             .@"@LogAssemblies" => &.{},
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
+            .@"@TryAssembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
             .@"@ClassOf" => &.{.{ .concrete = .object }},
             .@"@Discard" => &.{.anything},
             .@"@ScheduleTests" => &.{},
             .@"@ToString" => &.{.anything},
+            .@"@IsNull" => &.{.anything},
+            .@"@NotNull" => &.{.anything},
         };
     }
 };
@@ -2366,11 +2506,14 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
+    .{ "@TryAssembly", .@"@TryAssembly" },
     .{ "@Class", .@"@Class" },
     .{ "@ClassOf", .@"@ClassOf" },
     .{ "@Discard", .@"@Discard" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
     .{ "@ToString", .@"@ToString" },
+    .{ "@IsNull", .@"@IsNull" },
+    .{ "@NotNull", .@"@NotNull" },
 });
 
 const BinaryOpPriority = enum {
@@ -2893,6 +3036,13 @@ pub const Error = union(enum) {
     static_field: struct {
         id_extent: Extent,
     },
+    null_field_access: struct {
+        field_extent: Extent,
+        kind: union(enum) {
+            assembly: usize,
+            class: *const mono.Class,
+        },
+    },
     new_failed: struct {
         pos: usize,
         class: *const mono.Class,
@@ -3130,6 +3280,14 @@ const ErrorFmt = struct {
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
+            .null_field_access => |e| try writer.print(
+                // TODO: can/should we print the class?
+                "{d}: field '{s}' accessed on NULL object",
+                .{
+                    getLineNum(f.text, e.field_extent.start),
+                    f.text[e.field_extent.start..e.field_extent.end],
+                },
+            ),
             .new_failed => |n| try writer.print("{d}: new failed", .{
                 getLineNum(f.text, n.pos),
             }),
@@ -3323,6 +3481,25 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\DateTime.get_Now().this_field_wont_exist
     , "3: missing field 'this_field_wont_exist'");
     try testBadCode(mono_funcs, "@Assert(0 == 1 - 2)", "1: assert");
+    try testBadCode(mono_funcs, "@IsNull()", "1: expected 1 args but got 0");
+    try testBadCode(mono_funcs, "@NotNull()", "1: expected 1 args but got 0");
+    try testBadCode(mono_funcs, "@NotNull(0, 0)", "1: expected 1 args but got 2");
+    try testBadCode(mono_funcs, "@IsNull(0, 0)", "1: expected 1 args but got 2");
+    try testBadCode(mono_funcs, "@IsNull(0)", "1: expected argument 0 to be an object but got an integer");
+    try testBadCode(mono_funcs, "@NotNull(0)", "1: expected argument 0 to be an object but got an integer");
+    try testBadCode(mono_funcs,
+        \\var mocktest = @TryAssembly("mocktest")
+        \\if (@NotNull(mocktest)) {
+        \\    var null_obj = @Class(mocktest.MockTest).static_field_null
+        \\}
+        \\if (@IsNull(mocktest)) {
+        \\    var null_obj = mocktest
+        \\}
+        \\@Discard(null_obj.foo)
+    , "8: field 'foo' accessed on NULL object");
+    try testBadCode(mono_funcs,
+        \\@TryAssembly("does not exist").foo
+    , "1: field 'foo' accessed on NULL object");
 }
 
 const TestDomain = struct {
@@ -3537,6 +3714,28 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     );
     if (false) try testCode(mono_funcs, "@ToString(1234)");
     try testCode(mono_funcs, "@Assert(0 == 1 - 1)");
+    try testCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var String = @Class(mscorlib.System.String)
+        \\@Assert(@NotNull(String.Empty))
+    );
+    try testCode(mono_funcs,
+        \\@Assert(@IsNull(@TryAssembly("doesnotexist")))
+        \\var mocktest = @TryAssembly("mocktest2")
+        \\if (@IsNull(mocktest)) { @Exit() }
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Assert(@NotNull(MockTest.static_field_string))
+        \\@Assert(0 == @IsNull(MockTest.static_field_string))
+        \\@Assert(@IsNull(MockTest.static_field_null))
+        \\@Assert(0 == @NotNull(MockTest.static_field_null))
+        \\var foo = MockTest.static_field_null
+        \\@Assert(@IsNull(foo))
+        \\@Assert(0 == @NotNull(foo))
+    );
+    try testCode(mono_funcs,
+        \\if (1) { var null_obj = 0 }
+        \\if (0) { var null_obj = 0 }
+    );
 }
 
 const monolog = std.log.scoped(.mono);

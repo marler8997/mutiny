@@ -10,7 +10,7 @@ pub const VTable = opaque {};
 pub const ClassField = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
-pub const GcHandle = enum(u32) { _ };
+pub const GcHandle = enum(u32) { null = 0, _ };
 pub const String = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;

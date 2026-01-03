@@ -233,6 +233,7 @@ const MethodImpl = union(enum) {
 
 const MockValue = union(enum) {
     i4: i32,
+    string: ?[*:0]const u8,
     pub fn getType(self: *const MockValue) *const MockType {
         return switch (self.*) {
             inline else => |_, tag| &@field(mock_type, @tagName(tag)),
@@ -301,7 +302,7 @@ const MockObject = struct {
     data: Data,
     pub const Data = union(enum) {
         i4: i32,
-        static_string: [:0]const u8,
+        static_string: [*:0]const u8,
         datetime: i64,
     };
     pub fn fromMono(t: *const mono.Object) *const MockObject {
@@ -372,7 +373,9 @@ const mock_class = struct {
     const @"System.String": MockClass = .{
         .name = "String",
         .methods = &[_]MockMethod{},
-        .fields = &[_]MockClassField{},
+        .fields = &[_]MockClassField{
+            .{ .name = "Empty", .protection = .public, .kind = .{ .static = .{ .string = "" } } },
+        },
     };
     const @"System.DateTime": MockClass = .{
         .name = "DateTime",
@@ -387,6 +390,16 @@ const mock_class = struct {
 };
 
 const assemblies = [_]MockAssembly{
+    .{ .name = .{ .cstr = "mocktest" }, .image = .{
+        .namespaces = &[_]Namespace{
+            .{ .prefix = "", .classes = &[_]MockClass{
+                .{ .name = "MockTest", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
+                    .{ .name = "static_field_null", .protection = .private, .kind = .{ .static = .{ .string = null } } },
+                    .{ .name = "static_field_string", .protection = .private, .kind = .{ .static = .{ .string = "example" } } },
+                } },
+            } },
+        },
+    } },
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
@@ -544,6 +557,7 @@ fn mock_field_static_get_value(
     switch (field.kind) {
         .static => |*static_value| switch (static_value.*) {
             .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
+            .string => |str| @as(*?[*:0]const u8, @ptrCast(@alignCast(out_value))).* = str,
             // else => |kind| std.debug.panic("todo: implement field_get_value for type kind '{s}'", .{@tagName(kind)}),
         },
         .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),

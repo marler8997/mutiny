@@ -685,8 +685,10 @@ fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (scope == .mono_gchandle) return;
+
     const level_txt = comptime message_level.asText();
-    const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ "): ";
+    const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ ")";
     const level_scope = level_txt ++ scope_suffix;
 
     const log_file, const maybe_open_error = logfile.global.get();

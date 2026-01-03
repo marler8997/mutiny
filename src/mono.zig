@@ -10,7 +10,9 @@ pub const VTable = opaque {};
 pub const ClassField = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
-pub const GcHandle = enum(u32) { null = 0, _ };
+// V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
+// pub const GcHandleV1 = enum(u32) { null = 0, _ };
+pub const GcHandleV2 = enum(usize) { null = 0, _ };
 pub const String = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
@@ -56,9 +58,13 @@ pub const Funcs = struct {
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
     object_get_class: *const fn (*const Object) callconv(.c) *const Class,
 
-    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
-    gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
-    gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
+    // V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
+    // gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
+    // gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
+    // gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
+    gchandle_new_v2: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV2,
+    gchandle_free_v2: *const fn (handle: GcHandleV2) callconv(.c) void,
+    gchandle_get_target_v2: *const fn (handle: GcHandleV2) callconv(.c) *const Object,
 
     runtime_invoke: *const fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
 
@@ -102,9 +108,12 @@ pub const Funcs = struct {
             .object_new = try monoload.get(mod, .object_new, proc_ref),
             .object_unbox = try monoload.get(mod, .object_unbox, proc_ref),
             .object_get_class = try monoload.get(mod, .object_get_class, proc_ref),
-            .gchandle_new = try monoload.get(mod, .gchandle_new, proc_ref),
-            .gchandle_free = try monoload.get(mod, .gchandle_free, proc_ref),
-            .gchandle_get_target = try monoload.get(mod, .gchandle_get_target, proc_ref),
+            // .gchandle_new = try monoload.get(mod, .gchandle_new, proc_ref),
+            // .gchandle_free = try monoload.get(mod, .gchandle_free, proc_ref),
+            // .gchandle_get_target = try monoload.get(mod, .gchandle_get_target, proc_ref),
+            .gchandle_new_v2 = try monoload.get(mod, .gchandle_new_v2, proc_ref),
+            .gchandle_free_v2 = try monoload.get(mod, .gchandle_free_v2, proc_ref),
+            .gchandle_get_target_v2 = try monoload.get(mod, .gchandle_get_target_v2, proc_ref),
             .runtime_invoke = try monoload.get(mod, .runtime_invoke, proc_ref),
             .string_to_utf8 = try monoload.get(mod, .string_to_utf8, proc_ref),
             .string_new_len = try monoload.get(mod, .string_new_len, proc_ref),

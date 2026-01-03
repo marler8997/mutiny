@@ -43,9 +43,9 @@ pub const funcs: mono.Funcs = .{
     .object_new = mock_object_new,
     .object_unbox = mock_object_unbox,
     .object_get_class = mock_object_get_class,
-    .gchandle_new = mock_gchandle_new,
-    .gchandle_free = mock_gchandle_free,
-    .gchandle_get_target = mock_gchandle_get_target,
+    .gchandle_new_v2 = mock_gchandle_new_v2,
+    .gchandle_free_v2 = mock_gchandle_free_v2,
+    .gchandle_get_target_v2 = mock_gchandle_get_target_v2,
     .runtime_invoke = mock_runtime_invoke,
     .string_to_utf8 = mock_string_to_utf8,
     .string_new_len = mock_string_new_len,
@@ -653,28 +653,36 @@ fn mock_object_get_class(o: *const mono.Object) callconv(.c) *const mono.Class {
     return object.getClass().toMonoClass();
 }
 
-fn mock_gchandle_new(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandle {
-    _ = pinned;
+fn gchandleFromIndex(index: usize) mono.GcHandleV2 {
+    return @enumFromInt(index + 1);
+}
+fn indexFromGchandle(gchandle: mono.GcHandleV2) usize {
+    std.debug.assert(gchandle != .null);
+    return @intFromEnum(gchandle) - 1;
+}
+
+fn mock_gchandle_new_v2(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandleV2 {
+    if (pinned != 0) @panic("todo");
     const domain = domain_get().?;
     for (domain.gc_handles.items, 0..) |*slot, index| {
         if (slot.* == null) {
             slot.* = o;
-            return @enumFromInt(@as(u32, @intCast(index)));
+            return gchandleFromIndex(index);
         }
     }
     domain.gc_handles.append(domain.gpa.allocator(), o) catch |e| oom(e);
-    return @enumFromInt(@as(u32, @intCast(domain.gc_handles.items.len - 1)));
+    return gchandleFromIndex(domain.gc_handles.items.len - 1);
 }
-fn mock_gchandle_free(handle: mono.GcHandle) callconv(.c) void {
+fn mock_gchandle_free_v2(handle: mono.GcHandleV2) callconv(.c) void {
     const domain = domain_get().?;
-    const index: u32 = @intFromEnum(handle);
+    const index: usize = indexFromGchandle(handle);
     std.debug.assert(index < domain.gc_handles.items.len);
     std.debug.assert(domain.gc_handles.items[index] != null);
     domain.gc_handles.items[index] = null;
 }
-fn mock_gchandle_get_target(handle: mono.GcHandle) callconv(.c) *const mono.Object {
+fn mock_gchandle_get_target_v2(handle: mono.GcHandleV2) callconv(.c) *const mono.Object {
     const domain = domain_get().?;
-    const index: u32 = @intFromEnum(handle);
+    const index: usize = indexFromGchandle(handle);
     std.debug.assert(index < domain.gc_handles.items.len);
     return domain.gc_handles.items[index].?;
 }

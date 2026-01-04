@@ -134,6 +134,79 @@ pub export fn _DllMainCRTStartup(
 //     return 0; // EXCEPTION_CONTINUE_SEARCH
 // }
 
+const DotNetKind = enum {
+    mono,
+    il2cpp,
+    pub fn dllName(kind: DotNetKind) [:0]const u8 {
+        return switch (kind) {
+            .mono => mono_dll_name,
+            .il2cpp => il2cpp_dll_name,
+        };
+    }
+};
+const DotNet = struct {
+    kind: DotNetKind,
+    module: win32.HINSTANCE,
+};
+fn getDotNet(arg: struct {
+    timeout_seconds: u32,
+}) ?DotNet {
+    const start = getNow();
+    var attempt: u32 = 0;
+
+    std.log.info(
+        "attempting to load either {s} or {s} with {} second timeout",
+        .{ mono_dll_name, il2cpp_dll_name, arg.timeout_seconds },
+    );
+
+    while (true) {
+        if (initMono()) |module| return .{ .kind = .mono, .module = module };
+        if (initIl2cpp()) |module| return .{ .kind = .il2cpp, .module = module };
+
+        attempt += 1;
+        const elapsed_nanos = getNow().since(start);
+        const elapsed_seconds = @as(f32, @floatFromInt(elapsed_nanos)) / std.time.ns_per_s;
+        if (elapsed_seconds >= @as(f32, @floatFromInt(arg.timeout_seconds))) {
+            _ = fmtMsgbox(
+                .{ .ICONHAND = 1 },
+                "Mutiny Fatal Error",
+                "failed to load neither mono nore il2cpp {} seconds ({} attempts)",
+                .{ arg.timeout_seconds, attempt },
+            );
+            return null;
+        }
+        const sleep_ms = 10;
+        if (false) std.log.info("sleeping for {} ms", .{sleep_ms});
+        win32.Sleep(sleep_ms);
+    }
+}
+
+const mono_dll_name = "mono-2.0-bdwgc.dll";
+fn initMono() ?win32.HINSTANCE {
+    if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_mod|
+        return mono_mod;
+    switch (win32.GetLastError()) {
+        .ERROR_MOD_NOT_FOUND => {
+            std.log.info("{s}: not found yet...", .{mono_dll_name});
+            return null;
+        },
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ mono_dll_name, e }),
+    }
+}
+
+const il2cpp_dll_name = "GameAssembly.dll";
+fn initIl2cpp() ?win32.HINSTANCE {
+    if (win32.GetModuleHandleW(win32.L(il2cpp_dll_name))) |mod|
+        return mod;
+    switch (win32.GetLastError()) {
+        .ERROR_MOD_NOT_FOUND => {
+            std.log.info("{s}: not found yet...", .{il2cpp_dll_name});
+            return null;
+        },
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ il2cpp_dll_name, e }),
+    }
+}
+
 fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
@@ -165,41 +238,16 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     //     std.log.err("AddVectoredExceptionHandler failed, error={f}", .{win32.GetLastError()});
     // }
 
-    const mono_dll_name = "mono-2.0-bdwgc.dll";
-    const mono_mod = blk: {
-        var attempt: u32 = 0;
-        while (true) {
-            attempt += 1;
-            if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_mod|
-                break :blk mono_mod;
-            switch (win32.GetLastError()) {
-                .ERROR_MOD_NOT_FOUND => {
-                    std.log.info("{s}: not found yet...", .{mono_dll_name});
-                },
-                else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ mono_dll_name, e }),
-            }
-            const max_attempts = 30;
-            if (attempt >= max_attempts) {
-                _ = fmtMsgbox(
-                    .{},
-                    "Mutiny Fatal Error",
-                    "failed to load the mono DLL after {} attempts",
-                    .{max_attempts},
-                );
-                return 0xffffffff;
-            }
-            const sleep_ms = 1;
-            if (false) std.log.info("sleeping for {} ms", .{sleep_ms});
-            win32.Sleep(sleep_ms);
-        }
-    };
-    std.log.info("{s}: 0x{x}", .{ mono_dll_name, @intFromPtr(mono_mod) });
+    const dotnet = getDotNet(.{
+        .timeout_seconds = 10,
+    }) orelse return 0xffffffff;
+    std.log.info("{s}: 0x{x}", .{ dotnet.kind.dllName(), @intFromPtr(dotnet.module) });
 
     const mono_funcs: mono.Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
-        break :blk mono.Funcs.init(&missing_proc, mono_mod) catch {
+        break :blk mono.Funcs.init(&missing_proc, dotnet.module) catch {
             _ = fmtMsgbox(
-                .{},
+                .{ .ICONHAND = 1 },
                 "Mutiny Fatal Error",
                 "the mono dll '{s}' is missing proc '{s}'",
                 .{ mono_dll_name, missing_proc },
@@ -740,6 +788,11 @@ fn fmtMsgbox(
     comptime fmt: [:0]const u8,
     args: anytype,
 ) win32.MESSAGEBOX_RESULT {
+    if (style.ICONHAND == 1) {
+        std.log.err("msgbox(error) " ++ fmt, args);
+    } else {
+        std.log.info("msgbox: " ++ fmt, args);
+    }
     var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

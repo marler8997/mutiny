@@ -44,10 +44,10 @@ pub fn build(b: *std.Build) void {
     const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{});
     b.getInstallStep().dependOn(&install_mutiny_native_dll.step);
 
-    const test_game = b.addExecutable(.{
-        .name = "TestGame",
+    const test_game_mono = b.addExecutable(.{
+        .name = "TestGameMono",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/testgame.zig"),
+            .root_source_file = b.path("src/testgamemono.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -55,13 +55,13 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const install_test_game = b.addInstallArtifact(test_game, .{});
-    b.step("install-testgame", "").dependOn(&install_test_game.step);
+    const install_test_game_mono = b.addInstallArtifact(test_game_mono, .{});
+    b.step("install-testgamemono", "").dependOn(&install_test_game_mono.step);
 
     {
-        const run = b.addRunArtifact(test_game);
-        run.step.dependOn(&install_test_game.step);
-        b.step("testgame-raw", "").dependOn(&run.step);
+        const run = b.addRunArtifact(test_game_mono);
+        run.step.dependOn(&install_test_game_mono.step);
+        b.step("testgamemono-raw", "").dependOn(&run.step);
     }
 
     {
@@ -83,10 +83,10 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&install.step);
         run.step.dependOn(&install_mutiny_native_dll.step);
         // run.step.dependOn(&install_mutiny_managed_dll.step);
-        run.step.dependOn(&install_test_game.step);
+        run.step.dependOn(&install_test_game_mono.step);
 
         run.addArtifactArg(mutiny_native_dll);
-        run.addArtifactArg(test_game);
+        run.addArtifactArg(test_game_mono);
         b.step("testgame", "").dependOn(&run.step);
     }
 

@@ -17,7 +17,7 @@ pub fn template(comptime Funcs: anytype) type {
             const func_name = "mono_" ++ @tagName(field);
             return @ptrCast(win32.GetProcAddress(module, func_name) orelse switch (win32.GetLastError()) {
                 .ERROR_PROC_NOT_FOUND => return error.ProcNotFound,
-                else => |e| std.debug.panic("GetProcAddress '{s}' with mono DLL failed, error={f}", .{ func_name, e }),
+                else => |e| std.debug.panic("GetProcAddress '{s}' on dotnet DLL failed, error={f}", .{ func_name, e }),
             });
         }
     };

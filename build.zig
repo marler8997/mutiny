@@ -127,24 +127,25 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run.step);
     }
 
-    const monotest_exe = b.addExecutable(.{
-        .name = "monotest",
+    const dotnet_test_exe = b.addExecutable(.{
+        .name = "dotnet-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/monotest.zig"),
+            .root_source_file = b.path("src/dotnet-test.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     if (target.result.os.tag == .windows) {
-        monotest_exe.root_module.addImport("win32", win32_mod);
+        dotnet_test_exe.root_module.addImport("win32", win32_mod);
     }
-    const install_monotest = b.addInstallArtifact(monotest_exe, .{});
+    const install_dotnet_test = b.addInstallArtifact(dotnet_test_exe, .{});
+    b.step("install-dotnet-test", "").dependOn(&install_dotnet_test.step);
 
     {
-        const monotest = b.addRunArtifact(monotest_exe);
-        monotest.step.dependOn(&install_monotest.step);
-        if (b.args) |args| monotest.addArgs(args);
-        b.step("monotest", "run monotest on the given mono DLL/PATH").dependOn(&monotest.step);
+        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.dependOn(&install_dotnet_test.step);
+        if (b.args) |args| dotnet_test.addArgs(args);
+        b.step("dotnet-test", "run dotnet-test on the given DLL/PATH").dependOn(&dotnet_test.step);
     }
 
     {
@@ -160,11 +161,11 @@ pub fn build(b: *std.Build) void {
         if (target.result.os.tag == .windows) {
             mock.root_module.addImport("win32", win32_mod);
         }
-        const monotest = b.addRunArtifact(monotest_exe);
-        monotest.step.dependOn(&install_monotest.step);
-        monotest.addArtifactArg(mock);
-        monotest.addArg("MOCK_MONO_PATH");
-        b.step("monotest-mock", "").dependOn(&monotest.step);
-        test_step.dependOn(&monotest.step);
+        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.dependOn(&install_dotnet_test.step);
+        dotnet_test.addArg("--mock");
+        dotnet_test.addArtifactArg(mock);
+        b.step("dotnet-test-mock", "").dependOn(&dotnet_test.step);
+        test_step.dependOn(&dotnet_test.step);
     }
 }

@@ -1,6 +1,6 @@
 const Vm = @This();
 
-mono_funcs: *const mono.Funcs,
+dotnet_funcs: *const dotnet.Funcs,
 error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
@@ -145,7 +145,7 @@ pub fn reset(vm: *Vm) void {
             previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
         }
         var value = vm.pop(type_addr);
-        value.discard(vm.mono_funcs);
+        value.discard(vm.dotnet_funcs);
         _ = vm.mem.discardFrom(id_addr);
         if (id_addr.eql(.zero)) break;
         id_addr = previous_id_addr;
@@ -177,7 +177,7 @@ fn discardValues(vm: *Vm, first_type_addr: Memory.Addr) void {
         // if (value_addr.eql(vm.mem.top())) return;
         std.debug.assert(!value_addr.eql(vm.mem.top()));
         var value, const after_value = vm.readAnyValue(value_type, value_addr);
-        value.discard(vm.mono_funcs);
+        value.discard(vm.dotnet_funcs);
         type_addr = after_value;
     }
 }
@@ -562,7 +562,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             } });
             const is_true = blk: {
                 var value = vm.pop(expr_addr);
-                defer value.discard(vm.mono_funcs);
+                defer value.discard(vm.dotnet_funcs);
                 break :blk switch (value) {
                     .integer => |int_value| int_value != 0,
                     else => |t| return vm.setError(.{ .if_type = .{
@@ -613,7 +613,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             } });
             var src = vm.pop(value_addr);
             // NOTE: is this discard correct?
-            defer src.discard(vm.mono_funcs);
+            defer src.discard(vm.dotnet_funcs);
             try vm.set(&ref, &src);
             return .{ .statement_end = after_expr };
         },
@@ -733,7 +733,7 @@ const Reference = union(enum) {
     object_field: struct {
         // for now this handle is a weak reference, we rely on it being owned by something else
         // for the duration of the set statement that this reference is apart of
-        handle: mono.GcHandleV2,
+        handle: dotnet.GcHandleV2,
         extent: Extent,
     },
 };
@@ -755,17 +755,17 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
             }
         },
         .object_field => |*field| {
-            const obj = gchandleTarget(vm.mono_funcs, field.handle);
-            const class = vm.mono_funcs.object_get_class(obj);
+            const obj = gchandleTarget(vm.dotnet_funcs, field.handle);
+            const class = vm.dotnet_funcs.object_get_class(obj);
             const name = try vm.managedId(field.extent);
             // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
-            const mono_field = vm.mono_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
+            const mono_field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
                 .class = class,
                 .id_extent = field.extent,
             } });
-            const flags = vm.mono_funcs.field_get_flags(mono_field);
+            const flags = vm.dotnet_funcs.field_get_flags(mono_field);
             if (flags.static) return vm.setError(.{ .static_field = .{ .id_extent = field.extent } });
-            const mono_type = vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(mono_field));
+            const mono_type = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(mono_field));
             const marshal_value: MarshalValue = switch (value.getMarshalConst(mono_type)) {
                 .not_implemented => |msg| return vm.setError(.{ .not_implemented2 = .{
                     .pos = field.extent.start,
@@ -783,7 +783,7 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
                     .int = o.int,
                 } }),
             };
-            vm.mono_funcs.field_set_value(obj, mono_field, marshal_value.getPtrConst());
+            vm.dotnet_funcs.field_set_value(obj, mono_field, marshal_value.getPtrConst());
         },
     }
 }
@@ -793,7 +793,7 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
             const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
             switch (symbol_type) {
                 .object => {
-                    const gc_handle, const end = vm.readValue(mono.GcHandleV2, symbol_value_addr);
+                    const gc_handle, const end = vm.readValue(dotnet.GcHandleV2, symbol_value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     ref.* = .{ .object_field = .{
                         .handle = gc_handle,
@@ -892,7 +892,7 @@ fn evalExprSuffix(
                     } });
                 },
                 .assembly => {
-                    _, const end = vm.readValue(*const mono.Assembly, value_addr);
+                    _, const end = vm.readValue(*const dotnet.Assembly, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
 
                     // NOTE: we could short-circuit the grammar at this point
@@ -914,18 +914,18 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .assembly_field => {
-                    _, const id_start_addr = vm.readValue(*const mono.Assembly, value_addr);
+                    _, const id_start_addr = vm.readValue(*const dotnet.Assembly, value_addr);
                     const id_start, const end = vm.readValue(usize, id_start_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     std.debug.assert(lex(vm.text, id_start).tag == .identifier);
                     return id_extent.end;
                 },
                 .class => {
-                    const class, const end = vm.readValue(*const mono.Class, value_addr);
+                    const class, const end = vm.readValue(*const dotnet.Class, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     const name = try vm.managedId(id_extent);
                     monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
-                    if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
+                    if (vm.dotnet_funcs.class_get_field_from_name(class, name.slice())) |field| {
                         _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, null, id_extent);
                     } else {
@@ -939,7 +939,7 @@ fn evalExprSuffix(
                     return id_extent.end;
                 },
                 .null_object => {
-                    const class, const end = vm.readValue(*const mono.Class, value_addr);
+                    const class, const end = vm.readValue(*const dotnet.Class, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     return vm.setError(.{ .null_field_access = .{
                         .field_extent = id_extent,
@@ -947,17 +947,17 @@ fn evalExprSuffix(
                     } });
                 },
                 .object => {
-                    const gc_handle, const end = vm.readValue(mono.GcHandleV2, value_addr);
+                    const gc_handle, const end = vm.readValue(dotnet.GcHandleV2, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
-                    const obj = gchandleTarget(vm.mono_funcs, gc_handle);
+                    const obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
 
-                    const class = vm.mono_funcs.object_get_class(obj);
+                    const class = vm.dotnet_funcs.object_get_class(obj);
                     const name = try vm.managedId(id_extent);
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
-                    if (vm.mono_funcs.class_get_field_from_name(class, name.slice())) |field| {
+                    if (vm.dotnet_funcs.class_get_field_from_name(class, name.slice())) |field| {
                         // is it a problem that we free the GC handle here?
                         // maybe we NEED to free it after pushing the monjo field by using defer?
-                        gchandleFree(vm.mono_funcs, gc_handle);
+                        gchandleFree(vm.dotnet_funcs, gc_handle);
                         _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, obj, id_extent);
                     } else {
@@ -1000,11 +1000,11 @@ fn evalExprSuffix(
                 },
                 .class_method => |m| return try vm.callMethod(suffix_op_token.end, m.class, null, m.id_start),
                 .object_method => |m| {
-                    const obj = gchandleTarget(vm.mono_funcs, m.gc_handle);
-                    defer gchandleFree(vm.mono_funcs, m.gc_handle);
+                    const obj = gchandleTarget(vm.dotnet_funcs, m.gc_handle);
+                    defer gchandleFree(vm.dotnet_funcs, m.gc_handle);
                     return try vm.callMethod(
                         suffix_op_token.end,
-                        vm.mono_funcs.object_get_class(obj),
+                        vm.dotnet_funcs.object_get_class(obj),
                         obj,
                         m.id_start,
                     );
@@ -1022,8 +1022,8 @@ fn evalExprSuffix(
 fn callMethod(
     vm: *Vm,
     after_lparen: usize,
-    class: *const mono.Class,
-    maybe_object: ?*const mono.Object,
+    class: *const dotnet.Class,
+    maybe_object: ?*const dotnet.Object,
     method_id_start: usize,
 ) error{Vm}!usize {
     const method_id_extent = blk: {
@@ -1047,7 +1047,7 @@ fn callMethod(
         .string = "too many args for managed function (current max is 100)",
     } });
 
-    const method = vm.mono_funcs.class_get_method_from_name(
+    const method = vm.dotnet_funcs.class_get_method_from_name(
         class,
         method_id.slice(),
         args.count,
@@ -1056,10 +1056,10 @@ fn callMethod(
         .id_extent = method_id_extent,
         .arg_count = args.count,
     } });
-    const method_sig = vm.mono_funcs.method_signature(method) orelse @panic(
+    const method_sig = vm.dotnet_funcs.method_signature(method) orelse @panic(
         "method has no signature?", // impossible right?
     );
-    const return_type = vm.mono_funcs.signature_get_return_type(method_sig) orelse @panic(
+    const return_type = vm.dotnet_funcs.signature_get_return_type(method_sig) orelse @panic(
         "method has no return type?", // impossible right?
     );
     var managed_args_buf: [max_arg_count]*anyopaque = undefined;
@@ -1074,8 +1074,8 @@ fn callMethod(
             .integer => break :blk vm.mem.toPointer(i64, value_addr),
             .string_literal => |extent| {
                 const slice = vm.text[extent.start + 1 .. extent.end - 1];
-                const str = vm.mono_funcs.string_new_len(
-                    vm.mono_funcs.domain_get().?,
+                const str = vm.dotnet_funcs.string_new_len(
+                    vm.dotnet_funcs.domain_get().?,
                     slice.ptr,
                     std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
                         .pos = after_lparen,
@@ -1088,7 +1088,7 @@ fn callMethod(
                 break :blk @ptrCast(@constCast(str));
             },
             .managed_string => |handle| {
-                const str = gchandleTarget(vm.mono_funcs, handle);
+                const str = gchandleTarget(vm.dotnet_funcs, handle);
                 break :blk @constCast(str);
             },
             else => |a| {
@@ -1099,8 +1099,8 @@ fn callMethod(
     }
     std.debug.assert(next_arg_addr.eql(vm.mem.top()));
 
-    var maybe_exception: ?*const mono.Object = null;
-    const maybe_result = vm.mono_funcs.runtime_invoke(
+    var maybe_exception: ?*const dotnet.Object = null;
+    const maybe_result = vm.dotnet_funcs.runtime_invoke(
         method,
         maybe_object,
         if (args.count == 0) null else @ptrCast(&managed_args_buf),
@@ -1113,12 +1113,12 @@ fn callMethod(
         .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
     );
     if (maybe_exception) |exception| {
-        const exception_class = vm.mono_funcs.object_get_class(exception);
-        std.log.err("{s} exception!", .{vm.mono_funcs.class_get_name(exception_class)});
+        const exception_class = vm.dotnet_funcs.object_get_class(exception);
+        std.log.err("{s} exception!", .{vm.dotnet_funcs.class_get_name(exception_class)});
         return vm.setError(.{ .not_implemented = "handle exception" });
     }
 
-    const return_type_kind = vm.mono_funcs.type_get_type(return_type);
+    const return_type_kind = vm.dotnet_funcs.type_get_type(return_type);
     if (maybe_result) |result| {
         const object_type = MonoObjectType.init(return_type_kind) orelse {
             std.log.warn("unsupported return type kind {t}", .{return_type_kind});
@@ -1152,7 +1152,7 @@ const MonoObjectType = enum {
     class,
     object,
 
-    pub fn init(kind: mono.TypeKind) ?MonoObjectType {
+    pub fn init(kind: dotnet.TypeKind) ?MonoObjectType {
         return switch (kind) {
             .end => null,
             .void => null,
@@ -1186,11 +1186,11 @@ const MarshalValue = union(enum) {
     boolean: c_int,
     i4: i32,
     u8: u64,
-    maybe_object: ?*mono.Object,
-    // string: *mono.Object,
-    // class: *mono.Object,
-    // genericinst: *mono.Object,
-    pub fn initUndefined(kind: mono.TypeKind) ?MarshalValue {
+    maybe_object: ?*dotnet.Object,
+    // string: *dotnet.Object,
+    // class: *dotnet.Object,
+    // genericinst: *dotnet.Object,
+    pub fn initUndefined(kind: dotnet.TypeKind) ?MarshalValue {
         return switch (kind) {
             .end => null,
             .void => null,
@@ -1233,7 +1233,7 @@ const MarshalValue = union(enum) {
         };
     }
 };
-fn pushMarshalValue(vm: *Vm, class: *const mono.Class, value: *const MarshalValue) error{Vm}!void {
+fn pushMarshalValue(vm: *Vm, class: *const dotnet.Class, value: *const MarshalValue) error{Vm}!void {
     switch (value.*) {
         .boolean => {
             (try vm.push(Type)).* = .integer;
@@ -1254,7 +1254,7 @@ fn pushMarshalValue(vm: *Vm, class: *const mono.Class, value: *const MarshalValu
             if (maybe_object) |object| {
                 const sanity_check = true;
                 if (sanity_check) {
-                    const obj_class: ?*const mono.Class = vm.mono_funcs.object_get_class(object);
+                    const obj_class: ?*const dotnet.Class = vm.dotnet_funcs.object_get_class(object);
                     if (obj_class == null) {
                         std.log.err("pushMarshalValue: object_get_class returned null for {*}", .{object});
                         @panic("invalid object!?!");
@@ -1262,13 +1262,13 @@ fn pushMarshalValue(vm: *Vm, class: *const mono.Class, value: *const MarshalValu
                     }
                 }
 
-                const handle = gchandleNew(vm.mono_funcs, object);
-                errdefer gchandleFree(vm.mono_funcs, handle);
+                const handle = gchandleNew(vm.dotnet_funcs, object);
+                errdefer gchandleFree(vm.dotnet_funcs, handle);
                 (try vm.push(Type)).* = .object;
-                (try vm.push(mono.GcHandleV2)).* = handle;
+                (try vm.push(dotnet.GcHandleV2)).* = handle;
             } else {
                 (try vm.push(Type)).* = .null_object;
-                (try vm.push(*const mono.Class)).* = class;
+                (try vm.push(*const dotnet.Class)).* = class;
             }
         },
     }
@@ -1276,15 +1276,15 @@ fn pushMarshalValue(vm: *Vm, class: *const mono.Class, value: *const MarshalValu
 
 fn pushMonoField(
     vm: *Vm,
-    class: *const mono.Class,
-    field: *const mono.ClassField,
-    maybe_obj: ?*const mono.Object,
+    class: *const dotnet.Class,
+    field: *const dotnet.ClassField,
+    maybe_obj: ?*const dotnet.Object,
     id_extent: Extent,
 ) error{Vm}!void {
-    const flags = vm.mono_funcs.field_get_flags(field);
+    const flags = vm.dotnet_funcs.field_get_flags(field);
     const method: union(enum) {
         static,
-        instance: *const mono.Object,
+        instance: *const dotnet.Object,
     } = blk: {
         if (flags.static) {
             if (maybe_obj != null) return vm.setError(.{ .static_field = .{ .id_extent = id_extent } });
@@ -1295,17 +1295,17 @@ fn pushMonoField(
         };
     };
 
-    var value = MarshalValue.initUndefined(vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) orelse return vm.setError(.{ .not_implemented2 = .{
+    var value = MarshalValue.initUndefined(vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(field))) orelse return vm.setError(.{ .not_implemented2 = .{
         .pos = id_extent.start,
         .msg = "class field of this type",
     } });
     switch (method) {
-        .static => vm.mono_funcs.field_static_get_value(
-            vm.mono_funcs.class_vtable(vm.mono_funcs.domain_get().?, class),
+        .static => vm.dotnet_funcs.field_static_get_value(
+            vm.dotnet_funcs.class_vtable(vm.dotnet_funcs.domain_get().?, class),
             field,
             value.getPtr(),
         ),
-        .instance => |obj| vm.mono_funcs.field_get_value(
+        .instance => |obj| vm.dotnet_funcs.field_get_value(
             obj,
             field,
             value.getPtr(),
@@ -1314,30 +1314,30 @@ fn pushMonoField(
     try vm.pushMarshalValue(class, &value);
 }
 
-fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Object) error{Vm}!void {
+fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Object) error{Vm}!void {
     switch (object_type) {
         .boolean => {
-            const unboxed: *align(1) c_int = @ptrCast(vm.mono_funcs.object_unbox(object));
+            const unboxed: *align(1) c_int = @ptrCast(vm.dotnet_funcs.object_unbox(object));
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = if (unboxed.* == 0) 0 else 1;
         },
         .i4 => {
-            const unboxed: *align(1) i32 = @ptrCast(vm.mono_funcs.object_unbox(object));
+            const unboxed: *align(1) i32 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = unboxed.*;
         },
         .string => {
             // 0 means we don't require pinning
-            const handle = gchandleNew(vm.mono_funcs, object);
-            errdefer gchandleFree(vm.mono_funcs, handle);
+            const handle = gchandleNew(vm.dotnet_funcs, object);
+            errdefer gchandleFree(vm.dotnet_funcs, handle);
             (try vm.push(Type)).* = .managed_string;
-            (try vm.push(mono.GcHandleV2)).* = handle;
+            (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
         .class, .valuetype, .object => {
-            const handle = gchandleNew(vm.mono_funcs, object);
-            errdefer gchandleFree(vm.mono_funcs, handle);
+            const handle = gchandleNew(vm.dotnet_funcs, object);
+            errdefer gchandleFree(vm.dotnet_funcs, handle);
             (try vm.push(Type)).* = .object;
-            (try vm.push(mono.GcHandleV2)).* = handle;
+            (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
         else => {
             std.log.warn("todo: support pushing mono type {t}", .{object_type});
@@ -1362,11 +1362,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
         .managed_string => {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
-            const src_gc_handle = vm.mem.toPointer(mono.GcHandleV2, value_addr).*;
-            const obj = gchandleTarget(vm.mono_funcs, src_gc_handle);
-            const new_gc_handle = gchandleNew(vm.mono_funcs, obj);
+            const src_gc_handle = vm.mem.toPointer(dotnet.GcHandleV2, value_addr).*;
+            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle);
+            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj);
             (try vm.push(Type)).* = .managed_string;
-            (try vm.push(mono.GcHandleV2)).* = new_gc_handle;
+            (try vm.push(dotnet.GcHandleV2)).* = new_gc_handle;
         },
         .script_function => {
             (try vm.push(Type)).* = .script_function;
@@ -1379,42 +1379,42 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
         },
         .assembly => {
             (try vm.push(Type)).* = .assembly;
-            const assembly_ptr = vm.mem.toPointer(*const mono.Assembly, value_addr);
-            (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
+            const assembly_ptr = vm.mem.toPointer(*const dotnet.Assembly, value_addr);
+            (try vm.push(*const dotnet.Assembly)).* = assembly_ptr.*;
         },
         .assembly_field => {
             (try vm.push(Type)).* = .assembly_field;
-            // const assembly_ptr, const some_addr = vm.readPointer(*const mono.Assembly, value_addr);
-            // (try vm.push(*const mono.Assembly)).* = assembly_ptr.*;
+            // const assembly_ptr, const some_addr = vm.readPointer(*const dotnet.Assembly, value_addr);
+            // (try vm.push(*const dotnet.Assembly)).* = assembly_ptr.*;
             // _ = some_addr;
             return vm.setError(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
         .class => {
             (try vm.push(Type)).* = .class;
-            const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
-            (try vm.push(*const mono.Class)).* = class_ptr.*;
+            const class_ptr = vm.mem.toPointer(*const dotnet.Class, value_addr);
+            (try vm.push(*const dotnet.Class)).* = class_ptr.*;
         },
         .class_method => {
-            const class, const id_start_addr = vm.readValue(*const mono.Class, value_addr);
+            const class, const id_start_addr = vm.readValue(*const dotnet.Class, value_addr);
             const id_start = vm.mem.toPointer(usize, id_start_addr).*;
             // TODO: should we verify id_start?
             (try vm.push(Type)).* = .class_method;
-            (try vm.push(*const mono.Class)).* = class;
+            (try vm.push(*const dotnet.Class)).* = class;
             (try vm.push(usize)).* = id_start;
         },
         .null_object => {
             (try vm.push(Type)).* = .null_object;
-            const class_ptr = vm.mem.toPointer(*const mono.Class, value_addr);
-            (try vm.push(*const mono.Class)).* = class_ptr.*;
+            const class_ptr = vm.mem.toPointer(*const dotnet.Class, value_addr);
+            (try vm.push(*const dotnet.Class)).* = class_ptr.*;
         },
         .object => {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
-            const src_gc_handle = vm.mem.toPointer(mono.GcHandleV2, value_addr).*;
-            const obj = gchandleTarget(vm.mono_funcs, src_gc_handle);
-            const new_gc_handle = gchandleNew(vm.mono_funcs, obj);
+            const src_gc_handle = vm.mem.toPointer(dotnet.GcHandleV2, value_addr).*;
+            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle);
+            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj);
             (try vm.push(Type)).* = .object;
-            (try vm.push(mono.GcHandleV2)).* = new_gc_handle;
+            (try vm.push(dotnet.GcHandleV2)).* = new_gc_handle;
         },
         .object_method => {
             return vm.setError(.{ .not_implemented = "pushValueFromaddr object_method" });
@@ -1673,7 +1673,7 @@ fn evalBuiltin(
         .@"@LogAssemblies" => {
             var context: LogAssemblies = .{ .vm = vm, .index = 0 };
             std.log.info("mono_assembly_foreach:", .{});
-            vm.mono_funcs.assembly_foreach(&logAssemblies, &context);
+            vm.dotnet_funcs.assembly_foreach(&logAssemblies, &context);
             std.log.info("mono_assembly_foreach done", .{});
         },
         .@"@LogClass" => {
@@ -1684,23 +1684,23 @@ fn evalBuiltin(
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
             std.log.info("@LogClass name='{s}' namespace='{s}':", .{
-                vm.mono_funcs.class_get_name(class),
-                vm.mono_funcs.class_get_namespace(class),
+                vm.dotnet_funcs.class_get_name(class),
+                vm.dotnet_funcs.class_get_namespace(class),
             });
             {
                 var iterator: ?*anyopaque = null;
-                while (vm.mono_funcs.class_get_fields(class, &iterator)) |field| {
-                    const name = vm.mono_funcs.field_get_name(field);
-                    const flags = vm.mono_funcs.field_get_flags(field);
+                while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {
+                    const name = vm.dotnet_funcs.field_get_name(field);
+                    const flags = vm.dotnet_funcs.field_get_flags(field);
                     const stinst: []const u8 = if (flags.static) "static  " else "instance";
                     std.log.info(" - {s} field '{s}'", .{ stinst, name });
                 }
             }
             {
                 var iterator: ?*anyopaque = null;
-                while (vm.mono_funcs.class_get_methods(class, &iterator)) |method| {
-                    const name = vm.mono_funcs.method_get_name(method);
-                    const flags = vm.mono_funcs.method_get_flags(method, null);
+                while (vm.dotnet_funcs.class_get_methods(class, &iterator)) |method| {
+                    const name = vm.dotnet_funcs.method_get_name(method);
+                    const flags = vm.dotnet_funcs.method_get_flags(method, null);
                     const stinst: []const u8 = if (flags.static) "static  " else "instance";
                     std.log.info(" - {s} method '{s}'", .{ stinst, name });
                 }
@@ -1717,12 +1717,12 @@ fn evalBuiltin(
                 .needle = vm.text[extent.start + 1 .. extent.end - 1],
                 .match = null,
             };
-            vm.mono_funcs.assembly_foreach(&findAssembly, &context);
+            vm.dotnet_funcs.assembly_foreach(&findAssembly, &context);
             const match = context.match orelse return vm.setError(
                 .{ .assembly_not_found = extent },
             );
             (try vm.push(Type)).* = .assembly;
-            (try vm.push(*const mono.Assembly)).* = match;
+            (try vm.push(*const dotnet.Assembly)).* = match;
         },
         .@"@TryAssembly" => {
             const extent = switch (vm.pop(args_addr)) {
@@ -1735,10 +1735,10 @@ fn evalBuiltin(
                 .needle = vm.text[extent.start + 1 .. extent.end - 1],
                 .match = null,
             };
-            vm.mono_funcs.assembly_foreach(&findAssembly, &context);
+            vm.dotnet_funcs.assembly_foreach(&findAssembly, &context);
             if (context.match) |match| {
                 (try vm.push(Type)).* = .assembly;
-                (try vm.push(*const mono.Assembly)).* = match;
+                (try vm.push(*const dotnet.Assembly)).* = match;
             } else {
                 (try vm.push(Type)).* = .null_assembly;
                 (try vm.push(usize)).* = extent.start;
@@ -1754,10 +1754,10 @@ fn evalBuiltin(
             if (lexClass(vm.text, &namespace, &name, field.id_start)) |too_big_end| return vm.setError(.{
                 .id_too_big = .{ .start = field.id_start, .end = too_big_end },
             });
-            const image = vm.mono_funcs.assembly_get_image(field.assembly) orelse @panic(
+            const image = vm.dotnet_funcs.assembly_get_image(field.assembly) orelse @panic(
                 "mono_assembly_get_image returned null",
             );
-            const class = vm.mono_funcs.class_from_name(
+            const class = vm.dotnet_funcs.class_from_name(
                 image,
                 namespace.slice(),
                 name.slice(),
@@ -1770,27 +1770,27 @@ fn evalBuiltin(
                 .{ namespace.slice(), name.slice(), @intFromPtr(class) },
             );
             (try vm.push(Type)).* = .class;
-            (try vm.push(*const mono.Class)).* = class;
+            (try vm.push(*const dotnet.Class)).* = class;
         },
         .@"@ClassOf" => {
             const gc_handle = switch (vm.pop(args_addr)) {
                 .object => |gc_handle| gc_handle,
                 else => unreachable,
             };
-            const object = gchandleTarget(vm.mono_funcs, gc_handle);
+            const object = gchandleTarget(vm.dotnet_funcs, gc_handle);
             (try vm.push(Type)).* = .class;
-            (try vm.push(*const mono.Class)).* = vm.mono_funcs.object_get_class(object);
+            (try vm.push(*const dotnet.Class)).* = vm.dotnet_funcs.object_get_class(object);
         },
         .@"@Discard" => {
             var value = vm.pop(args_addr);
-            value.discard(vm.mono_funcs);
+            value.discard(vm.dotnet_funcs);
         },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
         },
         .@"@ToString" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.mono_funcs);
+            defer value.discard(vm.dotnet_funcs);
             switch (value) {
                 .integer => |value_i64| {
                     var buf: [32]u8 = undefined;
@@ -1806,7 +1806,7 @@ fn evalBuiltin(
         },
         .@"@IsNull" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.mono_funcs);
+            defer value.discard(vm.dotnet_funcs);
             const is_null: i64 = switch (value) {
                 .null_assembly => 1,
                 .assembly => 0,
@@ -1827,7 +1827,7 @@ fn evalBuiltin(
         },
         .@"@NotNull" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.mono_funcs);
+            defer value.discard(vm.dotnet_funcs);
             const not_null: i64 = switch (value) {
                 .null_assembly => 0,
                 .assembly => 1,
@@ -1850,8 +1850,8 @@ fn evalBuiltin(
 }
 
 fn pushNewManagedString(vm: *Vm, text_pos: usize, slice: []const u8) error{Vm}!void {
-    const managed_str = vm.mono_funcs.string_new_len(
-        vm.mono_funcs.domain_get().?,
+    const managed_str = vm.dotnet_funcs.string_new_len(
+        vm.dotnet_funcs.domain_get().?,
         slice.ptr,
         std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
             .pos = text_pos,
@@ -1861,10 +1861,10 @@ fn pushNewManagedString(vm: *Vm, text_pos: usize, slice: []const u8) error{Vm}!v
         .pos = text_pos,
         .string = "mono_string_new_len failed",
     } });
-    const handle = gchandleNew(vm.mono_funcs, @ptrCast(managed_str));
-    errdefer gchandleFree(vm.mono_funcs, handle);
+    const handle = gchandleNew(vm.dotnet_funcs, @ptrCast(managed_str));
+    errdefer gchandleFree(vm.dotnet_funcs, handle);
     (try vm.push(Type)).* = .managed_string;
-    (try vm.push(mono.GcHandleV2)).* = handle;
+    (try vm.push(dotnet.GcHandleV2)).* = handle;
 }
 
 fn log(
@@ -1894,11 +1894,11 @@ fn log(
                 .integer => |i| try writer.print("{d}", .{i}),
                 .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
                 .managed_string => |gc_handle| {
-                    const str_obj = gchandleTarget(vm.mono_funcs, gc_handle);
-                    const str: *const mono.String = @ptrCast(str_obj);
-                    const len = vm.mono_funcs.string_length(str);
+                    const str_obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
+                    const str: *const dotnet.String = @ptrCast(str_obj);
+                    const len = vm.dotnet_funcs.string_length(str);
                     if (len > 0) {
-                        const ptr = vm.mono_funcs.string_chars(str);
+                        const ptr = vm.dotnet_funcs.string_chars(str);
                         try writer.print("{f}", .{std.unicode.fmtUtf16Le(ptr[0..@intCast(len)])});
                     }
                 },
@@ -1909,7 +1909,7 @@ fn log(
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
                 .null_object => try writer.print("<null-object>", .{}),
-                .object => |gc_handle| try writeObject(vm.mono_funcs, writer, gc_handle),
+                .object => |gc_handle| try writeObject(vm.dotnet_funcs, writer, gc_handle),
                 .object_method => |method| {
                     const method_token = lex(vm.text, method.id_start);
                     std.debug.assert(method_token.tag == .identifier);
@@ -1923,55 +1923,55 @@ fn log(
 }
 
 fn writeObject(
-    mono_funcs: *const mono.Funcs,
+    dotnet_funcs: *const dotnet.Funcs,
     writer: *std.Io.Writer,
-    gc_handle: mono.GcHandleV2,
+    gc_handle: dotnet.GcHandleV2,
 ) error{WriteFailed}!void {
-    const obj = gchandleTarget(mono_funcs, gc_handle);
-    const class = mono_funcs.object_get_class(obj);
-    const class_name = mono_funcs.class_get_name(class);
+    const obj = gchandleTarget(dotnet_funcs, gc_handle);
+    const class = dotnet_funcs.object_get_class(obj);
+    const class_name = dotnet_funcs.class_get_name(class);
     try writer.print("{s}{{ ", .{class_name});
     var iterator: ?*anyopaque = null;
     var first = true;
-    while (mono_funcs.class_get_fields(class, &iterator)) |field| {
-        const flags = mono_funcs.field_get_flags(field);
+    while (dotnet_funcs.class_get_fields(class, &iterator)) |field| {
+        const flags = dotnet_funcs.field_get_flags(field);
         // Skip static fields - only show instance fields
         if (flags.static) continue;
 
         if (!first) try writer.writeAll(", ");
         first = false;
-        const field_name = mono_funcs.field_get_name(field);
-        const field_type = mono_funcs.field_get_type(field);
-        const type_kind = mono_funcs.type_get_type(field_type);
+        const field_name = dotnet_funcs.field_get_name(field);
+        const field_type = dotnet_funcs.field_get_type(field);
+        const type_kind = dotnet_funcs.type_get_type(field_type);
         try writer.print("{s}=", .{field_name});
         switch (type_kind) {
             .boolean => {
                 var value: c_int = undefined;
-                mono_funcs.field_get_value(obj, field, &value);
+                dotnet_funcs.field_get_value(obj, field, &value);
                 try writer.print("{}", .{value != 0});
             },
             .i4 => {
                 var value: i32 = undefined;
-                mono_funcs.field_get_value(obj, field, &value);
+                dotnet_funcs.field_get_value(obj, field, &value);
                 try writer.print("{d}", .{value});
             },
             .i8 => {
                 var value: i64 = undefined;
-                mono_funcs.field_get_value(obj, field, &value);
+                dotnet_funcs.field_get_value(obj, field, &value);
                 try writer.print("{d}", .{value});
             },
             .u8 => {
                 var value: u64 = undefined;
-                mono_funcs.field_get_value(obj, field, &value);
+                dotnet_funcs.field_get_value(obj, field, &value);
                 try writer.print("{d}", .{value});
             },
             .string => {
-                var value: ?*mono.Object = null;
-                mono_funcs.field_get_value(obj, field, @ptrCast(&value));
+                var value: ?*dotnet.Object = null;
+                dotnet_funcs.field_get_value(obj, field, @ptrCast(&value));
                 if (value) |str_obj| {
-                    const c_str = mono_funcs.string_to_utf8(@ptrCast(str_obj));
+                    const c_str = dotnet_funcs.string_to_utf8(@ptrCast(str_obj));
                     if (c_str) |s| {
-                        defer mono_funcs.free(@ptrCast(@constCast(s)));
+                        defer dotnet_funcs.free(@ptrCast(@constCast(s)));
                         try writer.print("\"{s}\"", .{std.mem.span(s)});
                     } else {
                         try writer.writeAll("null");
@@ -2076,7 +2076,7 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
         //     return .{ .{ .c_string = ptr }, end };
         // },
         .managed_string => {
-            const handle, const end = vm.readValue(mono.GcHandleV2, addr);
+            const handle, const end = vm.readValue(dotnet.GcHandleV2, addr);
             return .{ .{ .managed_string = handle }, end };
         },
         .script_function => {
@@ -2093,11 +2093,11 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             return .{ .{ .null_assembly = token.extent() }, end };
         },
         .assembly => {
-            const assembly, const end = vm.readValue(*const mono.Assembly, addr);
+            const assembly, const end = vm.readValue(*const dotnet.Assembly, addr);
             return .{ .{ .assembly = assembly }, end };
         },
         .assembly_field => {
-            const assembly, const id_start_addr = vm.readValue(*const mono.Assembly, addr);
+            const assembly, const id_start_addr = vm.readValue(*const dotnet.Assembly, addr);
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .assembly_field = .{
                 .assembly = assembly,
@@ -2105,24 +2105,24 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             } }, end };
         },
         .class => {
-            const class, const end = vm.readValue(*const mono.Class, addr);
+            const class, const end = vm.readValue(*const dotnet.Class, addr);
             return .{ .{ .class = class }, end };
         },
         .class_method => {
-            const class, const id_start_addr = vm.readValue(*const mono.Class, addr);
+            const class, const id_start_addr = vm.readValue(*const dotnet.Class, addr);
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .class_method = .{ .class = class, .id_start = id_start } }, end };
         },
         .null_object => {
-            const class, const end = vm.readValue(*const mono.Class, addr);
+            const class, const end = vm.readValue(*const dotnet.Class, addr);
             return .{ .{ .null_object = class }, end };
         },
         .object => {
-            const handle, const end = vm.readValue(mono.GcHandleV2, addr);
+            const handle, const end = vm.readValue(dotnet.GcHandleV2, addr);
             return .{ .{ .object = handle }, end };
         },
         .object_method => {
-            const handle, const id_start_addr = vm.readValue(mono.GcHandleV2, addr);
+            const handle, const id_start_addr = vm.readValue(dotnet.GcHandleV2, addr);
             const id_start, const end = vm.readValue(usize, id_start_addr);
             return .{ .{ .object_method = .{
                 .gc_handle = handle,
@@ -2155,30 +2155,30 @@ const Value = union(enum) {
     integer: i64,
     string_literal: Extent,
     // c_string: [*:0]const u8,
-    managed_string: mono.GcHandleV2,
+    managed_string: dotnet.GcHandleV2,
     script_function: usize,
     null_assembly: Extent,
-    assembly: *const mono.Assembly,
+    assembly: *const dotnet.Assembly,
     assembly_field: struct {
-        assembly: *const mono.Assembly,
+        assembly: *const dotnet.Assembly,
         id_start: usize,
     },
-    class: *const mono.Class,
+    class: *const dotnet.Class,
     class_method: struct {
-        class: *const mono.Class,
+        class: *const dotnet.Class,
         id_start: usize,
     },
-    null_object: *const mono.Class,
-    object: mono.GcHandleV2,
+    null_object: *const dotnet.Class,
+    object: dotnet.GcHandleV2,
     object_method: struct {
-        gc_handle: mono.GcHandleV2,
+        gc_handle: dotnet.GcHandleV2,
         id_start: usize,
     },
-    pub fn discard(value: *Value, mono_funcs: *const mono.Funcs) void {
+    pub fn discard(value: *Value, dotnet_funcs: *const dotnet.Funcs) void {
         switch (value.*) {
             .integer => {},
             .string_literal => {},
-            .managed_string => |handle| gchandleFree(mono_funcs, handle),
+            .managed_string => |handle| gchandleFree(dotnet_funcs, handle),
             .script_function => {},
             .null_assembly => {},
             .assembly => {},
@@ -2186,8 +2186,8 @@ const Value = union(enum) {
             .class => {},
             .class_method => {},
             .null_object => {},
-            .object => |handle| gchandleFree(mono_funcs, handle),
-            .object_method => |method| gchandleFree(mono_funcs, method.gc_handle),
+            .object => |handle| gchandleFree(dotnet_funcs, handle),
+            .object_method => |method| gchandleFree(dotnet_funcs, method.gc_handle),
         }
         value.* = undefined;
     }
@@ -2209,7 +2209,7 @@ const Value = union(enum) {
         };
     }
 
-    pub fn getMarshalConst(value: *const Value, kind: mono.TypeKind) union(enum) {
+    pub fn getMarshalConst(value: *const Value, kind: dotnet.TypeKind) union(enum) {
         not_implemented: [:0]const u8,
         overflow: struct {
             value: i64,
@@ -2627,17 +2627,17 @@ const FindAssembly = struct {
     vm: *Vm,
     index: usize,
     needle: []const u8,
-    match: ?*const mono.Assembly,
+    match: ?*const dotnet.Assembly,
 };
 fn findAssembly(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *const mono.Assembly = @ptrCast(assembly_opaque);
+    const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
     const ctx: *FindAssembly = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
-    const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
+    const name = ctx.vm.dotnet_funcs.assembly_get_name(assembly) orelse {
         std.log.err("  assembly[{}] get name failed", .{ctx.index});
         return;
     };
-    const str = ctx.vm.mono_funcs.assembly_name_get_name(name) orelse {
+    const str = ctx.vm.dotnet_funcs.assembly_name_get_name(name) orelse {
         std.log.err(
             "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
             .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
@@ -2656,14 +2656,14 @@ const LogAssemblies = struct {
     index: usize,
 };
 fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *const mono.Assembly = @ptrCast(assembly_opaque);
+    const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
     const ctx: *LogAssemblies = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
-    const name = ctx.vm.mono_funcs.assembly_get_name(assembly) orelse {
+    const name = ctx.vm.dotnet_funcs.assembly_get_name(assembly) orelse {
         std.log.err("  assembly[{}] get name failed", .{ctx.index});
         return;
     };
-    const str = ctx.vm.mono_funcs.assembly_name_get_name(name) orelse {
+    const str = ctx.vm.dotnet_funcs.assembly_name_get_name(name) orelse {
         std.log.err(
             "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
             .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
@@ -2673,8 +2673,8 @@ fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.
     std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
-fn gchandleNew(mono_funcs: *const mono.Funcs, object: *const mono.Object) mono.GcHandleV2 {
-    const handle = mono_funcs.gchandle_new_v2(object, 0);
+fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) dotnet.GcHandleV2 {
+    const handle = dotnet_funcs.gchandle_new_v2(object, 0);
     gchandlelog.info("new  {*} {}", .{ object, handle });
     if (handle == .null) {
         std.log.err("NULL HANDLE?!? from ptr {*}", .{object});
@@ -2683,7 +2683,7 @@ fn gchandleNew(mono_funcs: *const mono.Funcs, object: *const mono.Object) mono.G
 
     const sanity_check = true;
     if (sanity_check) {
-        const target: ?*const mono.Object = mono_funcs.gchandle_get_target_v2(handle);
+        const target: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
         std.debug.assert(target != null);
         // if (target == object) {
         //     std.log.info("  --> target object still matches", .{});
@@ -2693,18 +2693,18 @@ fn gchandleNew(mono_funcs: *const mono.Funcs, object: *const mono.Object) mono.G
     }
     return handle;
 }
-fn gchandleFree(mono_funcs: *const mono.Funcs, handle: mono.GcHandleV2) void {
+fn gchandleFree(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) void {
     gchandlelog.info("free {}", .{handle});
     std.debug.assert(handle != .null);
     {
-        const target: ?*const mono.Object = mono_funcs.gchandle_get_target_v2(handle);
+        const target: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
         std.debug.assert(target != null);
         // gchandlelog.info("    --> free target is {*}", .{target.?});
     }
-    mono_funcs.gchandle_free_v2(handle);
+    dotnet_funcs.gchandle_free_v2(handle);
 }
-fn gchandleTarget(mono_funcs: *const mono.Funcs, handle: mono.GcHandleV2) *const mono.Object {
-    const obj: ?*const mono.Object = mono_funcs.gchandle_get_target_v2(handle);
+fn gchandleTarget(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) *const dotnet.Object {
+    const obj: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
     std.debug.assert(obj != null);
     gchandlelog.info("get_target {} > {*}", .{ handle, obj.? });
     return obj.?;
@@ -3280,15 +3280,15 @@ pub const Error = union(enum) {
     assembly_not_found: Extent,
     id_too_big: Extent,
     missing_class: struct {
-        assembly: *const mono.Assembly,
+        assembly: *const dotnet.Assembly,
         id_start: usize,
     },
     missing_field: struct {
-        class: *const mono.Class,
+        class: *const dotnet.Class,
         id_extent: Extent,
     },
     missing_method: struct {
-        class: *const mono.Class,
+        class: *const dotnet.Class,
         id_extent: Extent,
         arg_count: u16,
     },
@@ -3307,12 +3307,12 @@ pub const Error = union(enum) {
         field_extent: Extent,
         kind: union(enum) {
             assembly: usize,
-            class: *const mono.Class,
+            class: *const dotnet.Class,
         },
     },
     new_failed: struct {
         pos: usize,
-        class: *const mono.Class,
+        class: *const dotnet.Class,
     },
     cant_marshal: struct {
         pos: usize,
@@ -3633,23 +3633,23 @@ const ErrorFmt = struct {
 // temporary while we still support testing via monomock, might remove it
 pub var is_monomock: bool = false;
 
-pub fn runTests(mono_funcs: *const mono.Funcs) !void {
-    try badCodeTests(mono_funcs);
-    try goodCodeTests(mono_funcs);
+pub fn runTests(dotnet_funcs: *const dotnet.Funcs) !void {
+    try badCodeTests(dotnet_funcs);
+    try goodCodeTests(dotnet_funcs);
 }
 
-fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: []const u8) !void {
+fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
-    test_domain.init(mono_funcs);
+    test_domain.init(dotnet_funcs);
     defer test_domain.deinit();
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
-        .mono_funcs = mono_funcs,
+        .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
@@ -3680,121 +3680,121 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
     }
 }
 
-fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
-    try testBadCode(mono_funcs, "var example_id = @Nothing()", "1: identifier 'example_id' was defined to nothing");
-    try testBadCode(mono_funcs, "@Nothing", "1: syntax error: expected a '(' to start the builtin args but got EOF");
-    try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
-    try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
-    try testBadCode(mono_funcs, "fn foo", "1: syntax error: expected an open paren '(' to start function args but got EOF");
-    try testBadCode(mono_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' to start function args but got a string literal \"hello\"");
-    try testBadCode(mono_funcs, "fn foo )", "1: syntax error: expected an open paren '(' to start function args but got a close paren ')'");
-    try testBadCode(mono_funcs, "foo()", "1: undefined identifier 'foo'");
-    try testBadCode(mono_funcs, "var foo = \"hello\" foo()", "1: can't call a string literal");
-    try testBadCode(mono_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
-    try testBadCode(mono_funcs, "var mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
-    try testBadCode(mono_funcs, "fn foo(){}foo.\"wat\"", "1: syntax error: expected an identifier after '.' but got a string literal \"wat\"");
-    try testBadCode(mono_funcs, "@Nothing().foo", "1: void has no fields");
-    try testBadCode(mono_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
-    try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")()", "1: can't call an assembly");
+fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
+    try testBadCode(dotnet_funcs, "var example_id = @Nothing()", "1: identifier 'example_id' was defined to nothing");
+    try testBadCode(dotnet_funcs, "@Nothing", "1: syntax error: expected a '(' to start the builtin args but got EOF");
+    try testBadCode(dotnet_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
+    try testBadCode(dotnet_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
+    try testBadCode(dotnet_funcs, "fn foo", "1: syntax error: expected an open paren '(' to start function args but got EOF");
+    try testBadCode(dotnet_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' to start function args but got a string literal \"hello\"");
+    try testBadCode(dotnet_funcs, "fn foo )", "1: syntax error: expected an open paren '(' to start function args but got a close paren ')'");
+    try testBadCode(dotnet_funcs, "foo()", "1: undefined identifier 'foo'");
+    try testBadCode(dotnet_funcs, "var foo = \"hello\" foo()", "1: can't call a string literal");
+    try testBadCode(dotnet_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
+    try testBadCode(dotnet_funcs, "var mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
+    try testBadCode(dotnet_funcs, "fn foo(){}foo.\"wat\"", "1: syntax error: expected an identifier after '.' but got a string literal \"wat\"");
+    try testBadCode(dotnet_funcs, "@Nothing().foo", "1: void has no fields");
+    try testBadCode(dotnet_funcs, "fn foo(){}foo.wat", "1: a function has no field 'wat'");
+    try testBadCode(dotnet_funcs, "@Assembly(\"mscorlib\")()", "1: can't call an assembly");
     try testBadCode(
-        mono_funcs,
+        dotnet_funcs,
         "@Class(@Assembly(\"mscorlib\")." ++ ("a" ** (ManagedId.max + 1)) ++ ")",
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
-    try testBadCode(mono_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named 'Exist' in namespace 'DoesNot'");
-    try testBadCode(mono_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
-    // try testBadCode(mono_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
+    try testBadCode(dotnet_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named 'Exist' in namespace 'DoesNot'");
+    try testBadCode(dotnet_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
+    // try testBadCode(dotnet_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
-    // try testBadCode(mono_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
+    // try testBadCode(dotnet_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    try testBadCode(mono_funcs, "0n", "1: invalid integer literal '0n'");
+    try testBadCode(dotnet_funcs, "0n", "1: invalid integer literal '0n'");
 
-    try testBadCode(mono_funcs, "fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
-    try testBadCode(mono_funcs, "fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
-    try testBadCode(mono_funcs, "fn a(\"hey\"){}", "1: syntax error: expected an identifier or close paren ')' but got a string literal \"hey\"");
+    try testBadCode(dotnet_funcs, "fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
+    try testBadCode(dotnet_funcs, "fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
+    try testBadCode(dotnet_funcs, "fn a(\"hey\"){}", "1: syntax error: expected an identifier or close paren ')' but got a string literal \"hey\"");
 
-    try testBadCode(mono_funcs, "fn a(){} a(0)", "1: expected 0 args but got 1");
-    try testBadCode(mono_funcs, "fn a(x){} a()", "1: expected 1 args but got 0");
-    try testBadCode(mono_funcs, "@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs, "fn a(){} a(0)", "1: expected 0 args but got 1");
+    try testBadCode(dotnet_funcs, "fn a(x){} a()", "1: expected 1 args but got 0");
+    try testBadCode(dotnet_funcs, "@Assembly(\"mscorlib\").foo()", "1: can't call fields on an assembly directly, call @Class first");
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\fn foo() {}
         \\Console.Write(foo);
     , "4: can't marshal a function to a managed method");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\Console.ThisMethodShouldNotExist();
     , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
-    try testBadCode(mono_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
-    try testBadCode(mono_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
-    try testBadCode(mono_funcs, "(", "1: syntax error: expected an expression after '(' but got EOF");
-    try testBadCode(mono_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
-    try testBadCode(mono_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
-    try testBadCode(mono_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
-    try testBadCode(mono_funcs, "0+\"hello\"", "1: binary operation '+' expects integers but got a string literal");
-    try testBadCode(mono_funcs, "\"hello\"+0", "1: binary operation '+' expects integers but got a string literal");
-    try testBadCode(mono_funcs, "0/0", "1: divide by 0");
-    try testBadCode(mono_funcs, "1/0", "1: divide by 0");
-    try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
-    try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
-    try testBadCode(mono_funcs, "foo=0", "1: undefined identifier 'foo'");
-    try testBadCode(mono_funcs, "set 0 0", "1: syntax error: expected an identifier to set but got a number literal 0");
+    try testBadCode(dotnet_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
+    try testBadCode(dotnet_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
+    try testBadCode(dotnet_funcs, "(", "1: syntax error: expected an expression after '(' but got EOF");
+    try testBadCode(dotnet_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
+    try testBadCode(dotnet_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
+    try testBadCode(dotnet_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
+    try testBadCode(dotnet_funcs, "0+\"hello\"", "1: binary operation '+' expects integers but got a string literal");
+    try testBadCode(dotnet_funcs, "\"hello\"+0", "1: binary operation '+' expects integers but got a string literal");
+    try testBadCode(dotnet_funcs, "0/0", "1: divide by 0");
+    try testBadCode(dotnet_funcs, "1/0", "1: divide by 0");
+    try testCode(dotnet_funcs, "@Log(9_223_372_036_854_775_807+0)");
+    try testBadCode(dotnet_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
+    try testBadCode(dotnet_funcs, "foo=0", "1: undefined identifier 'foo'");
+    try testBadCode(dotnet_funcs, "set 0 0", "1: syntax error: expected an identifier to set but got a number literal 0");
     // TODO: Reference should *maybe* support function calls which would make this not a syntax error
-    try testBadCode(mono_funcs, "set @Nothing() 0", "1: syntax error: expected an identifier to set but got the builtin function '@Nothing'");
-    try testBadCode(mono_funcs, "set a = 0", "1: undefined identifier 'a'");
-    try testBadCode(mono_funcs, "var a = 0 set a", "1: syntax error: expected '=' to delimit set destination/source but got EOF");
-    try testBadCode(mono_funcs, "var a = 0 set a 0", "1: syntax error: expected '=' to delimit set destination/source but got a number literal 0");
-    try testBadCode(mono_funcs, "var a = 0 set a =", "1: syntax error: expected an expresson to follow '=' but got EOF");
-    try testBadCode(mono_funcs, "var a = 0 set a = @Nothing()", "1: cannot set nothing");
-    try testBadCode(mono_funcs, "var a = 0 set a = \"hello\"", "1: cannot assign a string literal to identifier 'a' which is an integer");
-    try testBadCode(mono_funcs, "var a = 0 a = 0", "1: syntax error: '=' after expresion, might be missing 'var' or 'set'");
-    try testBadCode(mono_funcs, "fn foo(){}set foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
-    try testBadCode(mono_funcs, "var foo = \"hello\" set foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
-    try testBadCode(mono_funcs, "var a = 0 set a.", "1: syntax error: expected an identifier after '.' but got EOF");
-    try testBadCode(mono_funcs, "var a = 0 set a. = 0", "1: syntax error: expected an identifier after '.' but got an equal '=' character");
+    try testBadCode(dotnet_funcs, "set @Nothing() 0", "1: syntax error: expected an identifier to set but got the builtin function '@Nothing'");
+    try testBadCode(dotnet_funcs, "set a = 0", "1: undefined identifier 'a'");
+    try testBadCode(dotnet_funcs, "var a = 0 set a", "1: syntax error: expected '=' to delimit set destination/source but got EOF");
+    try testBadCode(dotnet_funcs, "var a = 0 set a 0", "1: syntax error: expected '=' to delimit set destination/source but got a number literal 0");
+    try testBadCode(dotnet_funcs, "var a = 0 set a =", "1: syntax error: expected an expresson to follow '=' but got EOF");
+    try testBadCode(dotnet_funcs, "var a = 0 set a = @Nothing()", "1: cannot set nothing");
+    try testBadCode(dotnet_funcs, "var a = 0 set a = \"hello\"", "1: cannot assign a string literal to identifier 'a' which is an integer");
+    try testBadCode(dotnet_funcs, "var a = 0 a = 0", "1: syntax error: '=' after expresion, might be missing 'var' or 'set'");
+    try testBadCode(dotnet_funcs, "fn foo(){}set foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
+    try testBadCode(dotnet_funcs, "var foo = \"hello\" set foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
+    try testBadCode(dotnet_funcs, "var a = 0 set a.", "1: syntax error: expected an identifier after '.' but got EOF");
+    try testBadCode(dotnet_funcs, "var a = 0 set a. = 0", "1: syntax error: expected an identifier after '.' but got an equal '=' character");
 
-    try testBadCode(mono_funcs, "if", "1: syntax error: expected a '(' to start the if conditional but got EOF");
-    try testBadCode(mono_funcs, "if()", "1: syntax error: expected an expression inside the if conditional but got a close paren ')'");
-    try testBadCode(mono_funcs, "if(0", "1: syntax error: expected a ')' to finish the if conditional but got EOF");
-    try testBadCode(mono_funcs, "if(@Nothing())", "1: if conditional expression resulted in nothing");
-    try testBadCode(mono_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
-    try testBadCode(mono_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
-    try testBadCode(mono_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
-    try testBadCode(mono_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
-    try testBadCode(mono_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
-    try testBadCode(mono_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
-    try testBadCode(mono_funcs, "loop loop", "1: cannot loop inside loop (end with break or continue at the same depth as the original loop)");
-    try testBadCode(mono_funcs, "break", "1: break must correspond to a loop");
-    try testBadCode(mono_funcs, "continue", "1: continue must correspond to a loop");
-    try testBadCode(mono_funcs, "loop break break", "1: break must correspond to a loop");
-    try testBadCode(mono_funcs, "loop break continue", "1: continue must correspond to a loop");
-    try testBadCode(mono_funcs, "if (1) { break }", "1: break must correspond to a loop");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs, "if", "1: syntax error: expected a '(' to start the if conditional but got EOF");
+    try testBadCode(dotnet_funcs, "if()", "1: syntax error: expected an expression inside the if conditional but got a close paren ')'");
+    try testBadCode(dotnet_funcs, "if(0", "1: syntax error: expected a ')' to finish the if conditional but got EOF");
+    try testBadCode(dotnet_funcs, "if(@Nothing())", "1: if conditional expression resulted in nothing");
+    try testBadCode(dotnet_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
+    try testBadCode(dotnet_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
+    try testBadCode(dotnet_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
+    try testBadCode(dotnet_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
+    try testBadCode(dotnet_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
+    try testBadCode(dotnet_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
+    try testBadCode(dotnet_funcs, "loop loop", "1: cannot loop inside loop (end with break or continue at the same depth as the original loop)");
+    try testBadCode(dotnet_funcs, "break", "1: break must correspond to a loop");
+    try testBadCode(dotnet_funcs, "continue", "1: continue must correspond to a loop");
+    try testBadCode(dotnet_funcs, "loop break break", "1: break must correspond to a loop");
+    try testBadCode(dotnet_funcs, "loop break continue", "1: continue must correspond to a loop");
+    try testBadCode(dotnet_funcs, "if (1) { break }", "1: break must correspond to a loop");
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\@Log(Decimal.hi)
     , "3: cannot access non-static field 'hi' on class, need an object");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().DaysPerYear
     , "3: cannot access static field 'DaysPerYear' on an object, need a class");
-    if (false) try testBadCode(mono_funcs,
+    if (false) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().this_field_wont_exist
     , "3: missing field 'this_field_wont_exist'");
-    try testBadCode(mono_funcs, "@Assert(0 == 1 - 2)", "1: assert");
-    try testBadCode(mono_funcs, "@IsNull()", "1: expected 1 args but got 0");
-    try testBadCode(mono_funcs, "@NotNull()", "1: expected 1 args but got 0");
-    try testBadCode(mono_funcs, "@NotNull(0, 0)", "1: expected 1 args but got 2");
-    try testBadCode(mono_funcs, "@IsNull(0, 0)", "1: expected 1 args but got 2");
-    try testBadCode(mono_funcs, "@IsNull(0)", "1: expected argument 0 to be an object but got an integer");
-    try testBadCode(mono_funcs, "@NotNull(0)", "1: expected argument 0 to be an object but got an integer");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs, "@Assert(0 == 1 - 2)", "1: assert");
+    try testBadCode(dotnet_funcs, "@IsNull()", "1: expected 1 args but got 0");
+    try testBadCode(dotnet_funcs, "@NotNull()", "1: expected 1 args but got 0");
+    try testBadCode(dotnet_funcs, "@NotNull(0, 0)", "1: expected 1 args but got 2");
+    try testBadCode(dotnet_funcs, "@IsNull(0, 0)", "1: expected 1 args but got 2");
+    try testBadCode(dotnet_funcs, "@IsNull(0)", "1: expected argument 0 to be an object but got an integer");
+    try testBadCode(dotnet_funcs, "@NotNull(0)", "1: expected argument 0 to be an object but got an integer");
+    try testBadCode(dotnet_funcs,
         \\var mocktest = @TryAssembly("mocktest")
         \\if (@NotNull(mocktest)) {
         \\    var null_obj = @Class(mocktest.MockTest).static_field_null
@@ -3804,28 +3804,28 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\}
         \\@Discard(null_obj.foo)
     , "8: field 'foo' accessed on NULL object");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs,
         \\@TryAssembly("does not exist").foo
     , "1: field 'foo' accessed on NULL object");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
         \\set now.does_not_exist = 0
     , "4: missing field 'does_not_exist'");
-    try testBadCode(mono_funcs,
+    try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var String = @Class(mscorlib.System.String)
         \\var s = String.Empty
         \\set s.Empty = 0
     , "4: cannot access static field 'Empty' on an object, need a class");
-    if (!is_monomock) try testBadCode(mono_funcs,
+    if (!is_monomock) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
         \\set decimal.hi = 2147483648
     , "4: integer overflow, value 2147483648 to 32-bit signed integer");
-    if (!is_monomock) try testBadCode(mono_funcs,
+    if (!is_monomock) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
@@ -3834,36 +3834,36 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
 }
 
 const TestDomain = struct {
-    thread: *const mono.Thread,
-    pub fn init(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
-        const root_domain = mono_funcs.get_root_domain() orelse @panic(
+    thread: *const dotnet.Thread,
+    pub fn init(self: *TestDomain, dotnet_funcs: *const dotnet.Funcs) void {
+        const root_domain = dotnet_funcs.get_root_domain() orelse @panic(
             "mono_get_root_domain returned null",
         );
-        self.thread = mono_funcs.thread_attach(root_domain) orelse @panic(
+        self.thread = dotnet_funcs.thread_attach(root_domain) orelse @panic(
             "mono_thread_attach failed",
         );
 
         // domain_get is how the Vm accesses the domain, make sure it's
         // what we expect after attaching our thread to it
-        std.debug.assert(mono_funcs.domain_get() == root_domain);
+        std.debug.assert(dotnet_funcs.domain_get() == root_domain);
     }
     pub fn deinit(self: *TestDomain) void {
         self.* = undefined;
     }
 };
 
-fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
+fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
-    test_domain.init(mono_funcs);
+    test_domain.init(dotnet_funcs);
     defer test_domain.deinit();
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var vm: Vm = .{
-        .mono_funcs = mono_funcs,
+        .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
     };
@@ -3887,36 +3887,36 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
     vm.deinit();
 }
 
-fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
-    try testCode(mono_funcs, "fn foo(){}");
-    try testCode(mono_funcs, "@LogAssemblies()");
-    try testCode(mono_funcs, "fn foo(){ @LogAssemblies() }");
-    try testCode(mono_funcs, "fn foo(){ @LogAssemblies() }foo()foo()");
-    try testCode(mono_funcs, "@Discard(0)");
-    try testCode(mono_funcs, "@Discard(\"Hello\")");
-    try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\"))");
-    try testCode(mono_funcs, "@Discard(@Assembly(\"mscorlib\").System)");
-    try testCode(mono_funcs,
+fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
+    try testCode(dotnet_funcs, "fn foo(){}");
+    try testCode(dotnet_funcs, "@LogAssemblies()");
+    try testCode(dotnet_funcs, "fn foo(){ @LogAssemblies() }");
+    try testCode(dotnet_funcs, "fn foo(){ @LogAssemblies() }foo()foo()");
+    try testCode(dotnet_funcs, "@Discard(0)");
+    try testCode(dotnet_funcs, "@Discard(\"Hello\")");
+    try testCode(dotnet_funcs, "@Discard(@Assembly(\"mscorlib\"))");
+    try testCode(dotnet_funcs, "@Discard(@Assembly(\"mscorlib\").System)");
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\@Discard(@Class(mscorlib.System.Object))
     );
-    try testCode(mono_funcs, "var ms = @Assembly(\"mscorlib\")");
-    try testCode(mono_funcs, "var foo_string = \"foo\"");
-    try testCode(mono_funcs, "fn foo(){}@Discard(foo)");
-    try testCode(mono_funcs, "fn foo(){}foo()");
-    try testCode(mono_funcs, "fn foo(x) { }");
-    try testCode(mono_funcs, "var a = 0 set a = 1 @Log(\"a is now \", a)");
-    try testCode(mono_funcs, "var a = 0 set a = 1234 @Log(\"a is now \", a)");
-    if (false) try testCode(mono_funcs,
+    try testCode(dotnet_funcs, "var ms = @Assembly(\"mscorlib\")");
+    try testCode(dotnet_funcs, "var foo_string = \"foo\"");
+    try testCode(dotnet_funcs, "fn foo(){}@Discard(foo)");
+    try testCode(dotnet_funcs, "fn foo(){}foo()");
+    try testCode(dotnet_funcs, "fn foo(x) { }");
+    try testCode(dotnet_funcs, "var a = 0 set a = 1 @Log(\"a is now \", a)");
+    try testCode(dotnet_funcs, "var a = 0 set a = 1234 @Log(\"a is now \", a)");
+    if (false) try testCode(dotnet_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n
         \\  return fib(n - 1) + fib(n - 1)
         \\}
         \\fib(10)
     );
-    try testCode(mono_funcs, "@Log(0)");
-    try testCode(mono_funcs, "@Log(\"Hello @Log!\")");
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs, "@Log(0)");
+    try testCode(dotnet_funcs, "@Log(\"Hello @Log!\")");
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Environment = @Class(mscorlib.System.Environment)
         \\@Log(Environment.get_TickCount())
@@ -3928,7 +3928,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\@Log(Environment)
         \\@Log(Environment.Foo)
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Object = @Class(mscorlib.System.Object)
         \\//mscorlib.System.Console.WriteLine()
@@ -3936,7 +3936,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\//example_obj = new Object()
         \\
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
@@ -3949,33 +3949,33 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\//sys = @Assembly("System")
         \\//Stopwatch = @Class(sys.System.Diagnostics.Stopwatch)
     );
-    try testCode(mono_funcs, "@Log((0))");
-    try testCode(mono_funcs, "@Log(((0)))");
-    try testCode(mono_funcs, "@Log(3+4)");
-    try testCode(mono_funcs, "@Log(3/4)");
-    try testCode(mono_funcs, "@Log(15/(1+4))");
-    try testCode(mono_funcs, "@Log(0 == 0)");
-    try testCode(mono_funcs, "@Log(0 != 0)");
-    try testCode(mono_funcs, "@Log(0 < 0)");
-    try testCode(mono_funcs, "@Log(0 > 0)");
-    try testCode(mono_funcs, "@Log(0 <= 0)");
-    try testCode(mono_funcs, "@Log(0 >= 0)");
-    try testCode(mono_funcs, "@Log(0 == 0+1)");
-    try testCode(mono_funcs, "@Log(0+1 == 0+1)");
-    try testCode(mono_funcs, "if(0){}");
-    try testCode(mono_funcs, "if(1){}");
-    try testCode(mono_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
-    try testCode(mono_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
-    try testCode(mono_funcs, "yield 0");
-    try testCode(mono_funcs, "loop");
-    try testCode(mono_funcs, "loop break");
-    try testCode(mono_funcs, "loop break loop");
-    try testCode(mono_funcs, "loop if (1) { break }");
-    try testCode(mono_funcs, "loop if (1) { break } break");
-    try testCode(mono_funcs, "loop if (1) { break } continue");
+    try testCode(dotnet_funcs, "@Log((0))");
+    try testCode(dotnet_funcs, "@Log(((0)))");
+    try testCode(dotnet_funcs, "@Log(3+4)");
+    try testCode(dotnet_funcs, "@Log(3/4)");
+    try testCode(dotnet_funcs, "@Log(15/(1+4))");
+    try testCode(dotnet_funcs, "@Log(0 == 0)");
+    try testCode(dotnet_funcs, "@Log(0 != 0)");
+    try testCode(dotnet_funcs, "@Log(0 < 0)");
+    try testCode(dotnet_funcs, "@Log(0 > 0)");
+    try testCode(dotnet_funcs, "@Log(0 <= 0)");
+    try testCode(dotnet_funcs, "@Log(0 >= 0)");
+    try testCode(dotnet_funcs, "@Log(0 == 0+1)");
+    try testCode(dotnet_funcs, "@Log(0+1 == 0+1)");
+    try testCode(dotnet_funcs, "if(0){}");
+    try testCode(dotnet_funcs, "if(1){}");
+    try testCode(dotnet_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
+    try testCode(dotnet_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
+    try testCode(dotnet_funcs, "yield 0");
+    try testCode(dotnet_funcs, "loop");
+    try testCode(dotnet_funcs, "loop break");
+    try testCode(dotnet_funcs, "loop break loop");
+    try testCode(dotnet_funcs, "loop if (1) { break }");
+    try testCode(dotnet_funcs, "loop if (1) { break } break");
+    try testCode(dotnet_funcs, "loop if (1) { break } continue");
     // TODO! make this work
-    //try testCode(mono_funcs, "loop if (1) { break } continue");
-    try testCode(mono_funcs,
+    //try testCode(dotnet_funcs, "loop if (1) { break } continue");
+    try testCode(dotnet_funcs,
         \\var counter = 0
         \\loop
         \\  @Log("default continue loop: ", counter)
@@ -3984,7 +3984,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  if (counter == 5) { break }
         \\continue
     );
-    if (false) try testCode(mono_funcs,
+    if (false) try testCode(dotnet_funcs,
         \\var counter = 0
         \\loop
         \\  @Log("default break loop: ", counter)
@@ -3993,17 +3993,17 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  if (counter < 5) { continue }
         \\break
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@Assert(2147483647 == Int32.MaxValue)
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
     );
-    if (!is_monomock) try testCode(mono_funcs,
+    if (!is_monomock) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
@@ -4013,7 +4013,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\//@Log("now._dateData=", now._dateData)
         \\@Log(now.ToString())
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var counter = 0
         \\loop
         \\  @Log("first loop, counter=", counter)
@@ -4029,14 +4029,14 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\  if (counter == 7) { break }
         \\continue
     );
-    if (false) try testCode(mono_funcs, "@ToString(1234)");
-    try testCode(mono_funcs, "@Assert(0 == 1 - 1)");
-    try testCode(mono_funcs,
+    if (false) try testCode(dotnet_funcs, "@ToString(1234)");
+    try testCode(dotnet_funcs, "@Assert(0 == 1 - 1)");
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var String = @Class(mscorlib.System.String)
         \\@Assert(@NotNull(String.Empty))
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\@Assert(@IsNull(@TryAssembly("doesnotexist")))
         \\var mocktest = @TryAssembly("mocktest")
         \\if (@IsNull(mocktest)) { @Exit() }
@@ -4049,18 +4049,18 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\@Assert(@IsNull(foo))
         \\@Assert(0 == @NotNull(foo))
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\if (1) { var null_obj = 0 }
         \\if (0) { var null_obj = 0 }
     );
-    try testCode(mono_funcs,
+    try testCode(dotnet_funcs,
         \\var x = 0
         \\if (0) {
         \\    set x = 1
         \\}
         \\@Assert(x == 0)
     );
-    if (!is_monomock) try testCode(mono_funcs,
+    if (!is_monomock) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
@@ -4076,5 +4076,5 @@ const gchandlelog = std.log.scoped(.mono_gchandle);
 
 const std = @import("std");
 const logfile = @import("logfile.zig");
-const mono = @import("mono.zig");
+const dotnet = @import("dotnet.zig");
 const Memory = @import("Memory.zig");

@@ -144,13 +144,13 @@ const DotNetKind = enum {
         };
     }
 };
-const DotNet = struct {
+const DotNetLib = struct {
     kind: DotNetKind,
     module: win32.HINSTANCE,
 };
 fn getDotNet(arg: struct {
     timeout_seconds: u32,
-}) ?DotNet {
+}) ?DotNetLib {
     const start = getNow();
     var attempt: u32 = 0;
 
@@ -170,7 +170,7 @@ fn getDotNet(arg: struct {
             _ = fmtMsgbox(
                 .{ .ICONHAND = 1 },
                 "Mutiny Fatal Error",
-                "failed to load neither mono nore il2cpp {} seconds ({} attempts)",
+                "failed to load neither mono nor il2cpp {} seconds ({} attempts)",
                 .{ arg.timeout_seconds, attempt },
             );
             return null;
@@ -238,19 +238,19 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     //     std.log.err("AddVectoredExceptionHandler failed, error={f}", .{win32.GetLastError()});
     // }
 
-    const dotnet = getDotNet(.{
+    const dotnet_lib = getDotNet(.{
         .timeout_seconds = 10,
     }) orelse return 0xffffffff;
-    std.log.info("{s}: 0x{x}", .{ dotnet.kind.dllName(), @intFromPtr(dotnet.module) });
+    std.log.info("{s}: 0x{x}", .{ dotnet_lib.kind.dllName(), @intFromPtr(dotnet_lib.module) });
 
-    const mono_funcs: mono.Funcs = blk: {
+    const dotnet_funcs: dotnet.Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
-        break :blk mono.Funcs.init(&missing_proc, dotnet.module) catch {
+        break :blk dotnet.Funcs.init(&missing_proc, dotnet_lib.module) catch {
             _ = fmtMsgbox(
                 .{ .ICONHAND = 1 },
                 "Mutiny Fatal Error",
-                "the mono dll '{s}' is missing proc '{s}'",
-                .{ mono_dll_name, missing_proc },
+                "{s} is missing proc '{s}'",
+                .{ dotnet_lib.kind.dllName(), missing_proc },
             );
             return 0xffffffff;
         };
@@ -260,14 +260,14 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         var attempt: u32 = 0;
         while (true) {
             attempt += 1;
-            if (mono_funcs.get_root_domain()) |domain| {
-                std.log.info("Mono root domain found: 0x{x}", .{@intFromPtr(domain)});
+            if (dotnet_funcs.get_root_domain()) |domain| {
+                std.log.info("dotnet root domain found: 0x{x}", .{@intFromPtr(domain)});
                 break :blk domain;
             }
             std.log.info("mono_get_root_domain returned NULL (attempt {})", .{attempt});
             const max_attempts = 30;
             if (attempt >= max_attempts) {
-                std.log.err("unable to get mono root domain after {} attempts", .{max_attempts});
+                std.log.err("unable to get dotnet root domain after {} attempts", .{max_attempts});
                 return 0xffffffff;
             }
             std.Thread.sleep(std.time.ns_per_s * 1);
@@ -276,14 +276,14 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     // if we go to fast the process will intermittently crash
     // TODO: find a better way to do this, might need to inspect mono source to find it
-    std.log.info("waiting a second for main process to initialize mono...", .{});
+    std.log.info("waiting a second for main process to initialize dotnet...", .{});
     std.Thread.sleep(std.time.ns_per_s * 1);
 
     // sanity check, this should be null before we call thread_attach
-    std.debug.assert(mono_funcs.domain_get() == null);
+    std.debug.assert(dotnet_funcs.domain_get() == null);
 
-    // std.log.info("Attaching thread to Mono domain...", .{});
-    const thread = mono_funcs.thread_attach(root_domain) orelse {
+    // std.log.info("Attaching thread to dotnet domain...", .{});
+    const thread = dotnet_funcs.thread_attach(root_domain) orelse {
         std.log.err("mono_thread_attach failed!", .{});
         return 0xffffffff;
     };
@@ -291,7 +291,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     // domain_get is how the Vm accesses the domain, make sure it's
     // what we expect after attaching our thread to it
-    std.debug.assert(mono_funcs.domain_get() == root_domain);
+    std.debug.assert(dotnet_funcs.domain_get() == root_domain);
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var last_update_mods_error: ?UpdateModsError = null;
@@ -302,7 +302,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         {
             const maybe_new_error = updateMods(
                 .{ .slice = mods_path.slice() },
-                &mono_funcs,
+                &dotnet_funcs,
                 scratch.allocator(),
                 &tests_scheduled,
             );
@@ -321,7 +321,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
         if (tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
-            Vm.runTests(&mono_funcs) catch |err| {
+            Vm.runTests(&dotnet_funcs) catch |err| {
                 std.log.err("tests failed with {s}:", .{@errorName(err)});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
@@ -565,7 +565,7 @@ const ModsPath = struct {
 
 fn updateMods(
     mods_path: ModsPath,
-    mono_funcs: *const mono.Funcs,
+    dotnet_funcs: *const dotnet.Funcs,
     scratch: std.mem.Allocator,
     out_tests_scheduled: *bool,
 ) ?UpdateModsError {
@@ -633,7 +633,7 @@ fn updateMods(
 
         switch (mod.state) {
             .initial, .err_no_text => {},
-            .have_text => |*h| runMod(mono_funcs, out_tests_scheduled, mod.name(), h),
+            .have_text => |*h| runMod(dotnet_funcs, out_tests_scheduled, mod.name(), h),
         }
     }
 
@@ -645,7 +645,7 @@ fn updateMods(
 }
 
 fn runMod(
-    mono_funcs: *const mono.Funcs,
+    dotnet_funcs: *const dotnet.Funcs,
     out_tests_scheduled: *bool,
     mod_name: []const u8,
     have_text: *Mod.HaveText,
@@ -673,7 +673,7 @@ fn runMod(
             have_text.vm_state = .{
                 .yielded = null,
                 .instance = .{
-                    .mono_funcs = mono_funcs,
+                    .dotnet_funcs = dotnet_funcs,
                     .text = have_text.text,
                     .mem = .{ .allocator = std.heap.page_allocator },
                 },
@@ -810,4 +810,4 @@ const Mutex = @import("Mutex.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
 const MaxString = @import("maxstring.zig").MaxString;
-const mono = @import("mono.zig");
+const dotnet = @import("dotnet.zig");

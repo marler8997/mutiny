@@ -1,58 +1,13 @@
+var root_domain: Domain = .{};
 threadlocal var thread_local_root_domain: ?*Domain = null;
 
-pub fn setRootDomain(domain: *Domain) void {
-    std.debug.assert(domain.attached_thread == null);
-    std.debug.assert(thread_local_root_domain == null);
-    thread_local_root_domain = domain;
+export fn mono_jit_init(name: [*:0]const u8) callconv(.c) ?*const mono.Domain {
+    _ = name;
+    return (&root_domain).toMono();
 }
-pub fn unsetRootDomain(domain: *Domain) void {
-    std.debug.assert(domain.attached_thread == null);
-    std.debug.assert(thread_local_root_domain == domain);
-    thread_local_root_domain = null;
+export fn mono_set_assemblies_path(path: [*:0]const u8) callconv(.c) void {
+    _ = path;
 }
-
-pub const funcs: mono.Funcs = .{
-    .get_root_domain = mock_get_root_domain,
-    .domain_get = mock_domain_get,
-    .thread_attach = mock_thread_attach,
-    .thread_detach = mock_thread_detach,
-    .assembly_foreach = mock_assembly_foreach,
-    .assembly_get_name = mock_assembly_get_name,
-    .assembly_get_image = mock_assembly_get_image,
-    .assembly_name_get_name = mock_assembly_name_get_name,
-    .class_from_name = mock_class_from_name,
-    .class_vtable = mock_class_vtable,
-    .class_get_name = mock_class_get_name,
-    .class_get_namespace = mock_class_get_namespace,
-    .class_get_fields = mock_class_get_fields,
-    .class_get_methods = mock_class_get_methods,
-    .class_get_method_from_name = mock_class_get_method_from_name,
-    .class_get_field_from_name = mock_class_get_field_from_name,
-    .field_get_flags = mock_field_get_flags,
-    .field_get_name = mock_field_get_name,
-    .field_get_type = mock_field_get_type,
-    .field_static_get_value = mock_field_static_get_value,
-    .field_get_value = mock_field_get_value,
-    .method_get_flags = mock_method_get_flags,
-    .method_get_name = mock_method_get_name,
-    .method_signature = mock_method_signature,
-    .method_get_class = mock_method_get_class,
-    .signature_get_return_type = mock_signature_get_return_type,
-    .signature_get_params = mock_signature_get_params,
-    .type_get_type = mock_type_get_type,
-    .object_new = mock_object_new,
-    .object_unbox = mock_object_unbox,
-    .object_get_class = mock_object_get_class,
-    .gchandle_new_v2 = mock_gchandle_new_v2,
-    .gchandle_free_v2 = mock_gchandle_free_v2,
-    .gchandle_get_target_v2 = mock_gchandle_get_target_v2,
-    .runtime_invoke = mock_runtime_invoke,
-    .string_to_utf8 = mock_string_to_utf8,
-    .string_new_len = mock_string_new_len,
-    .string_chars = mock_string_chars,
-    .string_length = mock_string_length,
-    .free = mock_free,
-};
 
 pub const Domain = struct {
     attached_thread: ?MockThread = null,
@@ -62,6 +17,9 @@ pub const Domain = struct {
     }) = .{},
     objects: std.SinglyLinkedList = .{},
     gc_handles: std.ArrayListUnmanaged(?*const mono.Object) = .{},
+
+    @"System.String.Empty": ?*const MockObject = null,
+    @"mocktest.static_field_string": ?*const MockObject = null,
 
     pub fn deinit(domain: *Domain) void {
         domain.gc_handles.deinit(domain.gpa.allocator());
@@ -105,8 +63,8 @@ const MockThread = struct {
     }
 };
 
-fn mock_get_root_domain() callconv(.c) ?*const mono.Domain {
-    return (thread_local_root_domain orelse return null).toMono();
+export fn mono_get_root_domain() callconv(.c) ?*const mono.Domain {
+    return (&root_domain).toMono();
 }
 
 fn domain_get() ?*Domain {
@@ -115,16 +73,24 @@ fn domain_get() ?*Domain {
     if (attached_thread.id != std.Thread.getCurrentId()) return null;
     return domain;
 }
-fn mock_domain_get() callconv(.c) ?*const mono.Domain {
+export fn mono_domain_get() callconv(.c) ?*const mono.Domain {
     return if (domain_get()) |d| d.toMono() else null;
 }
-fn mock_thread_attach(d: *const mono.Domain) callconv(.c) ?*const mono.Thread {
+export fn mono_thread_attach(d: *const mono.Domain) callconv(.c) ?*const mono.Thread {
     const domain: *Domain = @constCast(Domain.fromMono(d));
-    std.debug.assert(domain.attached_thread == null);
-    domain.attached_thread = .{ .domain = domain, .id = std.Thread.getCurrentId() };
+    if (thread_local_root_domain) |existing| {
+        std.debug.assert(existing == domain);
+        std.debug.assert(domain.attached_thread != null);
+        std.debug.assert(domain.attached_thread.?.domain == domain);
+        std.debug.assert(domain.attached_thread.?.id == std.Thread.getCurrentId());
+    } else {
+        thread_local_root_domain = domain;
+        std.debug.assert(domain.attached_thread == null);
+        domain.attached_thread = .{ .domain = domain, .id = std.Thread.getCurrentId() };
+    }
     return domain.attached_thread.?.toMono();
 }
-fn mock_thread_detach(t: *const mono.Thread) callconv(.c) void {
+export fn mono_thread_detach(t: *const mono.Thread) callconv(.c) void {
     const domain = blk: {
         const thread: *const MockThread = .fromMono(t);
         const domain = thread.domain;
@@ -133,6 +99,8 @@ fn mock_thread_detach(t: *const mono.Thread) callconv(.c) void {
     };
     domain.attached_thread.? = undefined;
     domain.attached_thread = null;
+    std.debug.assert(thread_local_root_domain == domain);
+    thread_local_root_domain = null;
 }
 
 const MockAssembly = struct {
@@ -224,6 +192,8 @@ const MethodImpl = union(enum) {
     return_i4: *const fn () i32,
     return_static_string: *const fn () [:0]const u8,
     return_datetime: *const fn () i64,
+    return_object: *const fn () ?*const MockObject,
+    take_string_return_object: *const fn (string: usize) usize,
     pub fn sig(impl: *const MethodImpl) *const MockMethodSignature {
         return switch (impl.*) {
             inline else => |_, tag| &@field(method_sigs, @tagName(tag)),
@@ -231,11 +201,24 @@ const MethodImpl = union(enum) {
     }
 };
 
+const LazyObject = enum {
+    @"System.String.Empty",
+    @"mocktest.static_field_string",
+    pub fn create(lazy_object: LazyObject, domain: *Domain) *const MockObject {
+        return switch (lazy_object) {
+            .@"System.String.Empty" => return domain.new(.{ .static_string = "" }),
+            .@"mocktest.static_field_string" => return domain.new(.{ .static_string = "example" }),
+        };
+    }
+};
+
 const MockValue = union(enum) {
     i4: i32,
-    string: ?[*:0]const u8,
+    object: ?*const MockObject,
+    object_lazy: LazyObject,
     pub fn getType(self: *const MockValue) *const MockType {
         return switch (self.*) {
+            .object_lazy => &mock_type.object,
             inline else => |_, tag| &@field(mock_type, @tagName(tag)),
         };
     }
@@ -258,6 +241,14 @@ const method_sigs = struct {
         .return_type = mock_type.datetime,
         .param_count = 0,
     };
+    const return_object: MockMethodSignature = .{
+        .return_type = mock_type.object,
+        .param_count = 0,
+    };
+    const take_string_return_object: MockMethodSignature = .{
+        .return_type = mock_type.object,
+        .param_count = 1,
+    };
 };
 
 const MockMethodSignature = struct {
@@ -276,6 +267,7 @@ const MockType = union(enum) {
     u8,
     string,
     valuetype: struct { size: usize },
+    object,
 
     pub fn fromMono(t: *const mono.Type) *const MockType {
         return @ptrCast(@alignCast(t));
@@ -293,8 +285,8 @@ const mock_type = struct {
     pub const @"void": MockType = .void;
     pub const @"i4": MockType = .i4;
     pub const @"u8": MockType = .u8;
-    pub const string: MockType = .string;
     pub const datetime: MockType = .{ .valuetype = .{ .size = 8 } };
+    pub const object: MockType = .object;
 };
 
 const MockObject = struct {
@@ -304,6 +296,7 @@ const MockObject = struct {
         i4: i32,
         static_string: [*:0]const u8,
         datetime: i64,
+        decimal,
     };
     pub fn fromMono(t: *const mono.Object) *const MockObject {
         return @ptrCast(@alignCast(t));
@@ -316,6 +309,7 @@ const MockObject = struct {
             .i4 => &mock_class.@"System.Int32",
             .static_string => &mock_class.@"System.String",
             .datetime => &mock_class.@"System.DateTime",
+            .decimal => &mock_class.@"System.Decimal",
         };
     }
 };
@@ -361,6 +355,14 @@ fn @"System.Environment.get_MachineName"() [:0]const u8 {
 fn @"System.DateTime.get_Now"() i64 {
     return std.time.milliTimestamp();
 }
+fn @"System.Decimal.Parse"(s: usize) usize {
+    _ = s;
+    @panic("todo");
+}
+fn @"MockTest.NewDecimal"() ?*const MockObject {
+    const domain = domain_get().?;
+    return domain.new(.decimal);
+}
 
 const mock_class = struct {
     const @"System.Int32": MockClass = .{
@@ -374,7 +376,7 @@ const mock_class = struct {
         .name = "String",
         .methods = &[_]MockMethod{},
         .fields = &[_]MockClassField{
-            .{ .name = "Empty", .protection = .public, .kind = .{ .static = .{ .string = "" } } },
+            .{ .name = "Empty", .protection = .public, .kind = .{ .static = .{ .object_lazy = .@"System.String.Empty" } } },
         },
     };
     const @"System.DateTime": MockClass = .{
@@ -387,15 +389,27 @@ const mock_class = struct {
             .{ .name = "_dateData", .protection = .private, .kind = .{ .instance = &mock_type.u8 } },
         },
     };
+    const @"System.Decimal": MockClass = .{
+        .name = "Decimal",
+        .methods = &[_]MockMethod{
+            .{ .name = "Parse", .impl = .{ .take_string_return_object = &@"System.Decimal.Parse" } },
+        },
+        .fields = &[_]MockClassField{
+            .{ .name = "flags", .protection = .private, .kind = .{ .instance = &mock_type.i4 } },
+            .{ .name = "hi", .protection = .private, .kind = .{ .instance = &mock_type.i4 } },
+        },
+    };
 };
 
 const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mocktest" }, .image = .{
         .namespaces = &[_]Namespace{
             .{ .prefix = "", .classes = &[_]MockClass{
-                .{ .name = "MockTest", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "static_field_null", .protection = .private, .kind = .{ .static = .{ .string = null } } },
-                    .{ .name = "static_field_string", .protection = .private, .kind = .{ .static = .{ .string = "example" } } },
+                .{ .name = "MockTest", .methods = &[_]MockMethod{
+                    .{ .name = "NewDecimal", .impl = .{ .return_object = @"MockTest.NewDecimal" } },
+                }, .fields = &[_]MockClassField{
+                    .{ .name = "static_field_null", .protection = .private, .kind = .{ .static = .{ .object = null } } },
+                    .{ .name = "static_field_string", .protection = .private, .kind = .{ .static = .{ .object_lazy = .@"mocktest.static_field_string" } } },
                 } },
             } },
         },
@@ -406,9 +420,7 @@ const assemblies = [_]MockAssembly{
                 mock_class.@"System.Int32",
                 mock_class.@"System.String",
                 mock_class.@"System.DateTime",
-                .{ .name = "Decimal", .methods = &[_]MockMethod{}, .fields = &[_]MockClassField{
-                    .{ .name = "flags", .protection = .private, .kind = .{ .instance = &mock_type.i4 } },
-                } },
+                mock_class.@"System.Decimal",
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
                     .{ .name = "Beep", .impl = .{ .return_void = &@"System.Console.Beep" } },
@@ -423,24 +435,24 @@ const assemblies = [_]MockAssembly{
     } },
 };
 
-fn mock_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
+export fn mono_assembly_foreach(func: *const mono.Callback, user_data: ?*anyopaque) callconv(.c) void {
     for (&assemblies) |*assembly| {
         func(@ptrCast(@constCast(assembly)), user_data);
     }
 }
-fn mock_assembly_get_name(a: *const mono.Assembly) callconv(.c) ?*const mono.AssemblyName {
+export fn mono_assembly_get_name(a: *const mono.Assembly) callconv(.c) ?*const mono.AssemblyName {
     const assembly: *const MockAssembly = .fromMono(a);
     return assembly.name.toMono();
 }
-fn mock_assembly_get_image(a: *const mono.Assembly) callconv(.c) ?*const mono.Image {
+export fn mono_assembly_get_image(a: *const mono.Assembly) callconv(.c) ?*const mono.Image {
     const assembly: *const MockAssembly = .fromMono(a);
     return assembly.image.toMono();
 }
-fn mock_assembly_name_get_name(n: *const mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
+export fn mono_assembly_name_get_name(n: *const mono.AssemblyName) callconv(.c) ?[*:0]const u8 {
     const name: *const MockAssemblyName = .fromMono(n);
     return name.cstr;
 }
-fn mock_class_from_name(
+export fn mono_class_from_name(
     image_opaque: *const mono.Image,
     namespace_ptr: [*:0]const u8,
     name_ptr: [*:0]const u8,
@@ -458,21 +470,21 @@ fn mock_class_from_name(
         if (std.mem.eql(u8, class.name, wanted_name)) return class.toMonoClass();
     } else null;
 }
-fn mock_class_vtable(domain: *const mono.Domain, c: *const mono.Class) callconv(.c) *const mono.VTable {
+export fn mono_class_vtable(domain: *const mono.Domain, c: *const mono.Class) callconv(.c) *const mono.VTable {
     _ = domain;
     const class: *const MockClass = .fromMonoClass(c);
     return class.toMonoVTable();
 }
-fn mock_class_get_name(c: *const mono.Class) callconv(.c) [*:0]const u8 {
+export fn mono_class_get_name(c: *const mono.Class) callconv(.c) [*:0]const u8 {
     const class: *const MockClass = .fromMonoClass(c);
     return class.name;
 }
-fn mock_class_get_namespace(c: *const mono.Class) callconv(.c) [*:0]const u8 {
+export fn mono_class_get_namespace(c: *const mono.Class) callconv(.c) [*:0]const u8 {
     const class: *const MockClass = .fromMonoClass(c);
     _ = class;
     return "TODO_IMPLEMENT_mock_class_get_namespace";
 }
-fn mock_class_get_fields(
+export fn mono_class_get_fields(
     c: *const mono.Class,
     iterator: *?*anyopaque,
 ) callconv(.c) ?*const mono.ClassField {
@@ -483,7 +495,7 @@ fn mock_class_get_fields(
     iterator.* = @ptrFromInt(index + 1);
     return class.fields[index].toMono();
 }
-fn mock_class_get_methods(
+export fn mono_class_get_methods(
     c: *const mono.Class,
     iterator: *?*anyopaque,
 ) callconv(.c) ?*const mono.Method {
@@ -494,7 +506,7 @@ fn mock_class_get_methods(
     iterator.* = @ptrFromInt(index + 1);
     return class.methods[index].toMono();
 }
-fn mock_class_get_method_from_name(
+export fn mono_class_get_method_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
     param_count: c_int,
@@ -507,7 +519,7 @@ fn mock_class_get_method_from_name(
     }
     return null;
 }
-fn mock_class_get_field_from_name(
+export fn mono_class_get_field_from_name(
     c: *const mono.Class,
     name_ptr: [*:0]const u8,
 ) callconv(.c) ?*const mono.ClassField {
@@ -519,7 +531,7 @@ fn mock_class_get_field_from_name(
     return null;
 }
 
-fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldFlags {
+export fn mono_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldFlags {
     const field: *const MockClassField = .fromMono(f);
     return switch (field.kind) {
         .static => .{ .protection = .public, .unused1 = false, .static = true, .init_only = false, .literal = true, .not_serialized = false, .special_name = false, .unused2 = 0, .pin_marshal_rts = false, .has_field_rva = false, .has_default = false, .reserved_mask = 2 },
@@ -539,15 +551,25 @@ fn mock_field_get_flags(f: *const mono.ClassField) callconv(.c) mono.ClassFieldF
         },
     };
 }
-fn mock_field_get_name(f: *const mono.ClassField) callconv(.c) [*:0]const u8 {
+export fn mono_field_get_name(f: *const mono.ClassField) callconv(.c) [*:0]const u8 {
     const field: *const MockClassField = .fromMono(f);
     return field.name;
 }
-fn mock_field_get_type(f: *const mono.ClassField) callconv(.c) *const mono.Type {
+export fn mono_field_get_type(f: *const mono.ClassField) callconv(.c) *const mono.Type {
     const field: *const MockClassField = .fromMono(f);
     return field.kind.getType().toMono();
 }
-fn mock_field_static_get_value(
+export fn mono_field_static_set_value(
+    vtable: *const mono.VTable,
+    f: *const mono.ClassField,
+    value: *const anyopaque,
+) callconv(.c) void {
+    _ = vtable;
+    _ = f;
+    _ = value;
+    @panic("todo");
+}
+export fn mono_field_static_get_value(
     vtable: *const mono.VTable,
     f: *const mono.ClassField,
     out_value: *anyopaque,
@@ -557,13 +579,22 @@ fn mock_field_static_get_value(
     switch (field.kind) {
         .static => |*static_value| switch (static_value.*) {
             .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
-            .string => |str| @as(*?[*:0]const u8, @ptrCast(@alignCast(out_value))).* = str,
-            // else => |kind| std.debug.panic("todo: implement field_get_value for type kind '{s}'", .{@tagName(kind)}),
+            .object => |o| @as(*?*const MockObject, @ptrCast(@alignCast(out_value))).* = o,
+            .object_lazy => |lazy_object| {
+                const domain = domain_get().?;
+                const object_ref: *?*const MockObject = switch (lazy_object) {
+                    inline else => |ct| &@field(domain, @tagName(ct)),
+                };
+                if (object_ref.* == null) {
+                    object_ref.* = lazy_object.create(domain);
+                }
+                @as(*?*const MockObject, @ptrCast(@alignCast(out_value))).* = object_ref.*;
+            },
         },
         .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),
     }
 }
-fn mock_field_get_value(
+export fn mono_field_get_value(
     o: *const mono.Object,
     f: *const mono.ClassField,
     out_value: *anyopaque,
@@ -582,8 +613,18 @@ fn mock_field_get_value(
         else => |t| std.debug.panic("todo: mock_field_get_value for data kind {t}", .{t}),
     }
 }
+export fn mono_field_set_value(
+    o: *const mono.Object,
+    f: *const mono.ClassField,
+    value: *const anyopaque,
+) callconv(.c) void {
+    _ = o;
+    _ = f;
+    _ = value;
+    @panic("todo");
+}
 
-fn mock_method_get_flags(
+export fn mono_method_get_flags(
     method_opaque: *const mono.Method,
     iflags: ?*mono.MethodFlags,
 ) callconv(.c) mono.MethodFlags {
@@ -593,17 +634,17 @@ fn mock_method_get_flags(
     return .{ .protection = .public, .static = true };
 }
 
-fn mock_method_get_name(m: *const mono.Method) callconv(.c) [*:0]const u8 {
+export fn mono_method_get_name(m: *const mono.Method) callconv(.c) [*:0]const u8 {
     const method: *const MockMethod = @ptrCast(@alignCast(m));
     return method.name;
 }
 
-fn mock_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
+export fn mono_method_signature(method_opaque: *const mono.Method) callconv(.c) ?*const mono.MethodSignature {
     const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
     return method.impl.sig().toMono();
 }
 
-fn mock_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
+export fn mono_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const mono.Class {
     const method: *const MockMethod = @ptrCast(@alignCast(method_opaque));
     for (assemblies) |assembly| {
         _ = assembly;
@@ -612,12 +653,12 @@ fn mock_method_get_class(method_opaque: *const mono.Method) callconv(.c) ?*const
     @panic("todo");
 }
 
-fn mock_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
+export fn mono_signature_get_return_type(s: *const mono.MethodSignature) callconv(.c) ?*const mono.Type {
     const sig: *const MockMethodSignature = .fromMono(s);
     return sig.return_type.toMono();
 }
 
-fn mock_signature_get_params(
+export fn mono_signature_get_params(
     s: *const mono.MethodSignature,
     iter: *?*anyopaque,
 ) callconv(.c) ?*const mono.Type {
@@ -627,12 +668,12 @@ fn mock_signature_get_params(
     return null;
 }
 
-fn mock_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
+export fn mono_type_get_type(type_opaque: *const mono.Type) callconv(.c) mono.TypeKind {
     const t: *const MockType = .fromMono(type_opaque);
     return t.kind();
 }
 
-fn mock_object_new(
+export fn mono_object_new(
     domain: *const mono.Domain,
     class: *const mono.Class,
 ) callconv(.c) ?*const mono.Object {
@@ -640,15 +681,16 @@ fn mock_object_new(
     _ = class;
     return null;
 }
-fn mock_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
+export fn mono_object_unbox(o: *const mono.Object) callconv(.c) *anyopaque {
     const object: *const MockObject = .fromMono(o);
     return switch (object.data) {
         .i4 => |*value| @ptrCast(@constCast(value)),
         .static_string => @panic("codebug?"),
         .datetime => @panic("todo: unbox datetime"),
+        .decimal => @panic("todo"),
     };
 }
-fn mock_object_get_class(o: *const mono.Object) callconv(.c) *const mono.Class {
+export fn mono_object_get_class(o: *const mono.Object) callconv(.c) *const mono.Class {
     const object: *const MockObject = .fromMono(o);
     return object.getClass().toMonoClass();
 }
@@ -661,7 +703,7 @@ fn indexFromGchandle(gchandle: mono.GcHandleV2) usize {
     return @intFromEnum(gchandle) - 1;
 }
 
-fn mock_gchandle_new_v2(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandleV2 {
+export fn mono_gchandle_new_v2(o: *const mono.Object, pinned: i32) callconv(.c) mono.GcHandleV2 {
     if (pinned != 0) @panic("todo");
     const domain = domain_get().?;
     for (domain.gc_handles.items, 0..) |*slot, index| {
@@ -673,21 +715,21 @@ fn mock_gchandle_new_v2(o: *const mono.Object, pinned: i32) callconv(.c) mono.Gc
     domain.gc_handles.append(domain.gpa.allocator(), o) catch |e| oom(e);
     return gchandleFromIndex(domain.gc_handles.items.len - 1);
 }
-fn mock_gchandle_free_v2(handle: mono.GcHandleV2) callconv(.c) void {
+export fn mono_gchandle_free_v2(handle: mono.GcHandleV2) callconv(.c) void {
     const domain = domain_get().?;
     const index: usize = indexFromGchandle(handle);
     std.debug.assert(index < domain.gc_handles.items.len);
     std.debug.assert(domain.gc_handles.items[index] != null);
     domain.gc_handles.items[index] = null;
 }
-fn mock_gchandle_get_target_v2(handle: mono.GcHandleV2) callconv(.c) *const mono.Object {
+export fn mono_gchandle_get_target_v2(handle: mono.GcHandleV2) callconv(.c) *const mono.Object {
     const domain = domain_get().?;
     const index: usize = indexFromGchandle(handle);
     std.debug.assert(index < domain.gc_handles.items.len);
     return domain.gc_handles.items[index].?;
 }
 
-fn mock_runtime_invoke(
+export fn mono_runtime_invoke(
     method_opaque: *const mono.Method,
     obj: ?*const mono.Object,
     params: ?**anyopaque,
@@ -708,16 +750,21 @@ fn mock_runtime_invoke(
         .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
         .return_static_string => |f| return domain.new(.{ .static_string = f() }).toMono(),
         .return_datetime => |f| return domain.new(.{ .datetime = f() }).toMono(),
+        .return_object => |f| return if (f()) |o| o.toMono() else null,
+        .take_string_return_object => |f| {
+            _ = f;
+            @panic("todo");
+        },
     }
 }
 
-fn mock_string_to_utf8(object_mono: *const mono.Object) callconv(.c) ?[*:0]const u8 {
+export fn mono_string_to_utf8(object_mono: *const mono.Object) callconv(.c) ?[*:0]const u8 {
     const object: *const MockObject = .fromMono(object_mono);
     _ = object;
     @panic("todo");
 }
 
-fn mock_string_new_len(
+export fn mono_string_new_len(
     d: *const mono.Domain,
     text: [*]const u8,
     len: c_uint,
@@ -729,16 +776,16 @@ fn mock_string_new_len(
     @panic("todo");
 }
 
-fn mock_string_chars(s: *const mono.String) callconv(.c) [*]const u16 {
+export fn mono_string_chars(s: *const mono.String) callconv(.c) [*]const u16 {
     _ = s;
     @panic("todo");
 }
-fn mock_string_length(s: *const mono.String) callconv(.c) c_int {
+export fn mono_string_length(s: *const mono.String) callconv(.c) c_int {
     _ = s;
     @panic("todo");
 }
 
-fn mock_free(ptr: *anyopaque) callconv(.c) void {
+export fn mono_free(ptr: *anyopaque) callconv(.c) void {
     _ = ptr;
     @panic("todo");
 }

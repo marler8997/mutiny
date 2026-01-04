@@ -111,6 +111,7 @@ pub fn build(b: *std.Build) void {
         b.step("run", "").dependOn(&run.step);
     }
 
+    const test_step = b.step("test", "");
     {
         const t = b.addTest(.{
             .root_module = b.createModule(.{
@@ -123,6 +124,47 @@ pub fn build(b: *std.Build) void {
             t.root_module.addImport("win32", win32_mod);
         }
         const run = b.addRunArtifact(t);
-        b.step("test", "").dependOn(&run.step);
+        test_step.dependOn(&run.step);
+    }
+
+    const monotest_exe = b.addExecutable(.{
+        .name = "monotest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/monotest.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    if (target.result.os.tag == .windows) {
+        monotest_exe.root_module.addImport("win32", win32_mod);
+    }
+    const install_monotest = b.addInstallArtifact(monotest_exe, .{});
+
+    {
+        const monotest = b.addRunArtifact(monotest_exe);
+        monotest.step.dependOn(&install_monotest.step);
+        if (b.args) |args| monotest.addArgs(args);
+        b.step("monotest", "run monotest on the given mono DLL/PATH").dependOn(&monotest.step);
+    }
+
+    {
+        const mock = b.addLibrary(.{
+            .name = "monomock",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/monomock.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        if (target.result.os.tag == .windows) {
+            mock.root_module.addImport("win32", win32_mod);
+        }
+        const monotest = b.addRunArtifact(monotest_exe);
+        monotest.step.dependOn(&install_monotest.step);
+        monotest.addArtifactArg(mock);
+        monotest.addArg("MOCK_MONO_PATH");
+        b.step("monotest-mock", "").dependOn(&monotest.step);
+        test_step.dependOn(&monotest.step);
     }
 }

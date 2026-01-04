@@ -648,6 +648,7 @@ fn runMod(
             };
         } else |_| switch (eval.vm.error_result) {
             .exit => {
+                out_tests_scheduled.* = out_tests_scheduled.* or eval.vm.tests_scheduled;
                 std.log.info("{s} has exited", .{mod_name});
                 eval.vm.reset();
                 have_text.vm_state.?.yielded = null;

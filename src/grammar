@@ -7,52 +7,28 @@ Statement
     / continue
     / fn IDENTIFIER ParamDeclList Block
     / var IDENTIFIER EQUAL Expr
-    / IDENTIFIER EQUAL Expr
+    / set Reference EQUAL Expr
     / Expr
 
-Expr <- ExprBinaryCompare ('=' ExprBinaryCompare)*
+Reference
+   <- IDENTIFIER (DOT IDENTIFIER)*
+
+// Expr <- ExprBinaryCompare ('=' ExprBinaryCompare)*
+Expr <- ExprBinaryCompare
 ExprBinaryCompare <- ExprBinaryMath (BinaryOpComparison ExprBinaryMath)*
 ExprBinaryMath <- ExprSingle (BinaryOpMath ExprSingle)*
+ExprSingle <- PrimaryTypeExpr ExprSuffix*
 
-PrimaryExpr
-  <- IfExpr
-   / KEYWORD_break Expr
-   / KEYWORD_continue Expr
-   / KEYWORD_return Expr
-   / Block
-   / Expr
-
-PrimaryTypeExpr ExprSuffix
-
-ExprSuffix <- (SuffixOp / FnCallArgs)*
-
-ExprSingle
-    <- BUILTINIDENTIFIER FnCallArgs
-     / NEW IDENTIFIER FnCallArgs
-     / CHAR_LITERAL
-     ??? / ContainerDecl
-     / DOT IDENTIFIER
-     ??? / DOT InitList
-     ??? / ErrorSetDecl
-     / FLOAT
-     ??? / FnProto
-     ??? / GroupedExpr
-     ??? / LabeledTypeExpr
-     / LPAREN Expr RPAREN
-     / IDENTIFIER
-     / IfTypeExpr
-     / INTEGER
-     / KEYWORD_unreachable
-     / STRINGLITERAL
-
-Block <- LBRACE Statement* RBRACE
-//
-SuffixOp
+ExprSuffix
    <- LBRACKET Expr RBRACKET
     / DOT IDENTIFIER
-//
-IfExpr <- IfPrefix Expr ("else" Payload? Expr)?
-IfPrefix <- "if" LPAREN Expr RPAREN PtrPayload?
-FnCallArgs <- LPAREN (Expr ",")* Expr? RPAREN
+    / LPAREN (Expr ",")* Expr? RPAREN
+
+PrimaryTypeExpr
+   <- IDENTIFIER
+    / INTEGER
+    / STRINGLITERAL
+
+Block <- LBRACE Statement* RBRACE
 
 ParamDeclList <- LPAREN (IDENTIFIER COMMA)* IDENTIFIER? RPAREN

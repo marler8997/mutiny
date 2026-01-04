@@ -513,35 +513,6 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
 } {
     const first_token = lex(vm.text, start);
     switch (first_token.tag) {
-        .identifier => {
-            const second_token = lex(vm.text, first_token.end);
-            if (second_token.tag == .@"=") {
-                const entry = vm.lookup(vm.text[first_token.start..first_token.end]) orelse return vm.setError(.{
-                    .undefined_identifier = first_token.extent(),
-                });
-                const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
-                const value_addr = vm.mem.top();
-                const expr_first_token = lex(vm.text, second_token.end);
-                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
-                    .expected = "an expresson to follow '='",
-                    .token = expr_first_token,
-                } });
-                if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
-                    .id_extent = first_token.extent(),
-                } });
-                const src = vm.pop(value_addr);
-                if (src.getType() != symbol_type) return vm.setError(.{ .assign_type = .{
-                    .id_extent = first_token.extent(),
-                    .dst = symbol_type,
-                    .src = src.getType(),
-                } });
-                switch (src) {
-                    .integer => |value| vm.mem.toPointer(i64, symbol_value_addr).* = value,
-                    else => @panic("todo: overwrite the value"),
-                }
-                return .{ .statement_end = after_expr };
-            }
-        },
         .keyword_fn => {
             const id_extent = blk: {
                 const token = lex(vm.text, first_token.end);
@@ -621,6 +592,31 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             return .{ .statement_end = first_token.end };
         },
         .keyword_continue => return .{ .@"continue" = first_token.start },
+        .keyword_set => {
+            const ref, const ref_end = try vm.evalReference(first_token.end);
+            const after_equal = blk: {
+                const token = lex(vm.text, ref_end);
+                if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
+                    .expected = "'=' to delimit set destination/source",
+                    .token = token,
+                } });
+                break :blk token.end;
+            };
+            const value_addr = vm.mem.top();
+            const expr_first_token = lex(vm.text, after_equal);
+            const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
+                .expected = "an expresson to follow '='",
+                .token = expr_first_token,
+            } });
+            if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
+                .kind = .{ .ref_start = lex(vm.text, first_token.end).start },
+            } });
+            var src = vm.pop(value_addr);
+            // NOTE: is this discard correct?
+            defer src.discard(vm.mono_funcs);
+            try vm.set(&ref, &src);
+            return .{ .statement_end = after_expr };
+        },
         .keyword_var => {
             const id_extent = blk: {
                 const id_token = lex(vm.text, first_token.end);
@@ -646,7 +642,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
                 .token = expr_first_token,
             } });
             if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
-                .id_extent = id_extent,
+                .kind = .{ .var_id_extent = id_extent },
             } });
             try vm.endSymbol();
             return .{ .statement_end = after_expr };
@@ -680,19 +676,144 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
 
     const expr_addr = vm.mem.top();
     const expr_end = try vm.evalExpr(first_token) orelse return .{ .not_statement = first_token };
-    const next_token = lex(vm.text, expr_end);
-    if (next_token.tag != .@"=") {
-        if (!vm.mem.top().eql(expr_addr)) {
-            const expr_type, _ = vm.readValue(Type, expr_addr);
-            return vm.setError(.{ .statement_result_ignored = .{
-                .pos = first_token.start,
-                .ignored_type = expr_type,
+    if (!vm.mem.top().eql(expr_addr)) {
+        const expr_type, _ = vm.readValue(Type, expr_addr);
+        {
+            const token = lex(vm.text, expr_end);
+            if (token.tag == .@"=") return vm.setError(.{ .bare_assign = .{
+                .assign_pos = token.start,
             } });
         }
-        return .{ .statement_end = expr_end };
+        return vm.setError(.{ .statement_result_ignored = .{
+            .pos = first_token.start,
+            .ignored_type = expr_type,
+        } });
     }
 
-    @panic("todo");
+    return .{ .statement_end = expr_end };
+}
+
+fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
+    var ref: Reference, var offset: usize = blk: {
+        const token = lex(vm.text, start);
+        switch (token.tag) {
+            .identifier => {
+                const entry = vm.lookup(vm.text[token.start..token.end]) orelse return vm.setError(.{
+                    .undefined_identifier = token.extent(),
+                });
+                break :blk .{ .{ .symbol_entry = entry }, token.end };
+            },
+            else => return vm.setError(.{ .unexpected_token = .{
+                .expected = "an identifier to set",
+                .token = token,
+            } }),
+        }
+    };
+    while (true) {
+        const after_dot = blk: {
+            const token = lex(vm.text, offset);
+            switch (token.tag) {
+                .period => break :blk token.end,
+                else => return .{ ref, offset },
+            }
+        };
+        const id_token = lex(vm.text, after_dot);
+        switch (id_token.tag) {
+            .identifier => try vm.dot(&ref, id_token.extent()),
+            else => return vm.setError(.{ .unexpected_token = .{
+                .expected = "an identifier after '.'",
+                .token = id_token,
+            } }),
+        }
+        offset = id_token.end;
+    }
+}
+const Reference = union(enum) {
+    symbol_entry: SymbolEntry,
+    object_field: struct {
+        // for now this handle is a weak reference, we rely on it being owned by something else
+        // for the duration of the set statement that this reference is apart of
+        handle: mono.GcHandleV2,
+        extent: Extent,
+    },
+};
+fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
+    switch (ref.*) {
+        .symbol_entry => |*entry| {
+            const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
+            if (value.getType() != symbol_type) return vm.setError(.{ .assign_type = .{
+                .id_extent = entry.id_extent,
+                .dst = symbol_type,
+                .src = value.getType(),
+            } });
+            switch (value.*) {
+                .integer => |int| vm.mem.toPointer(i64, symbol_value_addr).* = int,
+                else => {
+                    std.log.err("todo: implement set value of type {t}", .{value.*});
+                    return vm.setError(.{ .not_implemented = "set value of this type" });
+                },
+            }
+        },
+        .object_field => |*field| {
+            const obj = gchandleTarget(vm.mono_funcs, field.handle);
+            const class = vm.mono_funcs.object_get_class(obj);
+            const name = try vm.managedId(field.extent);
+            // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
+            const mono_field = vm.mono_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
+                .class = class,
+                .id_extent = field.extent,
+            } });
+            const flags = vm.mono_funcs.field_get_flags(mono_field);
+            if (flags.static) return vm.setError(.{ .static_field = .{ .id_extent = field.extent } });
+            const mono_type = vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(mono_field));
+            const marshal_value: MarshalValue = switch (value.getMarshalConst(mono_type)) {
+                .not_implemented => |msg| return vm.setError(.{ .not_implemented2 = .{
+                    .pos = field.extent.start,
+                    .msg = msg,
+                } }),
+                .value => |v| v,
+                .unexpected_type => |u| return vm.setError(.{ .unexpected_type = .{
+                    .pos = field.extent.start,
+                    .expected = u.expected,
+                    .actual = u.actual,
+                } }),
+                .overflow => |o| return vm.setError(.{ .overflow = .{
+                    .pos = field.extent.start,
+                    .value = o.value,
+                    .int = o.int,
+                } }),
+            };
+            vm.mono_funcs.field_set_value(obj, mono_field, marshal_value.getPtrConst());
+        },
+    }
+}
+fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
+    switch (ref.*) {
+        .symbol_entry => |*entry| {
+            const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
+            switch (symbol_type) {
+                .object => {
+                    const gc_handle, const end = vm.readValue(mono.GcHandleV2, symbol_value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    ref.* = .{ .object_field = .{
+                        .handle = gc_handle,
+                        .extent = id_extent,
+                    } };
+                },
+                else => {
+                    std.log.err(
+                        "todo: get field '{s}' on type {t}",
+                        .{ vm.text[id_extent.start..id_extent.end], symbol_type },
+                    );
+                    return vm.setError(.{ .not_implemented = "get field on this type" });
+                },
+            }
+        },
+        .object_field => |*field| {
+            _ = field;
+            return vm.setError(.{ .not_implemented = "get field on object field" });
+        },
+    }
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
@@ -1029,6 +1150,7 @@ const MonoObjectType = enum {
     ptr,
     valuetype,
     class,
+    object,
 
     pub fn init(kind: mono.TypeKind) ?MonoObjectType {
         return switch (kind) {
@@ -1050,7 +1172,8 @@ const MonoObjectType = enum {
             .ptr => .ptr,
             .valuetype => .valuetype,
             .class => .class,
-            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+            .object => .object,
+            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
                 std.log.warn("unsure if type '{s}' should be supported (MonoObjectType)", .{@tagName(t)});
                 return null;
             },
@@ -1059,7 +1182,7 @@ const MonoObjectType = enum {
     }
 };
 
-const MonoValue = union(enum) {
+const MarshalValue = union(enum) {
     boolean: c_int,
     i4: i32,
     u8: u64,
@@ -1067,7 +1190,7 @@ const MonoValue = union(enum) {
     // string: *mono.Object,
     // class: *mono.Object,
     // genericinst: *mono.Object,
-    pub fn initUndefined(kind: mono.TypeKind) ?MonoValue {
+    pub fn initUndefined(kind: mono.TypeKind) ?MarshalValue {
         return switch (kind) {
             .end => null,
             .void => null,
@@ -1091,20 +1214,26 @@ const MonoValue = union(enum) {
             .class => .{ .maybe_object = undefined },
             // .genericinst => .{ .genericinst = undefined },
             .genericinst => .{ .maybe_object = undefined },
-            .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .object, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
-                std.log.warn("unsure if type '{s}' should be supported (MonoValue)", .{@tagName(t)});
+            .object => .{ .maybe_object = undefined },
+            .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+                std.log.warn("unsure if type '{s}' should be supported (MarshalValue)", .{@tagName(t)});
                 return null;
             },
             _ => null,
         };
     }
-    pub fn getPtr(value: *MonoValue) *anyopaque {
+    pub fn getPtr(value: *MarshalValue) *anyopaque {
+        return switch (value.*) {
+            inline else => |*typed| @ptrCast(typed),
+        };
+    }
+    pub fn getPtrConst(value: *const MarshalValue) *const anyopaque {
         return switch (value.*) {
             inline else => |*typed| @ptrCast(typed),
         };
     }
 };
-fn pushMonoValue(vm: *Vm, class: *const mono.Class, value: *const MonoValue) error{Vm}!void {
+fn pushMarshalValue(vm: *Vm, class: *const mono.Class, value: *const MarshalValue) error{Vm}!void {
     switch (value.*) {
         .boolean => {
             (try vm.push(Type)).* = .integer;
@@ -1127,7 +1256,7 @@ fn pushMonoValue(vm: *Vm, class: *const mono.Class, value: *const MonoValue) err
                 if (sanity_check) {
                     const obj_class: ?*const mono.Class = vm.mono_funcs.object_get_class(object);
                     if (obj_class == null) {
-                        std.log.err("pushMonoValue: object_get_class returned null for {*}", .{object});
+                        std.log.err("pushMarshalValue: object_get_class returned null for {*}", .{object});
                         @panic("invalid object!?!");
                         // return vm.setError(.{ .invalid_object = {} });
                     }
@@ -1166,7 +1295,7 @@ fn pushMonoField(
         };
     };
 
-    var value = MonoValue.initUndefined(vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) orelse return vm.setError(.{ .not_implemented2 = .{
+    var value = MarshalValue.initUndefined(vm.mono_funcs.type_get_type(vm.mono_funcs.field_get_type(field))) orelse return vm.setError(.{ .not_implemented2 = .{
         .pos = id_extent.start,
         .msg = "class field of this type",
     } });
@@ -1182,7 +1311,7 @@ fn pushMonoField(
             value.getPtr(),
         ),
     }
-    try vm.pushMonoValue(class, &value);
+    try vm.pushMarshalValue(class, &value);
 }
 
 fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Object) error{Vm}!void {
@@ -1204,7 +1333,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const mono.Obje
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(mono.GcHandleV2)).* = handle;
         },
-        .class, .valuetype => {
+        .class, .valuetype, .object => {
             const handle = gchandleNew(vm.mono_funcs, object);
             errdefer gchandleFree(vm.mono_funcs, handle);
             (try vm.push(Type)).* = .object;
@@ -2079,6 +2208,36 @@ const Value = union(enum) {
             .object_method => .object_method,
         };
     }
+
+    pub fn getMarshalConst(value: *const Value, kind: mono.TypeKind) union(enum) {
+        not_implemented: [:0]const u8,
+        overflow: struct {
+            value: i64,
+            int: std.builtin.Type.Int,
+        },
+        unexpected_type: struct {
+            expected: [:0]const u8,
+            actual: Type,
+        },
+        value: MarshalValue,
+    } {
+        switch (kind) {
+            .i4 => switch (value.*) {
+                .integer => |int| {
+                    const casted = std.math.cast(i32, int) orelse return .{ .overflow = .{
+                        .value = int,
+                        .int = .{ .signedness = .signed, .bits = 32 },
+                    } };
+                    return .{ .value = .{ .i4 = casted } };
+                },
+                else => return .{ .unexpected_type = .{ .expected = "an integer", .actual = value.getType() } },
+            },
+            else => {
+                std.log.err("todo: getMarshalConst mono type kind {t}", .{kind});
+                return .{ .not_implemented = "marshal this mono type" };
+            },
+        }
+    }
 };
 
 fn managedId(vm: *Vm, extent: Extent) error{Vm}!ManagedId {
@@ -2207,6 +2366,23 @@ const VmEat = struct {
             .keyword_break,
             .keyword_continue,
             => return .{ .loop_escape = first_token.end },
+            .keyword_set => {
+                const ref_end = try vm.evalReference(first_token.end);
+                const after_equal = blk: {
+                    const token = lex(vm.text, ref_end);
+                    if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
+                        .expected = "'=' to delimit set destination/source",
+                        .token = token,
+                    } });
+                    break :blk token.end;
+                };
+                const expr_first_token = lex(vm.text, after_equal);
+                const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
+                    .expected = "an expresson to follow '='",
+                    .token = expr_first_token,
+                } });
+                return .{ .statement_end = after_expr };
+            },
             .keyword_var => {
                 const after_id = try vm.eatToken(first_token.end, .identifier, "an identifier after 'var'");
                 const after_equal = try vm.eatToken(after_id, .@"=", "an '=' to initialize new var");
@@ -2229,10 +2405,38 @@ const VmEat = struct {
         }
 
         const expr_end = try vm.evalExpr(first_token) orelse return .{ .not_statement = first_token };
-        const next_token = lex(vm.text, expr_end);
-        if (next_token.tag != .@"=") return .{ .statement_end = expr_end };
+        return .{ .statement_end = expr_end };
+    }
 
-        @panic("todo");
+    fn evalReference(vm: VmEat, start: usize) error{Vm}!usize {
+        var offset: usize = blk: {
+            const token = lex(vm.text, start);
+            break :blk switch (token.tag) {
+                .identifier => token.end,
+                else => return vm.setError(.{ .unexpected_token = .{
+                    .expected = "an identifier to set",
+                    .token = token,
+                } }),
+            };
+        };
+        while (true) {
+            const after_dot = blk: {
+                const token = lex(vm.text, offset);
+                switch (token.tag) {
+                    .period => break :blk token.end,
+                    else => return offset,
+                }
+            };
+            const id_token = lex(vm.text, after_dot);
+            switch (id_token.tag) {
+                .identifier => {},
+                else => return vm.setError(.{ .unexpected_token = .{
+                    .expected = "an identifier after '.'",
+                    .token = id_token,
+                } }),
+            }
+            offset = id_token.end;
+        }
     }
 
     fn evalExpr(vm: VmEat, first_token: Token) error{Vm}!?usize {
@@ -2611,6 +2815,7 @@ const BinaryOp = enum {
             .keyword_fn,
             .keyword_if,
             .keyword_new,
+            .keyword_set,
             .keyword_var,
             .keyword_loop,
             .keyword_yield,
@@ -2682,6 +2887,7 @@ const Token = struct {
         keyword_fn,
         keyword_if,
         keyword_new,
+        keyword_set,
         keyword_var,
         keyword_loop,
         keyword_yield,
@@ -2698,6 +2904,7 @@ const Token = struct {
         .{ "if", .keyword_if },
         .{ "loop", .keyword_loop },
         .{ "new", .keyword_new },
+        .{ "set", .keyword_set },
         .{ "var", .keyword_var },
         .{ "yield", .keyword_yield },
     });
@@ -2741,6 +2948,7 @@ const TokenFmt = struct {
             .keyword_if => try writer.writeAll("the 'if' keyword"),
             .keyword_loop => try writer.writeAll("the 'loop' keyword"),
             .keyword_new => try writer.writeAll("the 'new' keyword"),
+            .keyword_set => try writer.writeAll("the 'set' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
             .keyword_yield => try writer.writeAll("the 'yield' keyword"),
         }
@@ -3051,9 +3259,14 @@ pub const Error = union(enum) {
         pos: usize,
         ignored_type: Type,
     },
-    // an identifier was assigned a void value
+    bare_assign: struct {
+        assign_pos: usize,
+    },
     void_assignment: struct {
-        id_extent: Extent,
+        kind: union(enum) {
+            var_id_extent: Extent,
+            ref_start: usize,
+        },
     },
     assign_type: struct {
         id_extent: Extent,
@@ -3078,6 +3291,11 @@ pub const Error = union(enum) {
         class: *const mono.Class,
         id_extent: Extent,
         arg_count: u16,
+    },
+    overflow: struct {
+        pos: usize,
+        value: i64,
+        int: std.builtin.Type.Int,
     },
     non_static_field: struct {
         id_extent: Extent,
@@ -3120,6 +3338,8 @@ pub const Error = union(enum) {
         pos: usize,
     },
     if_type: struct { pos: usize, type: ?Type },
+    assign_dest_nothing: struct { dest_pos: usize },
+    assign_src_nothing: struct { src_pos: usize },
     static_error: struct {
         pos: usize,
         string: [:0]const u8,
@@ -3246,13 +3466,23 @@ const ErrorFmt = struct {
                 "{d}: return value of type {t} was ignored, use @Discard to discard it",
                 .{ getLineNum(f.text, i.pos), i.ignored_type },
             ),
-            .void_assignment => |v| try writer.print(
-                "{d}: nothing was assigned to identifier '{s}'",
-                .{
-                    getLineNum(f.text, v.id_extent.start),
-                    f.text[v.id_extent.start..v.id_extent.end],
-                },
+            .bare_assign => |a| try writer.print(
+                "{d}: syntax error: '=' after expresion, might be missing 'var' or 'set'",
+                .{getLineNum(f.text, a.assign_pos)},
             ),
+            .void_assignment => |assign| switch (assign.kind) {
+                .var_id_extent => |id_extent| try writer.print(
+                    "{d}: identifier '{s}' was defined to nothing",
+                    .{
+                        getLineNum(f.text, id_extent.start),
+                        f.text[id_extent.start..id_extent.end],
+                    },
+                ),
+                .ref_start => |start| try writer.print(
+                    "{d}: cannot set nothing",
+                    .{getLineNum(f.text, start)},
+                ),
+            },
             .assign_type => |e| try writer.print(
                 "{d}: cannot assign {s} to identifier '{s}' which is {s}",
                 .{
@@ -3315,6 +3545,15 @@ const ErrorFmt = struct {
                     m.arg_count,
                 },
             ),
+            .overflow => |o| try writer.print(
+                "{d}: integer overflow, value {d} to {}-bit {t} integer",
+                .{
+                    getLineNum(f.text, o.pos),
+                    o.value,
+                    o.int.bits,
+                    o.int.signedness,
+                },
+            ),
             .non_static_field => |e| try writer.print(
                 "{d}: cannot access non-static field '{s}' on class, need an object",
                 .{
@@ -3374,6 +3613,14 @@ const ErrorFmt = struct {
                 "{d}: if conditional expression resulted in nothing",
                 .{getLineNum(f.text, e.pos)},
             ),
+            .assign_dest_nothing => |e| try writer.print(
+                "{d}: destination for '=' assignment evaluated to nothing",
+                .{getLineNum(f.text, e.dest_pos)},
+            ),
+            .assign_src_nothing => |e| try writer.print(
+                "{d}: source for '=' assignment evaluated to nothing",
+                .{getLineNum(f.text, e.src_pos)},
+            ),
             .static_error => |e| try writer.print(
                 "{d}: {s}",
                 .{ getLineNum(f.text, e.pos), e.string },
@@ -3383,14 +3630,12 @@ const ErrorFmt = struct {
     }
 };
 
+// temporary while we still support testing via monomock, might remove it
+pub var is_monomock: bool = false;
+
 pub fn runTests(mono_funcs: *const mono.Funcs) !void {
     try badCodeTests(mono_funcs);
     try goodCodeTests(mono_funcs);
-}
-
-test {
-    try badCodeTests(&monomock.funcs);
-    try goodCodeTests(&monomock.funcs);
 }
 
 fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: []const u8) !void {
@@ -3398,7 +3643,7 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
 
     var test_domain: TestDomain = undefined;
     test_domain.init(mono_funcs);
-    defer test_domain.deinit(mono_funcs);
+    defer test_domain.deinit();
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
@@ -3436,7 +3681,7 @@ fn testBadCode(mono_funcs: *const mono.Funcs, text: []const u8, expected_error: 
 }
 
 fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
-    try testBadCode(mono_funcs, "var example_id = @Nothing()", "1: nothing was assigned to identifier 'example_id'");
+    try testBadCode(mono_funcs, "var example_id = @Nothing()", "1: identifier 'example_id' was defined to nothing");
     try testBadCode(mono_funcs, "@Nothing", "1: syntax error: expected a '(' to start the builtin args but got EOF");
     try testBadCode(mono_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
     try testBadCode(mono_funcs, "fn @Nothing()", "1: syntax error: expected an identifier after 'fn' but got the builtin function '@Nothing'");
@@ -3496,8 +3741,21 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "@Log(9_223_372_036_854_775_807+0)");
     try testBadCode(mono_funcs, "9_223_372_036_854_775_807+1", "1: i64 overflow from '+' operator on 9223372036854775807 and 1");
     try testBadCode(mono_funcs, "foo=0", "1: undefined identifier 'foo'");
-    try testBadCode(mono_funcs, "fn foo(){}foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
-    try testBadCode(mono_funcs, "var foo = \"hello\" foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
+    try testBadCode(mono_funcs, "set 0 0", "1: syntax error: expected an identifier to set but got a number literal 0");
+    // TODO: Reference should *maybe* support function calls which would make this not a syntax error
+    try testBadCode(mono_funcs, "set @Nothing() 0", "1: syntax error: expected an identifier to set but got the builtin function '@Nothing'");
+    try testBadCode(mono_funcs, "set a = 0", "1: undefined identifier 'a'");
+    try testBadCode(mono_funcs, "var a = 0 set a", "1: syntax error: expected '=' to delimit set destination/source but got EOF");
+    try testBadCode(mono_funcs, "var a = 0 set a 0", "1: syntax error: expected '=' to delimit set destination/source but got a number literal 0");
+    try testBadCode(mono_funcs, "var a = 0 set a =", "1: syntax error: expected an expresson to follow '=' but got EOF");
+    try testBadCode(mono_funcs, "var a = 0 set a = @Nothing()", "1: cannot set nothing");
+    try testBadCode(mono_funcs, "var a = 0 set a = \"hello\"", "1: cannot assign a string literal to identifier 'a' which is an integer");
+    try testBadCode(mono_funcs, "var a = 0 a = 0", "1: syntax error: '=' after expresion, might be missing 'var' or 'set'");
+    try testBadCode(mono_funcs, "fn foo(){}set foo=0", "1: cannot assign an integer to identifier 'foo' which is a function");
+    try testBadCode(mono_funcs, "var foo = \"hello\" set foo=0", "1: cannot assign an integer to identifier 'foo' which is a string literal");
+    try testBadCode(mono_funcs, "var a = 0 set a.", "1: syntax error: expected an identifier after '.' but got EOF");
+    try testBadCode(mono_funcs, "var a = 0 set a. = 0", "1: syntax error: expected an identifier after '.' but got an equal '=' character");
+
     try testBadCode(mono_funcs, "if", "1: syntax error: expected a '(' to start the if conditional but got EOF");
     try testBadCode(mono_funcs, "if()", "1: syntax error: expected an expression inside the if conditional but got a close paren ')'");
     try testBadCode(mono_funcs, "if(0", "1: syntax error: expected a ')' to finish the if conditional but got EOF");
@@ -3517,8 +3775,8 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
-        \\@Log(Decimal.flags)
-    , "3: cannot access non-static field 'flags' on class, need an object");
+        \\@Log(Decimal.hi)
+    , "3: cannot access non-static field 'hi' on class, need an object");
     try testBadCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
@@ -3549,20 +3807,35 @@ fn badCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testBadCode(mono_funcs,
         \\@TryAssembly("does not exist").foo
     , "1: field 'foo' accessed on NULL object");
+    try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\var now = DateTime.get_Now()
+        \\set now.does_not_exist = 0
+    , "4: missing field 'does_not_exist'");
+    try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var String = @Class(mscorlib.System.String)
+        \\var s = String.Empty
+        \\set s.Empty = 0
+    , "4: cannot access static field 'Empty' on an object, need a class");
+    if (!is_monomock) try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Decimal = @Class(mscorlib.System.Decimal)
+        \\var decimal = Decimal.Parse("0")
+        \\set decimal.hi = 2147483648
+    , "4: integer overflow, value 2147483648 to 32-bit signed integer");
+    if (!is_monomock) try testBadCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Decimal = @Class(mscorlib.System.Decimal)
+        \\var decimal = Decimal.Parse("0")
+        \\set decimal.hi = "hello"
+    , "4: expected an integer but got a string literal");
 }
 
 const TestDomain = struct {
-    mock_domain: if (is_test) monomock.Domain else void,
     thread: *const mono.Thread,
     pub fn init(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
-        if (is_test) {
-            if (mono_funcs == &monomock.funcs) {
-                std.debug.assert(null == mono_funcs.domain_get());
-                self.mock_domain = .{};
-                monomock.setRootDomain(&self.mock_domain);
-            }
-        }
-
         const root_domain = mono_funcs.get_root_domain() orelse @panic(
             "mono_get_root_domain returned null",
         );
@@ -3574,14 +3847,7 @@ const TestDomain = struct {
         // what we expect after attaching our thread to it
         std.debug.assert(mono_funcs.domain_get() == root_domain);
     }
-    pub fn deinit(self: *TestDomain, mono_funcs: *const mono.Funcs) void {
-        if (is_test) {
-            if (mono_funcs == &monomock.funcs) {
-                mono_funcs.thread_detach(self.thread);
-                monomock.unsetRootDomain(&self.mock_domain);
-                self.mock_domain.deinit();
-            }
-        }
+    pub fn deinit(self: *TestDomain) void {
         self.* = undefined;
     }
 };
@@ -3591,7 +3857,7 @@ fn testCode(mono_funcs: *const mono.Funcs, text: []const u8) !void {
 
     var test_domain: TestDomain = undefined;
     test_domain.init(mono_funcs);
-    defer test_domain.deinit(mono_funcs);
+    defer test_domain.deinit();
 
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
@@ -3639,8 +3905,8 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
     try testCode(mono_funcs, "fn foo(){}@Discard(foo)");
     try testCode(mono_funcs, "fn foo(){}foo()");
     try testCode(mono_funcs, "fn foo(x) { }");
-    try testCode(mono_funcs, "var a = 0 a = 1 @Log(\"a is now \", a)");
-    try testCode(mono_funcs, "var a = 0 a = 1234 @Log(\"a is now \", a)");
+    try testCode(mono_funcs, "var a = 0 set a = 1 @Log(\"a is now \", a)");
+    try testCode(mono_funcs, "var a = 0 set a = 1234 @Log(\"a is now \", a)");
     if (false) try testCode(mono_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n
@@ -3714,7 +3980,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\loop
         \\  @Log("default continue loop: ", counter)
         \\  yield 0
-        \\  counter = counter + 1
+        \\  set counter = counter + 1
         \\  if (counter == 5) { break }
         \\continue
     );
@@ -3723,7 +3989,7 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\loop
         \\  @Log("default break loop: ", counter)
         \\  yield 0
-        \\  counter = counter + 1
+        \\  set counter = counter + 1
         \\  if (counter < 5) { continue }
         \\break
     );
@@ -3737,42 +4003,42 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
     );
-    try testCode(mono_funcs,
+    if (!is_monomock) try testCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
         \\@Log("now=", now)
-        \\@Log("now._dateData=", now._dateData)
-        \\//@Log(now.ToString())
+        \\@LogClass(DateTime)
+        \\// can't log _dateData as it doesn't always fit in an i64
+        \\//@Log("now._dateData=", now._dateData)
+        \\@Log(now.ToString())
     );
     try testCode(mono_funcs,
         \\var counter = 0
         \\loop
         \\  @Log("first loop, counter=", counter)
         \\  yield 0
-        \\  counter = counter + 1
+        \\  set counter = counter + 1
         \\  if (counter == 3) { break }
         \\continue
-        \\counter=0
+        \\set counter=0
         \\loop
         \\  @Log("second loop, counter=", counter)
         \\  yield 0
-        \\  counter = counter + 1
+        \\  set counter = counter + 1
         \\  if (counter == 7) { break }
         \\continue
     );
     if (false) try testCode(mono_funcs, "@ToString(1234)");
     try testCode(mono_funcs, "@Assert(0 == 1 - 1)");
-    // disabled for now because monomock static strings are returning slice
-    // pointers instead of a pointer to a MockObject representing a managed string
-    if (false) try testCode(mono_funcs,
+    try testCode(mono_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var String = @Class(mscorlib.System.String)
         \\@Assert(@NotNull(String.Empty))
     );
     try testCode(mono_funcs,
         \\@Assert(@IsNull(@TryAssembly("doesnotexist")))
-        \\var mocktest = @TryAssembly("mocktest2")
+        \\var mocktest = @TryAssembly("mocktest")
         \\if (@IsNull(mocktest)) { @Exit() }
         \\var MockTest = @Class(mocktest.MockTest)
         \\@Assert(@NotNull(MockTest.static_field_string))
@@ -3787,15 +4053,28 @@ fn goodCodeTests(mono_funcs: *const mono.Funcs) !void {
         \\if (1) { var null_obj = 0 }
         \\if (0) { var null_obj = 0 }
     );
+    try testCode(mono_funcs,
+        \\var x = 0
+        \\if (0) {
+        \\    set x = 1
+        \\}
+        \\@Assert(x == 0)
+    );
+    if (!is_monomock) try testCode(mono_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Decimal = @Class(mscorlib.System.Decimal)
+        \\var decimal = Decimal.Parse("0")
+        \\set decimal.hi = 0
+        \\@Assert(decimal.hi == 0)
+        \\set decimal.hi = 1
+        \\@Assert(decimal.hi == 1)
+    );
 }
 
 const monolog = std.log.scoped(.mono);
 const gchandlelog = std.log.scoped(.mono_gchandle);
 
-const is_test = @import("builtin").is_test;
-
 const std = @import("std");
 const logfile = @import("logfile.zig");
 const mono = @import("mono.zig");
-const monomock = if (is_test) @import("monomock.zig") else struct {};
 const Memory = @import("Memory.zig");

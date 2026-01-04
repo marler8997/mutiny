@@ -134,18 +134,8 @@ pub export fn _DllMainCRTStartup(
 //     return 0; // EXCEPTION_CONTINUE_SEARCH
 // }
 
-const DotNetKind = enum {
-    mono,
-    il2cpp,
-    pub fn dllName(kind: DotNetKind) [:0]const u8 {
-        return switch (kind) {
-            .mono => mono_dll_name,
-            .il2cpp => il2cpp_dll_name,
-        };
-    }
-};
 const DotNetLib = struct {
-    kind: DotNetKind,
+    kind: dotnet.Kind,
     module: win32.HINSTANCE,
 };
 fn getDotNet(arg: struct {
@@ -156,7 +146,7 @@ fn getDotNet(arg: struct {
 
     std.log.info(
         "attempting to load either {s} or {s} with {} second timeout",
-        .{ mono_dll_name, il2cpp_dll_name, arg.timeout_seconds },
+        .{ dotnet.dll_name_mono, dotnet.dll_name_il2cpp, arg.timeout_seconds },
     );
 
     while (true) {
@@ -181,29 +171,27 @@ fn getDotNet(arg: struct {
     }
 }
 
-const mono_dll_name = "mono-2.0-bdwgc.dll";
 fn initMono() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(mono_dll_name))) |mono_mod|
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_mono))) |mono_mod|
         return mono_mod;
     switch (win32.GetLastError()) {
         .ERROR_MOD_NOT_FOUND => {
-            std.log.info("{s}: not found yet...", .{mono_dll_name});
+            std.log.info("{s}: not found yet...", .{dotnet.dll_name_mono});
             return null;
         },
-        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ mono_dll_name, e }),
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_mono, e }),
     }
 }
 
-const il2cpp_dll_name = "GameAssembly.dll";
 fn initIl2cpp() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(il2cpp_dll_name))) |mod|
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_il2cpp))) |mod|
         return mod;
     switch (win32.GetLastError()) {
         .ERROR_MOD_NOT_FOUND => {
-            std.log.info("{s}: not found yet...", .{il2cpp_dll_name});
+            std.log.info("{s}: not found yet...", .{dotnet.dll_name_il2cpp});
             return null;
         },
-        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ il2cpp_dll_name, e }),
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_il2cpp, e }),
     }
 }
 
@@ -245,7 +233,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     const dotnet_funcs: dotnet.Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
-        break :blk dotnet.Funcs.init(&missing_proc, dotnet_lib.module) catch {
+        break :blk dotnet.Funcs.init(&missing_proc, dotnet_lib.kind, dotnet_lib.module) catch {
             _ = fmtMsgbox(
                 .{ .ICONHAND = 1 },
                 "Mutiny Fatal Error",
@@ -280,7 +268,10 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     std.Thread.sleep(std.time.ns_per_s * 1);
 
     // sanity check, this should be null before we call thread_attach
-    std.debug.assert(dotnet_funcs.domain_get() == null);
+    switch (dotnet_lib.kind) {
+        .mono => std.debug.assert(dotnet_funcs.domain_get() == null),
+        .il2cpp => {}, // this crashes on il2cpp
+    }
 
     // std.log.info("Attaching thread to dotnet domain...", .{});
     const thread = dotnet_funcs.thread_attach(root_domain) orelse {

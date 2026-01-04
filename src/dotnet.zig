@@ -1,3 +1,7 @@
+pub const Kind = dotnetkind.Kind;
+pub const dll_name_mono = dotnetkind.dll_name_mono;
+pub const dll_name_il2cpp = dotnetkind.dll_name_il2cpp;
+
 pub const Domain = opaque {};
 pub const Thread = opaque {};
 pub const Assembly = opaque {};
@@ -10,27 +14,69 @@ pub const VTable = opaque {};
 pub const ClassField = opaque {};
 pub const Type = opaque {};
 pub const Object = opaque {};
-// V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
-// pub const GcHandleV1 = enum(u32) { null = 0, _ };
+// V1 of the GC handle API will will crash if you call get_target on a
+// new handle on the game "PEAK" which uses mono.
+pub const GcHandleV1 = enum(u32) {
+    null = 0,
+    _,
+    pub fn fromV2(handle: GcHandleV2) GcHandleV1 {
+        return @enumFromInt(@intFromEnum(handle));
+    }
+    pub fn toV2(handle: GcHandleV1) GcHandleV2 {
+        return @enumFromInt(@intFromEnum(handle));
+    }
+};
 pub const GcHandleV2 = enum(usize) { null = 0, _ };
 pub const String = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
+
+const MonoFuncs = struct {
+    assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
+    assembly_get_name: *const fn (*const Assembly) callconv(.c) ?*const AssemblyName,
+    assembly_name_get_name: *const fn (*const AssemblyName) callconv(.c) ?[*:0]const u8,
+    class_vtable: *const fn (*const Domain, *const Class) callconv(.c) *const VTable,
+    field_static_get_value: *const fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void,
+    field_static_set_value: *const fn (*const VTable, *const ClassField, value: *const anyopaque) callconv(.c) void,
+    method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
+    signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
+    signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
+    // V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
+    // gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
+    // gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
+    // gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
+    gchandle_new_v2: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV2,
+    gchandle_free_v2: *const fn (handle: GcHandleV2) callconv(.c) void,
+    gchandle_get_target_v2: *const fn (handle: GcHandleV2) callconv(.c) *const Object,
+    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+};
+
+const Il2cppFuncs = struct {
+    domain_get_assemblies: *const fn (*const Domain, size: *usize) callconv(.c) [*]const *const Assembly,
+    image_get_name: *const fn (*const Image) callconv(.c) [*:0]const u8,
+    assembly_get_image: *const fn (*const Assembly) callconv(.c) *const Image,
+    field_static_get_value: *const fn (*const ClassField, out_value: *anyopaque) callconv(.c) void,
+    field_static_set_value: *const fn (*const ClassField, value: *const anyopaque) callconv(.c) void,
+    method_get_return_type: *const fn (*const Method) callconv(.c) ?*const Type,
+    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV1,
+    gchandle_free: *const fn (handle: GcHandleV1) callconv(.c) void,
+    gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
+};
 
 pub const Funcs = struct {
     get_root_domain: *const fn () callconv(.c) ?*const Domain,
     domain_get: *const fn () callconv(.c) ?*const Domain,
     thread_attach: *const fn (*const Domain) callconv(.c) ?*const Thread,
     thread_detach: *const fn (*const Thread) callconv(.c) void,
-    // domain_assembly_open: *const fn (*const Domain, [*:0]const u8) callconv(.c) ?*const Assembly,
 
-    assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
-    assembly_get_name: *const fn (*const Assembly) callconv(.c) ?*const AssemblyName,
+    kind: union(Kind) {
+        mono: MonoFuncs,
+        il2cpp: Il2cppFuncs,
+    },
+
     assembly_get_image: *const fn (*const Assembly) callconv(.c) ?*const Image,
-    assembly_name_get_name: *const fn (*const AssemblyName) callconv(.c) ?[*:0]const u8,
 
     class_from_name: *const fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class,
-    class_vtable: *const fn (*const Domain, *const Class) callconv(.c) *const VTable,
     class_get_name: *const fn (*const Class) callconv(.c) [*:0]const u8,
     class_get_namespace: *const fn (*const Class) callconv(.c) [*:0]const u8,
     class_get_fields: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const ClassField,
@@ -41,18 +87,12 @@ pub const Funcs = struct {
     field_get_flags: *const fn (*const ClassField) callconv(.c) ClassFieldFlags,
     field_get_name: *const fn (*const ClassField) callconv(.c) [*:0]const u8,
     field_get_type: *const fn (*const ClassField) callconv(.c) *const Type,
-    field_static_get_value: *const fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void,
-    field_static_set_value: *const fn (*const VTable, *const ClassField, value: *const anyopaque) callconv(.c) void,
     field_get_value: *const fn (*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
     field_set_value: *const fn (*const Object, *const ClassField, value: *const anyopaque) callconv(.c) void,
 
     method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
     method_get_name: *const fn (*const Method) callconv(.c) [*:0]const u8,
-    method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
     method_get_class: *const fn (*const Method) callconv(.c) ?*const Class,
-
-    signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
-    signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
 
     type_get_type: *const fn (*const Type) callconv(.c) TypeKind,
 
@@ -60,70 +100,77 @@ pub const Funcs = struct {
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
     object_get_class: *const fn (*const Object) callconv(.c) *const Class,
 
-    // V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
-    // gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
-    // gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
-    // gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
-    gchandle_new_v2: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV2,
-    gchandle_free_v2: *const fn (handle: GcHandleV2) callconv(.c) void,
-    gchandle_get_target_v2: *const fn (handle: GcHandleV2) callconv(.c) *const Object,
-
     runtime_invoke: *const fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
 
-    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
     string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
     string_chars: *const fn (*const String) callconv(.c) [*]const u16,
     string_length: *const fn (*const String) callconv(.c) c_int,
 
     free: *const fn (*anyopaque) callconv(.c) void,
-    pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
+    pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
-            .get_root_domain = try dotnetload.get(mod, .get_root_domain, proc_ref),
-            .domain_get = try dotnetload.get(mod, .domain_get, proc_ref),
-            .thread_attach = try dotnetload.get(mod, .thread_attach, proc_ref),
-            .thread_detach = try dotnetload.get(mod, .thread_detach, proc_ref),
-            // .domain_assembly_open = try dotnetload.get(mod, .domain_assembly_open, proc_ref),
-            .assembly_foreach = try dotnetload.get(mod, .assembly_foreach, proc_ref),
-            .assembly_get_name = try dotnetload.get(mod, .assembly_get_name, proc_ref),
-            .assembly_get_image = try dotnetload.get(mod, .assembly_get_image, proc_ref),
-            .assembly_name_get_name = try dotnetload.get(mod, .assembly_name_get_name, proc_ref),
-            .class_from_name = try dotnetload.get(mod, .class_from_name, proc_ref),
-            .class_vtable = try dotnetload.get(mod, .class_vtable, proc_ref),
-            .class_get_name = try dotnetload.get(mod, .class_get_name, proc_ref),
-            .class_get_namespace = try dotnetload.get(mod, .class_get_namespace, proc_ref),
-            .class_get_fields = try dotnetload.get(mod, .class_get_fields, proc_ref),
-            .class_get_methods = try dotnetload.get(mod, .class_get_methods, proc_ref),
-            .class_get_method_from_name = try dotnetload.get(mod, .class_get_method_from_name, proc_ref),
-            .class_get_field_from_name = try dotnetload.get(mod, .class_get_field_from_name, proc_ref),
-            .field_get_flags = try dotnetload.get(mod, .field_get_flags, proc_ref),
-            .field_get_name = try dotnetload.get(mod, .field_get_name, proc_ref),
-            .field_get_type = try dotnetload.get(mod, .field_get_type, proc_ref),
-            .field_static_get_value = try dotnetload.get(mod, .field_static_get_value, proc_ref),
-            .field_static_set_value = try dotnetload.get(mod, .field_static_set_value, proc_ref),
-            .field_get_value = try dotnetload.get(mod, .field_get_value, proc_ref),
-            .field_set_value = try dotnetload.get(mod, .field_set_value, proc_ref),
-            .method_get_name = try dotnetload.get(mod, .method_get_name, proc_ref),
-            .method_signature = try dotnetload.get(mod, .method_signature, proc_ref),
-            .method_get_flags = try dotnetload.get(mod, .method_get_flags, proc_ref),
-            .method_get_class = try dotnetload.get(mod, .method_get_class, proc_ref),
-            .signature_get_return_type = try dotnetload.get(mod, .signature_get_return_type, proc_ref),
-            .signature_get_params = try dotnetload.get(mod, .signature_get_params, proc_ref),
-            .type_get_type = try dotnetload.get(mod, .type_get_type, proc_ref),
-            .object_new = try dotnetload.get(mod, .object_new, proc_ref),
-            .object_unbox = try dotnetload.get(mod, .object_unbox, proc_ref),
-            .object_get_class = try dotnetload.get(mod, .object_get_class, proc_ref),
-            // .gchandle_new = try dotnetload.get(mod, .gchandle_new, proc_ref),
-            // .gchandle_free = try dotnetload.get(mod, .gchandle_free, proc_ref),
-            // .gchandle_get_target = try dotnetload.get(mod, .gchandle_get_target, proc_ref),
-            .gchandle_new_v2 = try dotnetload.get(mod, .gchandle_new_v2, proc_ref),
-            .gchandle_free_v2 = try dotnetload.get(mod, .gchandle_free_v2, proc_ref),
-            .gchandle_get_target_v2 = try dotnetload.get(mod, .gchandle_get_target_v2, proc_ref),
-            .runtime_invoke = try dotnetload.get(mod, .runtime_invoke, proc_ref),
-            .string_to_utf8 = try dotnetload.get(mod, .string_to_utf8, proc_ref),
-            .string_new_len = try dotnetload.get(mod, .string_new_len, proc_ref),
-            .string_chars = try dotnetload.get(mod, .string_chars, proc_ref),
-            .string_length = try dotnetload.get(mod, .string_length, proc_ref),
-            .free = try dotnetload.get(mod, .free, proc_ref),
+            .get_root_domain = try funcs.monoGet(mod, .get_root_domain, proc_ref),
+            .domain_get = try funcs.monoGet(mod, .domain_get, proc_ref),
+            .thread_attach = try funcs.monoGet(mod, .thread_attach, proc_ref),
+            .thread_detach = try funcs.monoGet(mod, .thread_detach, proc_ref),
+            .assembly_get_image = try funcs.sharedGet(kind, mod, .assembly_get_image, proc_ref),
+            .class_from_name = try funcs.sharedGet(kind, mod, .class_from_name, proc_ref),
+            .class_get_name = try funcs.monoGet(mod, .class_get_name, proc_ref),
+            .class_get_namespace = try funcs.monoGet(mod, .class_get_namespace, proc_ref),
+            .class_get_fields = try funcs.sharedGet(kind, mod, .class_get_fields, proc_ref),
+            .class_get_methods = try funcs.monoGet(mod, .class_get_methods, proc_ref),
+            .class_get_method_from_name = try funcs.sharedGet(kind, mod, .class_get_method_from_name, proc_ref),
+            .class_get_field_from_name = try funcs.sharedGet(kind, mod, .class_get_field_from_name, proc_ref),
+            .field_get_flags = try funcs.sharedGet(kind, mod, .field_get_flags, proc_ref),
+            .field_get_name = try funcs.monoGet(mod, .field_get_name, proc_ref),
+            .field_get_type = try funcs.monoGet(mod, .field_get_type, proc_ref),
+            .field_get_value = try funcs.sharedGet(kind, mod, .field_get_value, proc_ref),
+            .field_set_value = try funcs.monoGet(mod, .field_set_value, proc_ref),
+            .method_get_name = try funcs.monoGet(mod, .method_get_name, proc_ref),
+            .method_get_flags = try funcs.monoGet(mod, .method_get_flags, proc_ref),
+            .method_get_class = try funcs.monoGet(mod, .method_get_class, proc_ref),
+            .type_get_type = try funcs.monoGet(mod, .type_get_type, proc_ref),
+            .object_new = try funcs.sharedGet(kind, mod, .object_new, proc_ref),
+            .object_unbox = try funcs.sharedGet(kind, mod, .object_unbox, proc_ref),
+            .object_get_class = try funcs.sharedGet(kind, mod, .object_get_class, proc_ref),
+            // .gchandle_new = try funcs.monoGet(mod, .gchandle_new, proc_ref),
+            // .gchandle_free = try funcs.monoGet(mod, .gchandle_free, proc_ref),
+            // .gchandle_get_target = try funcs.monoGet(mod, .gchandle_get_target, proc_ref),
+            .runtime_invoke = try funcs.sharedGet(kind, mod, .runtime_invoke, proc_ref),
+            .string_new_len = try funcs.sharedGet(kind, mod, .string_new_len, proc_ref),
+            .string_chars = try funcs.monoGet(mod, .string_chars, proc_ref),
+            .string_length = try funcs.monoGet(mod, .string_length, proc_ref),
+            .free = try funcs.sharedGet(kind, mod, .free, proc_ref),
+            .kind = switch (kind) {
+                .mono => .{ .mono = .{
+                    .assembly_foreach = try mono_funcs.monoGet(mod, .assembly_foreach, proc_ref),
+                    .assembly_get_name = try mono_funcs.monoGet(mod, .assembly_get_name, proc_ref),
+                    .assembly_name_get_name = try mono_funcs.monoGet(mod, .assembly_name_get_name, proc_ref),
+                    .class_vtable = try mono_funcs.monoGet(mod, .class_vtable, proc_ref),
+                    .field_static_get_value = try mono_funcs.monoGet(mod, .field_static_get_value, proc_ref),
+                    .field_static_set_value = try mono_funcs.monoGet(mod, .field_static_set_value, proc_ref),
+                    .method_signature = try mono_funcs.monoGet(mod, .method_signature, proc_ref),
+                    .signature_get_return_type = try mono_funcs.monoGet(mod, .signature_get_return_type, proc_ref),
+                    .signature_get_params = try mono_funcs.monoGet(mod, .signature_get_params, proc_ref),
+                    .gchandle_new_v2 = try mono_funcs.monoGet(mod, .gchandle_new_v2, proc_ref),
+                    .gchandle_free_v2 = try mono_funcs.monoGet(mod, .gchandle_free_v2, proc_ref),
+                    .gchandle_get_target_v2 = try mono_funcs.monoGet(mod, .gchandle_get_target_v2, proc_ref),
+                    .string_to_utf8 = try mono_funcs.monoGet(mod, .string_to_utf8, proc_ref),
+                } },
+                .il2cpp => .{
+                    .il2cpp = .{
+                        .domain_get_assemblies = try il2cpp_funcs.il2cppGet(mod, .domain_get_assemblies, proc_ref),
+                        .image_get_name = try il2cpp_funcs.il2cppGet(mod, .image_get_name, proc_ref),
+                        .assembly_get_image = try il2cpp_funcs.il2cppGet(mod, .assembly_get_image, proc_ref),
+                        .field_static_get_value = try il2cpp_funcs.il2cppGet(mod, .field_static_get_value, proc_ref),
+                        .field_static_set_value = try il2cpp_funcs.il2cppGet(mod, .field_static_set_value, proc_ref),
+                        .method_get_return_type = try il2cpp_funcs.il2cppGet(mod, .method_get_return_type, proc_ref),
+                        .gchandle_new = try il2cpp_funcs.il2cppGet(mod, .gchandle_new, proc_ref),
+                        .gchandle_free = try il2cpp_funcs.il2cppGet(mod, .gchandle_free, proc_ref),
+                        .gchandle_get_target = try il2cpp_funcs.il2cppGet(mod, .gchandle_get_target, proc_ref),
+                    },
+                },
+            },
         };
     }
 };
@@ -217,4 +264,8 @@ pub const TypeKind = enum(c_int) {
 };
 
 const win32 = @import("win32").everything;
-const dotnetload = @import("dotnetload.zig").template(Funcs);
+const dotnetkind = @import("dotnetkind.zig");
+
+const funcs = @import("dotnetload.zig").template(Funcs);
+const mono_funcs = @import("dotnetload.zig").template(MonoFuncs);
+const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppFuncs);

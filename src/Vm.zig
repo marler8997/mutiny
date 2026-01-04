@@ -1056,12 +1056,19 @@ fn callMethod(
         .id_extent = method_id_extent,
         .arg_count = args.count,
     } });
-    const method_sig = vm.dotnet_funcs.method_signature(method) orelse @panic(
-        "method has no signature?", // impossible right?
-    );
-    const return_type = vm.dotnet_funcs.signature_get_return_type(method_sig) orelse @panic(
-        "method has no return type?", // impossible right?
-    );
+    const return_type = blk: switch (vm.dotnet_funcs.kind) {
+        .mono => |*mono| {
+            const method_sig = mono.method_signature(method) orelse @panic(
+                "method has no signature?", // impossible right?
+            );
+            break :blk mono.signature_get_return_type(method_sig) orelse @panic(
+                "method has no return type?", // impossible right?
+            );
+        },
+        .il2cpp => |*il2cpp| break :blk il2cpp.method_get_return_type(method) orelse @panic(
+            "method has no return type?", // impossible right?
+        ),
+    };
     var managed_args_buf: [max_arg_count]*anyopaque = undefined;
 
     var next_arg_addr = args_addr;
@@ -1300,11 +1307,17 @@ fn pushMonoField(
         .msg = "class field of this type",
     } });
     switch (method) {
-        .static => vm.dotnet_funcs.field_static_get_value(
-            vm.dotnet_funcs.class_vtable(vm.dotnet_funcs.domain_get().?, class),
-            field,
-            value.getPtr(),
-        ),
+        .static => switch (vm.dotnet_funcs.kind) {
+            .mono => |*mono| mono.field_static_get_value(
+                mono.class_vtable(vm.dotnet_funcs.domain_get().?, class),
+                field,
+                value.getPtr(),
+            ),
+            .il2cpp => |*il2cpp| il2cpp.field_static_get_value(
+                field,
+                value.getPtr(),
+            ),
+        },
         .instance => |obj| vm.dotnet_funcs.field_get_value(
             obj,
             field,
@@ -1638,6 +1651,8 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
     return text_offset;
 }
 
+const dll_suffix = ".dll";
+
 fn evalBuiltin(
     vm: *Vm,
     builtin_extent: Extent,
@@ -1671,10 +1686,33 @@ fn evalBuiltin(
             _ = vm.mem.discardFrom(args_addr);
         },
         .@"@LogAssemblies" => {
-            var context: LogAssemblies = .{ .vm = vm, .index = 0 };
-            std.log.info("mono_assembly_foreach:", .{});
-            vm.dotnet_funcs.assembly_foreach(&logAssemblies, &context);
-            std.log.info("mono_assembly_foreach done", .{});
+            switch (vm.dotnet_funcs.kind) {
+                .mono => |*mono| {
+                    var context: LogAssemblies = .{ .vm = vm, .index = 0 };
+                    std.log.info("mono_assembly_foreach:", .{});
+                    mono.assembly_foreach(&logAssembliesMono, &context);
+                    std.log.info("mono_assembly_foreach done", .{});
+                },
+                .il2cpp => |*il2cpp| {
+                    var assembly_count: usize = undefined;
+                    const assemblies = il2cpp.domain_get_assemblies(
+                        vm.dotnet_funcs.domain_get().?,
+                        &assembly_count,
+                    );
+                    for (0..assembly_count) |i| {
+                        const assembly = assemblies[i];
+                        const image = il2cpp.assembly_get_image(assembly);
+                        const image_name = std.mem.span(il2cpp.image_get_name(image));
+                        if (std.mem.eql(u8, image_name, "__Generated")) continue;
+                        if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
+                            "expected all image names to end with '.dll' but got '{s}'",
+                            .{image_name},
+                        );
+                        const name = image_name[0 .. image_name.len - dll_suffix.len];
+                        std.log.info("  assembly[{}] name='{s}'", .{ i, name });
+                    }
+                },
+            }
         },
         .@"@LogClass" => {
             const class = switch (vm.pop(args_addr)) {
@@ -1711,34 +1749,20 @@ fn evalBuiltin(
                 .string_literal => |e| e,
                 else => unreachable,
             };
-            var context: FindAssembly = .{
-                .vm = vm,
-                .index = 0,
-                .needle = vm.text[extent.start + 1 .. extent.end - 1],
-                .match = null,
-            };
-            vm.dotnet_funcs.assembly_foreach(&findAssembly, &context);
-            const match = context.match orelse return vm.setError(
+            const assembly = try vm.findAssembly(extent) orelse return vm.setError(
                 .{ .assembly_not_found = extent },
             );
             (try vm.push(Type)).* = .assembly;
-            (try vm.push(*const dotnet.Assembly)).* = match;
+            (try vm.push(*const dotnet.Assembly)).* = assembly;
         },
         .@"@TryAssembly" => {
             const extent = switch (vm.pop(args_addr)) {
                 .string_literal => |e| e,
                 else => unreachable,
             };
-            var context: FindAssembly = .{
-                .vm = vm,
-                .index = 0,
-                .needle = vm.text[extent.start + 1 .. extent.end - 1],
-                .match = null,
-            };
-            vm.dotnet_funcs.assembly_foreach(&findAssembly, &context);
-            if (context.match) |match| {
+            if (try vm.findAssembly(extent)) |assembly| {
                 (try vm.push(Type)).* = .assembly;
-                (try vm.push(*const dotnet.Assembly)).* = match;
+                (try vm.push(*const dotnet.Assembly)).* = assembly;
             } else {
                 (try vm.push(Type)).* = .null_assembly;
                 (try vm.push(usize)).* = extent.start;
@@ -1969,7 +1993,10 @@ fn writeObject(
                 var value: ?*dotnet.Object = null;
                 dotnet_funcs.field_get_value(obj, field, @ptrCast(&value));
                 if (value) |str_obj| {
-                    const c_str = dotnet_funcs.string_to_utf8(@ptrCast(str_obj));
+                    const c_str = switch (dotnet_funcs.kind) {
+                        .mono => |*mono| mono.string_to_utf8(@ptrCast(str_obj)),
+                        .il2cpp => @panic("il2cpp string_to_utf8"),
+                    };
                     if (c_str) |s| {
                         defer dotnet_funcs.free(@ptrCast(@constCast(s)));
                         try writer.print("\"{s}\"", .{std.mem.span(s)});
@@ -2623,21 +2650,57 @@ fn executeBinaryOp(
     (try vm.push(i64)).* = value;
 }
 
-const FindAssembly = struct {
+fn findAssembly(vm: *Vm, extent: Extent) error{Vm}!?*const dotnet.Assembly {
+    const needle = vm.text[extent.start + 1 .. extent.end - 1];
+    switch (vm.dotnet_funcs.kind) {
+        .mono => |*mono| {
+            var context: FindAssemblyMono = .{
+                .vm = vm,
+                .index = 0,
+                .needle = needle,
+                .match = null,
+            };
+            mono.assembly_foreach(&findAssemblyMono, &context);
+            return context.match;
+        },
+        .il2cpp => |*il2cpp| {
+            var assembly_count: usize = undefined;
+            const assemblies = il2cpp.domain_get_assemblies(
+                vm.dotnet_funcs.domain_get().?,
+                &assembly_count,
+            );
+            for (0..assembly_count) |i| {
+                const assembly = assemblies[i];
+                const image = il2cpp.assembly_get_image(assembly);
+                const image_name = std.mem.span(il2cpp.image_get_name(image));
+                if (std.mem.eql(u8, image_name, "__Generated")) continue;
+                if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
+                    "expected all image names to end with '.dll' but got '{s}'",
+                    .{image_name},
+                );
+                const name = image_name[0 .. image_name.len - dll_suffix.len];
+                std.log.info("comparing '{s}' to '{s}'", .{ needle, name });
+                if (std.mem.eql(u8, needle, name)) return assembly;
+            }
+            return null;
+        },
+    }
+}
+const FindAssemblyMono = struct {
     vm: *Vm,
     index: usize,
     needle: []const u8,
     match: ?*const dotnet.Assembly,
 };
-fn findAssembly(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
+fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
     const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
-    const ctx: *FindAssembly = @ptrCast(@alignCast(user_data));
+    const ctx: *FindAssemblyMono = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
-    const name = ctx.vm.dotnet_funcs.assembly_get_name(assembly) orelse {
+    const name = ctx.vm.dotnet_funcs.kind.mono.assembly_get_name(assembly) orelse {
         std.log.err("  assembly[{}] get name failed", .{ctx.index});
         return;
     };
-    const str = ctx.vm.dotnet_funcs.assembly_name_get_name(name) orelse {
+    const str = ctx.vm.dotnet_funcs.kind.mono.assembly_name_get_name(name) orelse {
         std.log.err(
             "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
             .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
@@ -2655,15 +2718,15 @@ const LogAssemblies = struct {
     vm: *Vm,
     index: usize,
 };
-fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
+fn logAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
     const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
     const ctx: *LogAssemblies = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
-    const name = ctx.vm.dotnet_funcs.assembly_get_name(assembly) orelse {
+    const name = ctx.vm.dotnet_funcs.kind.mono.assembly_get_name(assembly) orelse {
         std.log.err("  assembly[{}] get name failed", .{ctx.index});
         return;
     };
-    const str = ctx.vm.dotnet_funcs.assembly_name_get_name(name) orelse {
+    const str = ctx.vm.dotnet_funcs.kind.mono.assembly_name_get_name(name) orelse {
         std.log.err(
             "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
             .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
@@ -2674,7 +2737,10 @@ fn logAssemblies(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.
 }
 
 fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) dotnet.GcHandleV2 {
-    const handle = dotnet_funcs.gchandle_new_v2(object, 0);
+    const handle: dotnet.GcHandleV2 = switch (dotnet_funcs.kind) {
+        .mono => |*mono| mono.gchandle_new_v2(object, 0),
+        .il2cpp => |*il2cpp| il2cpp.gchandle_new(object, 0).toV2(),
+    };
     gchandlelog.info("new  {*} {}", .{ object, handle });
     if (handle == .null) {
         std.log.err("NULL HANDLE?!? from ptr {*}", .{object});
@@ -2683,7 +2749,10 @@ fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) 
 
     const sanity_check = true;
     if (sanity_check) {
-        const target: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
+        const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
+            .mono => |*mono| mono.gchandle_get_target_v2(handle),
+            .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
+        };
         std.debug.assert(target != null);
         // if (target == object) {
         //     std.log.info("  --> target object still matches", .{});
@@ -2697,14 +2766,23 @@ fn gchandleFree(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) vo
     gchandlelog.info("free {}", .{handle});
     std.debug.assert(handle != .null);
     {
-        const target: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
+        const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
+            .mono => |*mono| mono.gchandle_get_target_v2(handle),
+            .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
+        };
         std.debug.assert(target != null);
         // gchandlelog.info("    --> free target is {*}", .{target.?});
     }
-    dotnet_funcs.gchandle_free_v2(handle);
+    switch (dotnet_funcs.kind) {
+        .mono => |*mono| mono.gchandle_free_v2(handle),
+        .il2cpp => |*il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
+    }
 }
 fn gchandleTarget(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) *const dotnet.Object {
-    const obj: ?*const dotnet.Object = dotnet_funcs.gchandle_get_target_v2(handle);
+    const obj: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
+        .mono => |*mono| mono.gchandle_get_target_v2(handle),
+        .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
+    };
     std.debug.assert(obj != null);
     gchandlelog.info("get_target {} > {*}", .{ handle, obj.? });
     return obj.?;
@@ -3819,13 +3897,15 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var s = String.Empty
         \\set s.Empty = 0
     , "4: cannot access static field 'Empty' on an object, need a class");
-    if (!is_monomock) try testBadCode(dotnet_funcs,
+    // il2cpp doesn't have Decimal.Parse
+    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
         \\set decimal.hi = 2147483648
     , "4: integer overflow, value 2147483648 to 32-bit signed integer");
-    if (!is_monomock) try testBadCode(dotnet_funcs,
+    // il2cpp doesn't have Decimal.Parse
+    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
@@ -3936,11 +4016,22 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\//example_obj = new Object()
         \\
     );
-    try testCode(dotnet_funcs,
+    // il2cpp doesn't have Console.Beep
+    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
+    );
+    // il2cpp doesn't have Console.WriteLine with no args
+    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Console = @Class(mscorlib.System.Console)
         \\Console.WriteLine()
+    );
+    try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Console = @Class(mscorlib.System.Console)
+        \\
         \\//Console.WriteLine("Hello")
         \\var Environment = @Class(mscorlib.System.Environment)
         \\@Discard(Environment.get_TickCount())
@@ -4060,7 +4151,8 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\}
         \\@Assert(x == 0)
     );
-    if (!is_monomock) try testCode(dotnet_funcs,
+    // il2cpp doesn't have Decimal.Parse
+    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")

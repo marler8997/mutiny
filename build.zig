@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) void {
 
     {
         const mock = b.addLibrary(.{
-            .name = "monomock",
+            .name = "mono-2.0-bdwgc",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/monomock.zig"),

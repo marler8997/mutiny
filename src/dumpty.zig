@@ -202,10 +202,12 @@ fn dumpClass(dotnet_funcs: *const dotnet.Funcs, writer: *std.Io.Writer, class: *
     {
         var iterator: ?*anyopaque = null;
         while (dotnet_funcs.class_get_fields(class, &iterator)) |field| {
+            const t = dotnet_funcs.field_get_type(field);
+            const type_kind = dotnet_funcs.type_get_type(t);
             const name = dotnet_funcs.field_get_name(field);
             const flags = dotnet_funcs.field_get_flags(field);
             const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            try writer.print(" - {s} field '{s}'\n", .{ stinst, name });
+            try writer.print(" - {s} field {t} name='{s}'\n", .{ stinst, type_kind, name });
         }
     }
     {

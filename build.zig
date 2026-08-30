@@ -94,7 +94,7 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "Mutiny",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/mutiny.zig"),
+                .root_source_file = b.path("src/gui.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
@@ -104,12 +104,19 @@ pub fn build(b: *std.Build) void {
             }),
             .win32_manifest = b.path("src/win32dpiaware.manifest"),
         });
+        const install = b.addInstallArtifact(exe, .{
+            // avoid collision bin the cli bin/mutiny[.exe]
+            .dest_dir = .{ .override = .prefix },
+        });
+        b.step("install-gui", "").dependOn(&install.step);
+        b.getInstallStep().dependOn(&install.step);
         exe.addWin32ResourceFile(.{
             .file = b.path("src/mutiny.rc"),
         });
         const run = b.addRunArtifact(exe);
+        run.step.dependOn(&install.step);
         if (b.args) |a| run.addArgs(a);
-        b.step("run", "").dependOn(&run.step);
+        b.step("run-gui", "").dependOn(&run.step);
     }
 
     const test_step = b.step("test", "");

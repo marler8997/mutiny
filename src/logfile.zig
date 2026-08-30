@@ -70,7 +70,7 @@ fn openLog() struct { std.fs.File, ?OpenLogError } {
     const log_path = switch (appdata.format(
         &path_buf,
         localappdata,
-        &.{ win32.L("mutiny"), game, win32.L("log") },
+        &.{ win32.L("mutiny"), win32.L("app"), game, win32.L("log") },
     )) {
         .ok => |p| p,
         .too_long => return .{ std.fs.File.stderr(), .{ .path_too_long = .{

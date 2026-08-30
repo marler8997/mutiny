@@ -119,7 +119,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
     const stdout_path = switch (appdata.format(
         &stdout_path_buf,
         localappdata,
-        &.{ win32.L("mutiny"), name, win32.L("stdout.txt") },
+        &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("stdout.txt") },
     )) {
         .ok => |p| p,
         .too_long => errExit("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),
@@ -128,7 +128,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
     const stderr_path = switch (appdata.format(
         &stderr_path_buf,
         localappdata,
-        &.{ win32.L("mutiny"), name, win32.L("stderr.txt") },
+        &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("stderr.txt") },
     )) {
         .ok => |p| p,
         .too_long => errExit("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),

@@ -79,11 +79,11 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
                 return;
             };
             var path_buf: [appdata.max_path]u16 = undefined;
-            // one subdirectory per game, each holding that game's log and mods
-            const games_path = switch (appdata.format(
+            // one subdirectory per app, each holding that app's log and mods
+            const apps_path = switch (appdata.format(
                 &path_buf,
                 localappdata,
-                &.{win32.L("mutiny")},
+                &.{ win32.L("mutiny"), win32.L("app") },
             )) {
                 .ok => |p| p,
                 .too_long => {
@@ -91,16 +91,16 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
                     return;
                 },
             };
-            lineOutFmt(&d, 0, "Games Folder: {f}", .{std.unicode.fmtUtf16Le(games_path)});
+            lineOutFmt(&d, 0, "Apps Folder: {f}", .{std.unicode.fmtUtf16Le(apps_path)});
 
             var dir = blk: {
-                const prefixed = std.os.windows.wToPrefixedFileW(null, games_path) catch |e| {
+                const prefixed = std.os.windows.wToPrefixedFileW(null, apps_path) catch |e| {
                     lineOutFmt(&d, 1, "bad path, {s}", .{@errorName(e)});
                     return;
                 };
                 break :blk std.fs.cwd().openDirW(prefixed.span(), .{ .iterate = true }) catch |e| {
                     lineOutFmt(&d, 1, "open '{f}' failed with {s}", .{
-                        std.unicode.fmtUtf16Le(games_path),
+                        std.unicode.fmtUtf16Le(apps_path),
                         @errorName(e),
                     });
                     return;

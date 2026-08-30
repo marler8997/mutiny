@@ -216,7 +216,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     const mods_path = switch (appdata.format(
         &mods_path_buf,
         localappdata,
-        &.{ win32.L("mutiny"), name, win32.L("mods") },
+        &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("mods") },
     )) {
         .ok => |p| p,
         .too_long => {

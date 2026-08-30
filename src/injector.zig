@@ -1,54 +1,37 @@
-pub fn main() !void {
-    var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    // no need to deinit
-    const arena = arena_instance.allocator();
-
-    const all_args = try std.process.argsAlloc(arena);
-    // no need to free
-
-    if (all_args.len <= 1) {
-        try std.fs.File.stderr().writeAll("Usage: injector.exe MUTINY_DLL [attach PID][start EXE...]\n");
-        std.process.exit(0xff);
-    }
-    const args = all_args[1..];
-    if (args.len < 2) {
-        std.log.err("expected at least 2 cmdline args but got {}", .{args.len});
-        std.process.exit(0xff);
-    }
-    const mutiny_dll_arg = args[0];
-    const kind_string = args[1];
-    const kind: union(enum) {
-        attach: u32,
-        start: struct {
-            exe: [:0]const u16,
-            args: []const [:0]const u8,
-            name: []const u16,
+pub fn startExe(
+    arena: std.mem.Allocator,
+    dll: []const u8,
+    exe: []const u8,
+) !void {
+    const exe_wide = try std.unicode.utf8ToUtf16LeAllocZ(arena, exe);
+    defer arena.free(exe_wide);
+    const name = getname.fromExe(exe_wide) catch |err| errExit("invalid exe '{f}' ({s})", .{
+        std.unicode.fmtUtf16Le(exe_wide), switch (err) {
+            error.Empty => "can't just be an empty string",
+            error.EndsInSeparator => "cannot end with a filesystem separator",
+            error.JustDotExe => "can't just be '.exe'",
         },
-    } = blk: {
-        if (std.mem.eql(u8, kind_string, "attach")) {
-            if (args.len < 3) errExit("missing the pid number after 'attach' on the cmdline", .{});
-            const pid_string = args[2];
-            const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit("invalid pid '{s}'", .{pid_string});
-            if (args.len > 3) errExit("too many cmdline args (nothing expected after pid number)", .{});
-            break :blk .{ .attach = pid };
-        }
-        if (std.mem.eql(u8, kind_string, "start")) {
-            const exe_ascii = args[2];
-            const exe_wide = try std.unicode.utf8ToUtf16LeAllocZ(arena, exe_ascii);
-            break :blk .{ .start = .{
-                .exe = exe_wide,
-                .args = args[3..],
-                .name = getname.fromExe(exe_wide) catch |err| errExit("invalid exe '{f}' ({s})", .{
-                    std.unicode.fmtUtf16Le(exe_wide), switch (err) {
-                        error.Empty => "can't just be an empty string",
-                        error.EndsInSeparator => "cannot end with a filesystem separator",
-                        error.JustDotExe => "can't just be '.exe'",
-                    },
-                }),
-            } };
-        }
-        errExit("expected 'attach' or 'start' cmdline arg but got '{s}'", .{kind_string});
-    };
+    });
+    try go(arena, dll, .{ .start = .{
+        .exe = exe_wide,
+        .name = name,
+    } });
+}
+pub fn inject(arena: std.mem.Allocator, dll: []const u8, pid: u32) !void {
+    try go(arena, dll, .{ .attach = pid });
+}
+
+const Kind = union(enum) {
+    attach: u32,
+    start: struct {
+        exe: [:0]const u16,
+        // args: []const [:0]const u8,
+        name: []const u16,
+    },
+};
+
+fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
+
     // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
     //       overriden by something else?
     std.fs.cwd().access(mutiny_dll_arg, .{}) catch |err| switch (err) {
@@ -81,10 +64,7 @@ pub fn main() !void {
             ) orelse errExit("OpenProcess pid {} failed, error={f}", .{ pid, win32.GetLastError() });
             break :blk .{ .created = false, .pid = pid, .process = process, .maybe_suspended_thread = null };
         },
-        .start => |start| {
-            if (start.args.len > 0) @panic("TODO: support extra exe cmdline args");
-            break :blk try createProcess(start.name, start.exe);
-        },
+        .start => |start| break :blk try createProcess(start.name, start.exe),
     };
     defer process.deinit();
     errdefer {
@@ -112,14 +92,6 @@ pub fn main() !void {
     }
 
     std.log.info("success", .{});
-}
-
-fn getDirname(path: []const u16) ?[]const u16 {
-    for (1..path.len) |i| {
-        if (path[path.len - i] == '\\')
-            return path[0 .. path.len - i];
-    }
-    return null;
 }
 
 const ProcessResult = struct {

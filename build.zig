@@ -41,7 +41,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{});
+    const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{
+        .dest_dir = .{ .override = .{ .custom = "appdata/dll" } },
+    });
     b.getInstallStep().dependOn(&install_mutiny_native_dll.step);
 
     const test_game_mono = b.addExecutable(.{
@@ -65,29 +67,30 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const injector = b.addExecutable(.{
-            .name = "injector",
+        const cli = b.addExecutable(.{
+            .name = "mutiny",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/injector.zig"),
+                .root_source_file = b.path("src/cli.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "win32", .module = win32_mod },
-                },
             }),
         });
-        const install = b.addInstallArtifact(injector, .{});
+        if (target.result.os.tag == .windows) {
+            cli.root_module.addImport("win32", win32_mod);
+        }
+        const install = b.addInstallArtifact(cli, .{
+            .dest_dir = .{ .override = .{ .custom = "appdata/bin" } },
+        });
+        install.step.dependOn(&install_mutiny_native_dll.step);
+        // install.step.dependOn(&install_mutiny_managed_dll.step);
+
         b.getInstallStep().dependOn(&install.step);
+        b.step("install-cli", "").dependOn(&install.step);
 
-        const run = b.addRunArtifact(injector);
+        const run = b.addRunArtifact(cli);
         run.step.dependOn(&install.step);
-        run.step.dependOn(&install_mutiny_native_dll.step);
-        // run.step.dependOn(&install_mutiny_managed_dll.step);
-        run.step.dependOn(&install_test_game_mono.step);
-
-        run.addArtifactArg(mutiny_native_dll);
-        run.addArtifactArg(test_game_mono);
-        b.step("testgame", "").dependOn(&run.step);
+        if (b.args) |a| run.addArgs(a);
+        b.step("cli", "").dependOn(&run.step);
     }
 
     {
@@ -105,8 +108,7 @@ pub fn build(b: *std.Build) void {
             .win32_manifest = b.path("src/win32dpiaware.manifest"),
         });
         const install = b.addInstallArtifact(exe, .{
-            // avoid collision bin the cli bin/mutiny[.exe]
-            .dest_dir = .{ .override = .prefix },
+            .dest_dir = .{ .override = .{ .custom = "appdata" } },
         });
         b.step("install-gui", "").dependOn(&install.step);
         b.getInstallStep().dependOn(&install.step);
@@ -116,7 +118,7 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
         if (b.args) |a| run.addArgs(a);
-        b.step("run-gui", "").dependOn(&run.step);
+        b.step("gui", "").dependOn(&run.step);
     }
 
     const test_step = b.step("test", "");

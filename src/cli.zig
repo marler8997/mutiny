@@ -2,7 +2,7 @@ const usage =
     \\Usage: mutiny COMMAND [ARGS...]
     \\
     \\Commands:
-    \\  list                       Unity games running, their runtime, and whether Mutiny is in them
+    \\  scan                       every process with a mono/il2cpp runtime, and whether Mutiny is in it
     \\  inject PID                 inject Mutiny.dll into a running game
     \\  start EXE [ARGS...]        launch a game with Mutiny.dll injected before it runs
     \\  run-script PID NAME        run scripts\SCRIPT in an injected game and print its output
@@ -21,23 +21,23 @@ pub fn main() !u8 {
         try std.fs.File.stderr().writeAll(usage);
         return 0xff;
     };
-    if (std.mem.eql(u8, command, "list")) return cmdList(arena, &args);
+    if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
     if (std.mem.eql(u8, command, "inject")) return cmdInject(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
     // if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
     errExit("unknown command '{s}'", .{command});
 }
 
-fn cmdList(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
-    noMoreArgs(args, "list");
-    return try clilist.go(arena);
+fn cmdScan(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
+    noMoreArgs(args, "scan");
+    return try cliscan.go(arena);
 }
 
 fn cmdInject(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     var maybe_dll: ?[]const u8 = null;
     const pid_string = blk: {
         while (true) {
-            const arg = args.next() orelse errExit("inject requires a PID (run 'mutiny list' to see what's running)", .{});
+            const arg = args.next() orelse errExit("inject requires a PID (run 'mutiny scan' to see what's running)", .{});
             if (!std.mem.startsWith(u8, arg, "-")) {
                 break :blk arg;
             } else if (std.mem.eql(u8, arg, "--dll")) {
@@ -119,5 +119,5 @@ fn oom(e: error{OutOfMemory}) noreturn {
 }
 
 const std = @import("std");
-const clilist = @import("clilist.zig");
+const cliscan = @import("cliscan.zig");
 const injector = @import("injector.zig");

@@ -7,8 +7,8 @@ A scriptable dll injector for modding Unity games.
 Launch the game like normal. At any point you can inject `Mutiny.dll`. This can be done via a CLI:
 
 ```sh
-# find your game/PID in the list
-mutiny list
+# scan every process to find a game/PID you want to inject
+mutiny scan
 
 # inject Mutiny.dll using the PID
 mutiny inject <PID>

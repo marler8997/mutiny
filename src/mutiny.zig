@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const zin = @import("zin");
 const win32 = zin.platform.win32;
+const appdata = @import("appdata.zig");
 
 pub const zin_config: zin.Config = .{
     .StaticWindowId = StaticWindowId,
@@ -56,7 +57,7 @@ pub fn main() !void {
 
     try zin.staticWindow(.main).create(.{
         .title = "Mutiny Game Mods",
-        .size = .{ .client_points = .{ .x = 300, .y = 200 } },
+        .size = .{ .client_points = .{ .x = 500, .y = 300 } },
         .pos = null,
     });
     defer zin.staticWindow(.main).destroy();
@@ -73,12 +74,37 @@ fn callback(cb: zin.Callback(.{ .static = .main })) void {
         .draw => |d| {
             d.clear();
 
-            const mods_path = "C:\\mutiny\\mods";
-            lineOut(&d, 0, "Mods Folder: " ++ mods_path);
-
-            var dir = std.fs.openDirAbsolute(mods_path, .{ .iterate = true }) catch |e| {
-                lineOutFmt(&d, 1, "open '{s}' failed with {s}", .{ mods_path, @errorName(e) });
+            const localappdata = appdata.get() orelse {
+                lineOut(&d, 0, "no LOCALAPPDATA environment variable");
                 return;
+            };
+            var path_buf: [appdata.max_path]u16 = undefined;
+            // one subdirectory per game, each holding that game's log and mods
+            const games_path = switch (appdata.format(
+                &path_buf,
+                localappdata,
+                &.{win32.L("mutiny")},
+            )) {
+                .ok => |p| p,
+                .too_long => {
+                    lineOutFmt(&d, 0, "LOCALAPPDATA ({} chars) is too long", .{localappdata.len});
+                    return;
+                },
+            };
+            lineOutFmt(&d, 0, "Games Folder: {f}", .{std.unicode.fmtUtf16Le(games_path)});
+
+            var dir = blk: {
+                const prefixed = std.os.windows.wToPrefixedFileW(null, games_path) catch |e| {
+                    lineOutFmt(&d, 1, "bad path, {s}", .{@errorName(e)});
+                    return;
+                };
+                break :blk std.fs.cwd().openDirW(prefixed.span(), .{ .iterate = true }) catch |e| {
+                    lineOutFmt(&d, 1, "open '{f}' failed with {s}", .{
+                        std.unicode.fmtUtf16Le(games_path),
+                        @errorName(e),
+                    });
+                    return;
+                };
             };
             defer dir.close();
 

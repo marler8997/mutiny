@@ -208,17 +208,25 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         },
     };
 
-    const max_name_wtf16 = 200;
-    if (name.len > max_name_wtf16) {
-        std.log.err("exe name '{f}' too long (max {})", .{ std.unicode.fmtUtf16Le(name), max_name_wtf16 });
+    const localappdata = appdata.get() orelse {
+        std.log.err("no LOCALAPPDATA environment variable, don't know where to find mods", .{});
         return 0xffffffff;
-    }
-
-    const ModsPathBuffer = MaxString(.wtf16, .yes_sentinel, &.{
-        .{ .static = win32.L("C:\\mutiny\\mods" ++ "\\") },
-        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name_wtf16 } },
-    });
-    const mods_path = ModsPathBuffer.format(.{ .exe_name = name });
+    };
+    var mods_path_buf: [appdata.max_path]u16 = undefined;
+    const mods_path = switch (appdata.format(
+        &mods_path_buf,
+        localappdata,
+        &.{ win32.L("mutiny"), name, win32.L("mods") },
+    )) {
+        .ok => |p| p,
+        .too_long => {
+            std.log.err(
+                "mods path too long (LOCALAPPDATA is {} chars, exe name '{f}' is {} chars",
+                .{ localappdata.len, std.unicode.fmtUtf16Le(name), name.len },
+            );
+            return 0xffffffff;
+        },
+    };
 
     // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
     //     std.log.info("AddVectoredExceptionHandler success", .{});
@@ -292,7 +300,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
         {
             const maybe_new_error = updateMods(
-                .{ .slice = mods_path.slice() },
+                .{ .slice = mods_path },
                 &dotnet_funcs,
                 scratch.allocator(),
                 &tests_scheduled,
@@ -300,7 +308,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             if (maybe_new_error) |*new_error| {
                 const same_error = if (last_update_mods_error) |*le| new_error.eql(le) else false;
                 if (!same_error) {
-                    new_error.log(mods_path.slice());
+                    new_error.log(mods_path);
                 }
             }
             last_update_mods_error = maybe_new_error;
@@ -797,8 +805,8 @@ fn fmtMsgbox(
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const appdata = @import("appdata.zig");
 const Mutex = @import("Mutex.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
-const MaxString = @import("maxstring.zig").MaxString;
 const dotnet = @import("dotnet.zig");

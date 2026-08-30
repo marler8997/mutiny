@@ -135,26 +135,37 @@ const ProcessResult = struct {
     }
 };
 
-const mutiny_started_dir = "C:\\mutiny\\started";
-
 fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
-    try std.fs.cwd().makePath(mutiny_started_dir);
+    const localappdata = appdata.get() orelse errExit(
+        "no LOCALAPPDATA environment variable",
+        .{},
+    );
 
-    const max_name = 100;
-    const name_truncated = name[0..@min(max_name, name.len)];
+    // these sit beside this game's log and mods, so the injector and the injected
+    // DLL agree on one directory per game
+    var stdout_path_buf: [appdata.max_path]u16 = undefined;
+    const stdout_path = switch (appdata.format(
+        &stdout_path_buf,
+        localappdata,
+        &.{ win32.L("mutiny"), name, win32.L("stdout.txt") },
+    )) {
+        .ok => |p| p,
+        .too_long => errExit("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),
+    };
+    var stderr_path_buf: [appdata.max_path]u16 = undefined;
+    const stderr_path = switch (appdata.format(
+        &stderr_path_buf,
+        localappdata,
+        &.{ win32.L("mutiny"), name, win32.L("stderr.txt") },
+    )) {
+        .ok => |p| p,
+        .too_long => errExit("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),
+    };
 
-    const StdoutPath = MaxString(.wtf16, .yes_sentinel, &.{
-        .{ .static = win32.L(mutiny_started_dir ++ "\\") },
-        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name } },
-        .{ .static = win32.L(".stdout.txt") },
-    });
-    const StderrPath = MaxString(.wtf16, .yes_sentinel, &.{
-        .{ .static = win32.L(mutiny_started_dir ++ "\\") },
-        .{ .runtime_wtf16 = .{ .name = "exe_name", .max_len = max_name } },
-        .{ .static = win32.L(".stderr.txt") },
-    });
-    const stdout_path = StdoutPath.format(.{ .exe_name = name_truncated });
-    const stderr_path = StderrPath.format(.{ .exe_name = name_truncated });
+    // makeDirs puts back every character it terminates over, so stdout_path survives
+    const game_dir_len = appdata.parentDirLen(stdout_path);
+    std.debug.assert(game_dir_len > 0);
+    if (appdata.makeDirs(&stdout_path_buf, game_dir_len)) |err| win32.panicWin32("CreateDirectory", err);
 
     var security_attrs: win32.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
@@ -164,7 +175,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
 
     const stdout_file: std.fs.File = .{
         .handle = win32.CreateFileW(
-            stdout_path.slice(),
+            stdout_path,
             .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
             .{ .READ = 1 },
             &security_attrs,
@@ -187,7 +198,7 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
 
     const stderr_file: std.fs.File = .{
         .handle = win32.CreateFileW(
-            stderr_path.slice(),
+            stderr_path,
             .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
             .{ .READ = 1 },
             &security_attrs,
@@ -356,4 +367,4 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 const std = @import("std");
 const win32 = @import("win32").everything;
 const getname = @import("getname.zig");
-const MaxString = @import("maxstring.zig").MaxString;
+const appdata = @import("appdata.zig");

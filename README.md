@@ -4,7 +4,17 @@ A scriptable dll injector for modding Unity games.
 
 # How
 
-Launch the game like normal. At any point you can inject `Mutiny.dll`. Once injected, Mutiny will continuously monitor the directory `C:\mutiny\mods\InsertGameNameHere` for script files and reload them when they change.
+Launch the game like normal. At any point you can inject `Mutiny.dll`. Once injected, Mutiny will continuously monitor the directory `%LOCALAPPDATA%\mutiny\InsertGameNameHere\mods` for script files and reload them when they change.
+
+Everything Mutiny writes lives under one directory per game, where the game name is its exe name without the extension:
+
+```
+%LOCALAPPDATA%\mutiny\<Game>\
+  log              what the injected DLL logs, including @Log output from your scripts
+  mods\<name>      your scripts, one VM each, re-run whenever the text changes
+  stdout.txt       captured only when the injector starts the game for you
+  stderr.txt
+```
 
 I'm working on a nice GUI app to inject `Mutiny.dll` but for now it's just a CLI, i.e.
 
@@ -17,7 +27,7 @@ I'm working on a nice GUI app to inject `Mutiny.dll` but for now it's just a CLI
 Here's a hacky example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".
 
 ```typescript
-// save this script to C:\mutiny\mods\REPO\godmode
+// save this script to %LOCALAPPDATA%\mutiny\REPO\mods\godmode
 var Steamworks = @Assembly("Facepunch.Steamworks.Win64")
 var SteamClient = @Class(Steamworks.Steamworks.SteamClient)
 

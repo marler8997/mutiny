@@ -55,14 +55,34 @@ pub const NameError = struct {
     }
 };
 
-const log_dir_path = if (builtin.os.tag == .windows) "C:\\mutiny" else "/tmp";
-const log_file_path = if (builtin.os.tag == .windows) "C:\\mutiny\\log" else "/tmp/mutinylog";
-
 fn openLog() struct { std.fs.File, ?OpenLogError } {
+    const localappdata = appdata.get() orelse return .{
+        std.fs.File.stderr(),
+        .missing_localappdata,
+    };
+
+    const game = switch (global.getName()) {
+        .success => |s| s,
+        .err => |err| return .{ std.fs.File.stderr(), .{ .name_error = err } },
+    };
+
+    var path_buf: [appdata.max_path]u16 = undefined;
+    const log_path = switch (appdata.format(
+        &path_buf,
+        localappdata,
+        &.{ win32.L("mutiny"), game, win32.L("log") },
+    )) {
+        .ok => |p| p,
+        .too_long => return .{ std.fs.File.stderr(), .{ .path_too_long = .{
+            .localappdata_len = localappdata.len,
+            .name_len = game.len,
+        } } },
+    };
+
     var first_attempt = true;
     while (true) : (first_attempt = false) {
         const handle = win32.CreateFileW(
-            win32.L(log_file_path),
+            log_path,
             .{ .FILE_APPEND_DATA = 1 }, // all writes append to end of file
             .{ .READ = 1 },
             null,
@@ -73,11 +93,14 @@ fn openLog() struct { std.fs.File, ?OpenLogError } {
         if (handle != win32.INVALID_HANDLE_VALUE) return .{ .{ .handle = handle }, null };
         const err = win32.GetLastError();
         if (!first_attempt) return .{ std.fs.File.stderr(), .{ .open_error = err } };
-        switch (win32.GetLastError()) {
+        switch (err) {
+            // first run for this game: %LOCALAPPDATA%\mutiny\<Game> doesn't exist yet
             .ERROR_PATH_NOT_FOUND => {
-                if (0 == win32.CreateDirectoryW(win32.L(log_dir_path), null)) return .{
+                const parent_dir_len = appdata.parentDirLen(log_path);
+                std.debug.assert(parent_dir_len > 0);
+                if (appdata.makeDirs(&path_buf, parent_dir_len)) |e| return .{
                     std.fs.File.stderr(),
-                    .{ .mkdir_error = win32.GetLastError() },
+                    .{ .mkdir_error = e },
                 };
             },
             else => return .{ std.fs.File.stderr(), .{ .open_error = err } },
@@ -89,12 +112,21 @@ const OpenFileError = if (builtin.os.tag == .windows) win32.WIN32_ERROR else std
 const MkdirError = if (builtin.os.tag == .windows) win32.WIN32_ERROR else std.fs.Dir.MakeError;
 
 pub const OpenLogError = union(enum) {
+    missing_localappdata,
+    name_error: NameError,
+    path_too_long: struct { localappdata_len: usize, name_len: usize },
     open_error: OpenFileError,
     mkdir_error: MkdirError,
     pub fn format(err: *const OpenLogError, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (err.*) {
-            .open_error => |e| try writer.print("open log file '{s}' failed, error={f}", .{ log_file_path, e }),
-            .mkdir_error => |e| try writer.print("mkdir '{s}' for log file, error={f}", .{ log_dir_path, e }),
+            .missing_localappdata => try writer.print("no LOCALAPPDATA environment variable", .{}),
+            .name_error => |e| try writer.print("{f}", .{&e}),
+            .path_too_long => |e| try writer.print(
+                "LOCALAPPDATA environment variable ({} chars) and or exe name ({} chars) is too long",
+                .{ e.localappdata_len, e.name_len },
+            ),
+            .open_error => |e| try writer.print("open log file failed, error={f}", .{e}),
+            .mkdir_error => |e| try writer.print("mkdir for log file, error={f}", .{e}),
         }
     }
 };
@@ -134,5 +166,6 @@ fn getImagePathName() ?[]const u16 {
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const appdata = @import("appdata.zig");
 const getname = @import("getname.zig");
 const Mutex = @import("Mutex.zig");

@@ -99,6 +99,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "zin", .module = zin_mod },
+                    .{ .name = "win32", .module = win32_mod },
                 },
             }),
             .win32_manifest = b.path("src/win32dpiaware.manifest"),

@@ -21,18 +21,17 @@ pub fn main() !u8 {
         try std.fs.File.stderr().writeAll(usage);
         return 0xff;
     };
-    // if (std.mem.eql(u8, command, "list")) return cmdList(arena, &args);
+    if (std.mem.eql(u8, command, "list")) return cmdList(arena, &args);
     if (std.mem.eql(u8, command, "inject")) return cmdInject(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
     // if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
     errExit("unknown command '{s}'", .{command});
 }
 
-// fn cmdList(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
-//     _ = arena;
-//     noMoreArgs(args, "list");
-//     errExit("todo: list", .{});
-// }
+fn cmdList(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
+    noMoreArgs(args, "list");
+    return try clilist.go(arena);
+}
 
 fn cmdInject(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     var maybe_dll: ?[]const u8 = null;
@@ -120,4 +119,5 @@ fn oom(e: error{OutOfMemory}) noreturn {
 }
 
 const std = @import("std");
+const clilist = @import("clilist.zig");
 const injector = @import("injector.zig");

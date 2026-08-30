@@ -207,11 +207,54 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             return 0xffffffff;
         },
     };
-
     const localappdata = appdata.get() orelse {
         std.log.err("no LOCALAPPDATA environment variable, don't know where to find mods", .{});
         return 0xffffffff;
     };
+
+    const mutex = blk: {
+        var mutex_name_buf: [40]u16 = undefined;
+        const mutex_name: [:0]u16 = blk_name: {
+            var buf_utf8: [40]u8 = undefined;
+            const utf8 = std.fmt.bufPrint(
+                &buf_utf8,
+                "Local\\mutiny-{}",
+                .{win32.GetCurrentProcessId()},
+            ) catch unreachable;
+            const mutex_name_len = std.unicode.wtf8ToWtf16Le(&mutex_name_buf, utf8) catch unreachable;
+            mutex_name_buf[mutex_name_len] = 0;
+            break :blk_name mutex_name_buf[0..mutex_name_len :0];
+        };
+
+        const mutex = win32.CreateMutexW(null, 0, mutex_name) orelse {
+            std.log.err("CreateMutex failed, error={f}", .{win32.GetLastError()});
+            return 0xffffffff;
+        };
+        switch (win32.WaitForSingleObject(mutex, 0)) {
+            @intFromEnum(win32.WAIT_OBJECT_0) => std.log.info("mutex '{f}' acquired", .{fmtW(mutex_name)}),
+            @intFromEnum(win32.WAIT_ABANDONED) => std.log.info(
+                "a previous Mutiny thread died here, taking over",
+                .{},
+            ),
+            @intFromEnum(win32.WAIT_TIMEOUT) => {
+                std.log.info("another Mutiny thread is already serving this process", .{});
+                return 0;
+            },
+            else => |result| {
+                std.log.err(
+                    "wait on mutex '{f}' failed, result={d}, error={f}",
+                    .{ fmtW(mutex_name), result, win32.GetLastError() },
+                );
+                return 0xffffffff;
+            },
+        }
+        break :blk mutex;
+    };
+    defer {
+        if (0 == win32.ReleaseMutex(mutex)) win32.panicWin32("ReleaseMutex", win32.GetLastError());
+        win32.closeHandle(mutex);
+    }
+
     var mods_path_buf: [appdata.max_path]u16 = undefined;
     const mods_path = switch (appdata.format(
         &mods_path_buf,
@@ -222,7 +265,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         .too_long => {
             std.log.err(
                 "mods path too long (LOCALAPPDATA is {} chars, exe name '{f}' is {} chars",
-                .{ localappdata.len, std.unicode.fmtUtf16Le(name), name.len },
+                .{ localappdata.len, fmtW(name), name.len },
             );
             return 0xffffffff;
         },
@@ -527,16 +570,16 @@ const UpdateModsError = union(enum) {
             .open_mods_dir_error => |e| switch (e) {
                 error.FileNotFound => std.log.info(
                     "no mods (directory '{f}' does not exist)",
-                    .{std.unicode.fmtUtf16Le(mods_path)},
+                    .{fmtW(mods_path)},
                 ),
                 else => |e2| std.log.err(
                     "open '{f}' failed with {t}",
-                    .{ std.unicode.fmtUtf16Le(mods_path), e2 },
+                    .{ fmtW(mods_path), e2 },
                 ),
             },
             .iterate_mods_dir_error => |e| std.log.err(
                 "iterate '{f}' failed with {t}",
-                .{ std.unicode.fmtUtf16Le(mods_path), e },
+                .{ fmtW(mods_path), e },
             ),
         }
     }
@@ -546,7 +589,7 @@ const ModsPath = struct {
     slice: if (builtin.os.tag == .windows) [:0]const u16 else [:0]const u8,
     pub fn format(path: ModsPath, writer: *std.Io.Writer) error{WriteFailed}!void {
         if (builtin.os.tag == .windows) {
-            try writer.print("{f}", .{std.unicode.fmtUtf16Le(path.slice)});
+            try writer.print("{f}", .{fmtW(path.slice)});
         } else {
             try writer.writeAll(path.slice);
         }
@@ -801,6 +844,8 @@ fn fmtMsgbox(
     //defer global.arena.free(msg);
     return win32.MessageBoxA(null, msg, title, style);
 }
+
+const fmtW = std.unicode.fmtUtf16Le;
 
 const builtin = @import("builtin");
 const std = @import("std");

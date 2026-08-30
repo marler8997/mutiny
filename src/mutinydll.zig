@@ -1,4 +1,5 @@
 const global = struct {
+    var hinstance: win32.HINSTANCE = undefined;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_dumping: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
@@ -76,10 +77,10 @@ pub export fn _DllMainCRTStartup(
     reason: u32,
     reserved: *anyopaque,
 ) callconv(.winapi) win32.BOOL {
-    _ = hinst;
     _ = reserved;
     switch (reason) {
         win32.DLL_PROCESS_ATTACH => {
+            global.hinstance = hinst;
             // !!! WARNING !!! do not log here...logging uses APIs that we probably
             // aren't supposed to call at this phase.
             if (false) win32.OutputDebugStringW(win32.L("mutiny: proces attach\n"));
@@ -95,7 +96,9 @@ pub export fn _DllMainCRTStartup(
             };
             win32.closeHandle(thread);
         },
-        win32.DLL_THREAD_ATTACH => {},
+        win32.DLL_THREAD_ATTACH => {
+            std.debug.assert(global.hinstance == hinst);
+        },
         win32.DLL_THREAD_DETACH => {},
         win32.DLL_PROCESS_DETACH => {
             // std.log.info("process detach", .{});
@@ -255,6 +258,46 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         win32.closeHandle(mutex);
     }
 
+    {
+        const wc: win32.WNDCLASSEXW = .{
+            .cbSize = @sizeOf(win32.WNDCLASSEXW),
+            .style = .{},
+            .lpfnWndProc = wndProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = global.hinstance,
+            .hIcon = null,
+            .hCursor = null,
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = win32.L(mutinywindow.class_name),
+            .hIconSm = null,
+        };
+        if (0 == win32.RegisterClassExW(&wc)) switch (win32.GetLastError()) {
+            .ERROR_CLASS_ALREADY_EXISTS => {
+                std.log.info("window class: already exists", .{});
+            },
+            else => |e| win32.panicWin32("RegisterClassEx", e),
+        } else {
+            std.log.info("window class: newly created", .{});
+        }
+    }
+    const hwnd = win32.CreateWindowExW(
+        .{},
+        win32.L(mutinywindow.class_name),
+        null,
+        .{},
+        0,
+        0,
+        0,
+        0,
+        win32.HWND_MESSAGE,
+        null,
+        global.hinstance,
+        null,
+    ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
+    std.log.info("window 0x{x} created", .{@intFromPtr(hwnd)});
+
     var mods_path_buf: [appdata.max_path]u16 = undefined;
     const mods_path = switch (appdata.format(
         &mods_path_buf,
@@ -339,6 +382,14 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     var last_update_mods_error: ?UpdateModsError = null;
 
     while (true) {
+        {
+            var msg: win32.MSG = undefined;
+            while (0 != win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE)) {
+                _ = win32.TranslateMessage(&msg);
+                _ = win32.DispatchMessageW(&msg);
+            }
+        }
+
         var tests_scheduled = false;
 
         {
@@ -384,7 +435,16 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             }
         }
         // std.log.info("sleep time ms {}", .{sleep_time_ms});
-        std.Thread.sleep(sleep_time_ms * std.time.ns_per_ms);
+        switch (win32.MsgWaitForMultipleObjectsEx(
+            0,
+            null,
+            @intCast(sleep_time_ms),
+            win32.QS_ALLINPUT,
+            .{},
+        )) {
+            @intFromEnum(win32.WAIT_OBJECT_0), @intFromEnum(win32.WAIT_TIMEOUT) => {},
+            else => win32.panicWin32("MsgWaitForMultipleObjectsEx", win32.GetLastError()),
+        }
     }
 
     return 0;
@@ -845,6 +905,15 @@ fn fmtMsgbox(
     return win32.MessageBoxA(null, msg, title, style);
 }
 
+fn wndProc(
+    hwnd: win32.HWND,
+    msg: u32,
+    wparam: win32.WPARAM,
+    lparam: win32.LPARAM,
+) callconv(.winapi) win32.LRESULT {
+    return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
 const fmtW = std.unicode.fmtUtf16Le;
 
 const builtin = @import("builtin");
@@ -852,6 +921,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const appdata = @import("appdata.zig");
 const Mutex = @import("Mutex.zig");
+const mutinywindow = @import("mutinywindow.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");

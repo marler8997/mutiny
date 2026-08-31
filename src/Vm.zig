@@ -2962,7 +2962,6 @@ fn findAssembly(vm: *Vm, extent: Extent) error{Vm}!?*const dotnet.Assembly {
                     .{image_name},
                 );
                 const name = image_name[0 .. image_name.len - dll_suffix.len];
-                std.log.info("comparing '{s}' to '{s}'", .{ needle, name });
                 if (std.mem.eql(u8, needle, name)) return assembly;
             }
             return null;

@@ -5,6 +5,32 @@ pub const wm_copydata_result: win32.LRESULT = 0x3b7e15a2;
 pub const wm_heartbeat = win32.WM_APP + 0;
 pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
+pub const max_string_len = std.math.maxInt(u16);
+
+pub const StringList = struct {
+    data: []const u16,
+    remaining: u16,
+
+    pub fn init(blob: []const u16) error{Malformed}!StringList {
+        if (blob.len == 0) return error.Malformed;
+        return .{ .data = blob[1..], .remaining = blob[0] };
+    }
+
+    pub fn next(list: *StringList) error{Malformed}!?[]const u16 {
+        if (list.remaining == 0) {
+            if (list.data.len != 0) return error.Malformed;
+            return null;
+        }
+        if (list.data.len == 0) return error.Malformed;
+        const len = list.data[0];
+        if (list.data.len < 1 + @as(usize, len)) return error.Malformed;
+        const string = list.data[1 .. 1 + @as(usize, len)];
+        list.data = list.data[1 + @as(usize, len) ..];
+        list.remaining -= 1;
+        return string;
+    }
+};
+
 pub const pipe_name_buf_len = 64;
 
 pub fn formatClientPipeName(buf: *[pipe_name_buf_len]u16, client_pid: u32) [:0]u16 {

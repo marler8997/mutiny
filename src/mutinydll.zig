@@ -465,6 +465,32 @@ const Run = union(enum) {
     builtin: Builtin,
 };
 
+fn parseBuiltin(
+    writer: *std.Io.Writer,
+    name: []const u8,
+    args: *mutinyipc.StringList,
+) error{ Reported, WriteFailed }!Builtin {
+    const builtin_script = std.meta.stringToEnum(
+        Builtin,
+        name[1..],
+    ) orelse return reportError(writer, "unknown builtin script '{s}'", .{name});
+
+    var arg_count: usize = 0;
+    while (args.next() catch return reportError(
+        writer,
+        "malformed run-script arguments",
+        .{},
+    )) |_| {
+        arg_count += 1;
+    }
+    if (arg_count != 0) return reportError(
+        writer,
+        "builtin script '{s}' takes no arguments but got {}",
+        .{ name, arg_count },
+    );
+    return builtin_script;
+}
+
 fn reportError(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) error{ WriteFailed, Reported } {
     writer.print(fmt ++ "\n", args) catch return error.WriteFailed;
     writer.flush() catch return error.WriteFailed;
@@ -476,6 +502,7 @@ fn addScript(
     pipe: win32.HANDLE,
     writer: *std.Io.Writer,
     name_w: []const u16,
+    args: *mutinyipc.StringList,
 ) error{ Reported, WriteFailed }!void {
     const name_utf8_len = std.unicode.calcWtf8Len(name_w);
     if (name_utf8_len > 255) return reportError(
@@ -512,14 +539,17 @@ fn addScript(
     }
 
     const run: Run = blk: {
-        if (name[0] == '@') {
-            const builtin_script = std.meta.stringToEnum(Builtin, name[1..]) orelse return reportError(
-                writer,
-                "unknown builtin script '{s}'",
-                .{name},
-            );
-            break :blk .{ .builtin = builtin_script };
-        }
+        if (name[0] == '@') break :blk .{ .builtin = try parseBuiltin(writer, name, args) };
+
+        if (args.next() catch return reportError(
+            writer,
+            "malformed run-script arguments",
+            .{},
+        )) |_| return reportError(
+            writer,
+            "script '{s}' was given arguments but scripts do not take arguments yet",
+            .{name},
+        );
 
         const localappdata = appdata.get() orelse return reportError(
             writer,
@@ -1289,7 +1319,21 @@ fn wndProc(
                 return 0x7fffffff;
             }
             const script_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
-            const script: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
+            const request: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
+            var strings = mutinyipc.StringList.init(request) catch {
+                std.log.info("malformed run-script request", .{});
+                return 0x7fffffff;
+            };
+            const script = blk: {
+                const maybe_name = strings.next() catch {
+                    std.log.info("malformed run-script request strings", .{});
+                    return 0x7fffffff;
+                };
+                break :blk maybe_name orelse {
+                    std.log.info("run-script request has no script name", .{});
+                    return 0x7fffffff;
+                };
+            };
             const pid: u32 = std.math.cast(u32, wparam) orelse {
                 std.log.info("WM_COPYDATA wParam {} is not a valid 32-bit pid", .{wparam});
                 return 0x7fffffff;
@@ -1324,7 +1368,7 @@ fn wndProc(
             var pipe_write_buf: [400]u8 = undefined;
             var pipe_writer = pipe_file.writerStreaming(&pipe_write_buf);
             const writer = &pipe_writer.interface;
-            if (addScript(pid, pipe, writer, script)) {
+            if (addScript(pid, pipe, writer, script, &strings)) {
                 pipe_owned = false;
             } else |e| switch (e) {
                 error.Reported => return mutinyipc.wm_copydata_result,

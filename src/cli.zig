@@ -118,7 +118,6 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         "'{s}' looks like a path, pass just the name of a file in the scripts directory",
         .{script},
     );
-    noMoreArgs(args, "run-script");
 
     const hwnd = mutinyipc.findWindow(pid) orelse errExit(
         "pid {} has no mutiny window (is Mutiny.dll injected?)",
@@ -143,14 +142,29 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     );
     defer win32.closeHandle(pipe);
 
-    const script_w = std.unicode.wtf8ToWtf16LeAlloc(arena, script) catch |err| switch (err) {
-        error.InvalidWtf8 => errExit("script name '{s}' is not valid UTF-8", .{script}),
-        error.OutOfMemory => |e| oom(e),
+    const request = blk: {
+        var size_args = args.*;
+        var count: usize = 1;
+        var len: usize = 1 + 1 + wtf16Len(script);
+        while (size_args.next()) |arg| {
+            count += 1;
+            len += 1 + wtf16Len(arg);
+        }
+        if (count > std.math.maxInt(u16)) errExit("too many arguments ({})", .{count});
+
+        const buf = arena.alloc(u16, len) catch |e| oom(e);
+        buf[0] = @intCast(count);
+        var offset: usize = 1;
+        offset += writeString(buf[offset..], script);
+        while (args.next()) |arg| offset += writeString(buf[offset..], arg);
+        std.debug.assert(offset == len);
+        break :blk buf;
     };
+
     const copy_data: win32.COPYDATASTRUCT = .{
         .dwData = mutinyipc.wm_copydata_run_script,
-        .cbData = @intCast(script_w.len * 2),
-        .lpData = @ptrCast(@constCast(script_w.ptr)),
+        .cbData = @intCast(request.len * 2),
+        .lpData = @ptrCast(request.ptr),
     };
     const result = win32.SendMessageW(
         hwnd,
@@ -186,6 +200,31 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         }
     }
     return 0;
+}
+
+fn wtf16Len(utf8: []const u8) usize {
+    return std.unicode.calcWtf16LeLen(utf8) catch errExit(
+        "'{s}' is not valid UTF-8",
+        .{utf8},
+    );
+}
+
+fn wtf16Encode(buf: []u16, utf8: []const u8) usize {
+    return std.unicode.wtf8ToWtf16Le(buf, utf8) catch errExit(
+        "'{s}' is not valid UTF-8",
+        .{utf8},
+    );
+}
+
+fn writeString(buf: []u16, utf8: []const u8) usize {
+    const len = wtf16Len(utf8);
+    if (len > mutinyipc.max_string_len) errExit(
+        "'{s}' is {} characters, too long (max {})",
+        .{ utf8, len, mutinyipc.max_string_len },
+    );
+    buf[0] = @intCast(len);
+    std.debug.assert(len == wtf16Encode(buf[1..], utf8));
+    return 1 + len;
 }
 
 fn noMoreArgs(args: *std.process.ArgIterator, command: []const u8) void {

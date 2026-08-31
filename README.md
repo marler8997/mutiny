@@ -12,6 +12,9 @@ mutiny scan
 
 # inject Mutiny.dll using the PID
 mutiny inject <PID>
+
+# run a one-off script and print what it logs
+mutiny run-script <PID> <NAME>
 ```
 
 Once injected, Mutiny will continuously monitor the directory `%LOCALAPPDATA%\mutiny\app\InsertGameNameHere\mods` for script files and reload them when they change.
@@ -22,9 +25,12 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              what the injected DLL logs, including @Log output from your scripts
   mods\<name>      your scripts, one VM each, re-run whenever the text changes
+  scripts\<name>   one-off scripts, inert until you ask for them by name
   stdout.txt       captured only when Mutiny starts the game for you
   stderr.txt
 ```
+
+The difference between the two directories is *when they run*, not what's in them — both hold the same script language. A file in `mods\` runs by itself and re-runs whenever you edit it, which is what you want for a persistent effect like godmode. A file in `scripts\` does nothing until `mutiny run-script` names it, and its output comes back to your terminal instead of only going to the log, which is what you want for a one-off question like "which assemblies are loaded".
 
 # Example Script
 

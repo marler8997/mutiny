@@ -148,6 +148,7 @@ pub fn main() !void {
         } else {
             std.log.err("    no error trace", .{});
         }
+        std.process.exit(0xff);
     };
     std.log.info("dotnet-test: success", .{});
 }

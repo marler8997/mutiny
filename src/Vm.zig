@@ -43,6 +43,7 @@ const ReturnStorage = struct {
 
 const Type = enum {
     integer,
+    float,
     string_literal,
     managed_string,
     script_function,
@@ -60,6 +61,7 @@ const Type = enum {
     pub fn what(t: Type) []const u8 {
         return switch (t) {
             .integer => "an integer",
+            .float => "a float",
             .string_literal => "a string literal",
             // .c_string => "a string",
             .managed_string => "a managed string",
@@ -77,6 +79,7 @@ const Type = enum {
     pub fn canMarshal(t: Type) bool {
         return switch (t) {
             .integer => true,
+            .float => true,
             .string_literal => true,
             .managed_string => true,
             // to send a function like a callback, I think we'll want some
@@ -874,6 +877,7 @@ fn evalExprSuffix(
             const expr_type_ptr, const value_addr = vm.readPointer(Type, expr_addr);
             return switch (expr_type_ptr.*) {
                 .integer,
+                .float,
                 .string_literal,
                 // .c_string,
                 .managed_string,
@@ -1071,6 +1075,7 @@ fn callMethod(
         ),
     };
     var managed_args_buf: [max_arg_count]*anyopaque = undefined;
+    var managed_arg_storage: [max_arg_count]MarshalValue = undefined;
 
     var next_arg_addr = args_addr;
     for (0..args.count) |arg_index| {
@@ -1079,7 +1084,45 @@ fn callMethod(
         //       address of the value in memory
         const arg_value, next_arg_addr = vm.readAnyValue(arg_type, value_addr);
         managed_args_buf[arg_index] = blk: switch (arg_value) {
-            .integer => break :blk vm.mem.toPointer(i64, value_addr),
+            .float => |f| {
+                const target = vm.paramTypeKind(method, arg_index);
+                switch (target) {
+                    .r4 => managed_arg_storage[arg_index] = .{
+                        .r4 = narrowF64ToF32(f) orelse return vm.setError(.{ .lossy_conversion = .{
+                            .pos = after_lparen,
+                            .value = .{ .float = f },
+                            .target = target,
+                        } }),
+                    },
+                    .r8 => managed_arg_storage[arg_index] = .{ .r8 = f },
+                    else => {
+                        std.log.info("TODO: pass a float to a '{t}' parameter", .{target});
+                        return vm.setError(.{ .not_implemented = "pass a float to this parameter type" });
+                    },
+                }
+                break :blk managed_arg_storage[arg_index].getPtr();
+            },
+            .integer => |i| {
+                const target = vm.paramTypeKind(method, arg_index);
+                switch (target) {
+                    .r4 => managed_arg_storage[arg_index] = .{
+                        .r4 = exactI64ToF32(i) orelse return vm.setError(.{ .lossy_conversion = .{
+                            .pos = after_lparen,
+                            .value = .{ .integer = i },
+                            .target = target,
+                        } }),
+                    },
+                    .r8 => managed_arg_storage[arg_index] = .{
+                        .r8 = exactI64ToF64(i) orelse return vm.setError(.{ .lossy_conversion = .{
+                            .pos = after_lparen,
+                            .value = .{ .integer = i },
+                            .target = target,
+                        } }),
+                    },
+                    else => break :blk vm.mem.toPointer(i64, value_addr),
+                }
+                break :blk managed_arg_storage[arg_index].getPtr();
+            },
             .string_literal => |extent| {
                 const slice = vm.text[extent.start + 1 .. extent.end - 1];
                 const str = vm.dotnet_funcs.string_new_len(
@@ -1193,6 +1236,8 @@ const MonoObjectType = enum {
 const MarshalValue = union(enum) {
     boolean: c_int,
     i4: i32,
+    r4: f32,
+    r8: f64,
     u8: u64,
     maybe_object: ?*dotnet.Object,
     // string: *dotnet.Object,
@@ -1209,11 +1254,11 @@ const MarshalValue = union(enum) {
             // .i2 => .{ .i2 = undefined },
             // .u2 => .{ .u2 = undefined },
             .i4 => .{ .i4 = undefined },
+            .r4 => .{ .r4 = undefined },
+            .r8 => .{ .r8 = undefined },
             // .u4 => .{ .u4 = undefined },
             // .i8 => .{ .i8 = undefined },
             .u8 => .{ .u8 = undefined },
-            // .r4 => .{ .r4 = undefined },
-            // .r8 => .{ .r8 = undefined },
             // .string => .{ .string = undefined },
             .string => .{ .maybe_object = undefined },
             // .ptr => .{ .ptr = undefined },
@@ -1223,7 +1268,7 @@ const MarshalValue = union(enum) {
             // .genericinst => .{ .genericinst = undefined },
             .genericinst => .{ .maybe_object = undefined },
             .object => .{ .maybe_object = undefined },
-            .char, .i1, .u1, .i2, .u2, .u4, .i8, .r4, .r8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+            .char, .i1, .u1, .i2, .u2, .u4, .i8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
                 std.log.warn("unsure if type '{s}' should be supported (MarshalValue)", .{@tagName(t)});
                 return null;
             },
@@ -1250,6 +1295,14 @@ fn pushMarshalValue(vm: *Vm, class: *const dotnet.Class, value: *const MarshalVa
         .i4 => {
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = value.i4;
+        },
+        .r4 => {
+            (try vm.push(Type)).* = .float;
+            (try vm.push(f64)).* = value.r4;
+        },
+        .r8 => {
+            (try vm.push(Type)).* = .float;
+            (try vm.push(f64)).* = value.r8;
         },
         .u8 => {
             const value_i64: i64 = std.math.cast(i64, value.u8) orelse return vm.setError(.{
@@ -1340,6 +1393,16 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = unboxed.*;
         },
+        .r4 => {
+            const unboxed: *align(1) f32 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
+            (try vm.push(Type)).* = .float;
+            (try vm.push(f64)).* = unboxed.*;
+        },
+        .r8 => {
+            const unboxed: *align(1) f64 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
+            (try vm.push(Type)).* = .float;
+            (try vm.push(f64)).* = unboxed.*;
+        },
         .string => {
             // 0 means we don't require pinning
             const handle = gchandleNew(vm.dotnet_funcs, object);
@@ -1367,6 +1430,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             (try vm.push(Type)).* = .integer;
             const value_ptr = vm.mem.toPointer(i64, value_addr);
             (try vm.push(i64)).* = value_ptr.*;
+        },
+        .float => {
+            (try vm.push(Type)).* = .float;
+            const value_ptr = vm.mem.toPointer(f64, value_addr);
+            (try vm.push(f64)).* = value_ptr.*;
         },
         .string_literal => {
             (try vm.push(Type)).* = .string_literal;
@@ -1934,6 +2002,7 @@ fn logValues(
             const value, next_addr = vm.readAnyValue(value_type, next_addr);
             switch (value) {
                 .integer => |i| try writer.print("{d}", .{i}),
+                .float => |f| try writer.print("{d}", .{f}),
                 .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
                 .managed_string => |gc_handle| {
                     const str_obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
@@ -2105,6 +2174,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             const value, const end = vm.readValue(i64, addr);
             return .{ .{ .integer = value }, end };
         },
+        .float => {
+            const value, const end = vm.readValue(f64, addr);
+            return .{ .{ .float = value }, end };
+        },
         .string_literal => {
             const start, const end = vm.readValue(usize, addr);
             std.debug.assert(vm.text[start] == '"');
@@ -2196,6 +2269,7 @@ fn readValue(vm: *Vm, comptime T: type, addr: Memory.Addr) struct { T, Memory.Ad
 
 const Value = union(enum) {
     integer: i64,
+    float: f64,
     string_literal: Extent,
     // c_string: [*:0]const u8,
     managed_string: dotnet.GcHandleV2,
@@ -2220,6 +2294,7 @@ const Value = union(enum) {
     pub fn discard(value: *Value, dotnet_funcs: *const dotnet.Funcs) void {
         switch (value.*) {
             .integer => {},
+            .float => {},
             .string_literal => {},
             .managed_string => |handle| gchandleFree(dotnet_funcs, handle),
             .script_function => {},
@@ -2237,6 +2312,7 @@ const Value = union(enum) {
     pub fn getType(value: *const Value) Type {
         return switch (value.*) {
             .integer => .integer,
+            .float => .float,
             .string_literal => .string_literal,
             // .c_string => .c_string,
             .managed_string => .managed_string,
@@ -2604,6 +2680,57 @@ const VmEat = struct {
     }
 };
 
+fn paramTypeKind(vm: *Vm, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
+    const param_type: *const dotnet.Type = switch (vm.dotnet_funcs.kind) {
+        .mono => |*mono| blk: {
+            const sig = mono.method_signature(method) orelse return .end;
+            var iter: ?*anyopaque = null;
+            var i: usize = 0;
+            while (mono.signature_get_params(sig, &iter)) |param_type| : (i += 1) {
+                if (i == index) break :blk param_type;
+            }
+            return .end;
+        },
+        .il2cpp => |*il2cpp| blk: {
+            if (index >= il2cpp.method_get_param_count(method)) return .end;
+            break :blk il2cpp.method_get_param(method, @intCast(index));
+        },
+    };
+    return vm.dotnet_funcs.type_get_type(param_type);
+}
+
+fn narrowF64ToF32(value: f64) ?f32 {
+    const narrowed: f32 = @floatCast(value);
+    if (std.math.isFinite(value) and !std.math.isFinite(narrowed)) return null;
+    return narrowed;
+}
+
+fn exactF64ToF32(value: f64) ?f32 {
+    const narrowed: f32 = @floatCast(value);
+    return if (@as(f64, narrowed) == value) narrowed else null;
+}
+
+fn exactI64ToF64(value: i64) ?f64 {
+    const widened: f64 = @floatFromInt(value);
+    if (widened < -9223372036854775808.0 or widened >= 9223372036854775808.0) return null;
+    return if (@as(i64, @intFromFloat(widened)) == value) widened else null;
+}
+
+fn exactI64ToF32(value: i64) ?f32 {
+    return exactF64ToF32(exactI64ToF64(value) orelse return null);
+}
+
+const Number = union(enum) {
+    integer: i64,
+    float: f64,
+    pub fn toF64(number: Number) f64 {
+        return switch (number) {
+            .integer => |i| @floatFromInt(i),
+            .float => |f| f,
+        };
+    }
+};
+
 fn executeBinaryOp(
     vm: *Vm,
     op: BinaryOp,
@@ -2621,25 +2748,63 @@ fn executeBinaryOp(
         .op = op,
     } });
     const right_value = vm.pop(right_addr);
-    const right_i64 = switch (right_value) {
-        .integer => |i| i,
+    const right_number: Number = switch (right_value) {
+        .integer => |i| .{ .integer = i },
+        .float => |f| .{ .float = f },
         else => |t| return vm.setError(.{ .binary_operand_type = .{
             .pos = right_text_pos,
             .op = op,
-            .expects = "integers",
+            .expects = "integers or floats",
             .actual = t.getType(),
         } }),
     };
     const left_value = vm.pop(left_addr);
-    const left_i64 = switch (left_value) {
-        .integer => |i| i,
+    const left_number: Number = switch (left_value) {
+        .integer => |i| .{ .integer = i },
+        .float => |f| .{ .float = f },
         else => |t| return vm.setError(.{ .binary_operand_type = .{
             .pos = left_text_pos,
             .op = op,
-            .expects = "integers",
+            .expects = "integers or floats",
             .actual = t.getType(),
         } }),
     };
+
+    if (left_number == .float or right_number == .float) {
+        const left_f64 = left_number.toF64();
+        const right_f64 = right_number.toF64();
+        switch (op) {
+            .@"+" => {
+                (try vm.push(Type)).* = .float;
+                (try vm.push(f64)).* = left_f64 + right_f64;
+            },
+            .@"-" => {
+                (try vm.push(Type)).* = .float;
+                (try vm.push(f64)).* = left_f64 - right_f64;
+            },
+            .@"/" => {
+                (try vm.push(Type)).* = .float;
+                (try vm.push(f64)).* = left_f64 / right_f64;
+            },
+            .@"==", .@"!=", .@"<", .@"<=", .@">", .@">=" => {
+                const result = switch (op) {
+                    .@"==" => left_f64 == right_f64,
+                    .@"!=" => left_f64 != right_f64,
+                    .@"<" => left_f64 < right_f64,
+                    .@"<=" => left_f64 <= right_f64,
+                    .@">" => left_f64 > right_f64,
+                    .@">=" => left_f64 >= right_f64,
+                    else => unreachable,
+                };
+                (try vm.push(Type)).* = .integer;
+                (try vm.push(i64)).* = if (result) 1 else 0;
+            },
+        }
+        return;
+    }
+
+    const left_i64 = left_number.integer;
+    const right_i64 = right_number.integer;
     const value: i64, const overflow: u1 = blk: switch (op) {
         .@"+" => @addWithOverflow(left_i64, right_i64),
         .@"-" => @subWithOverflow(left_i64, right_i64),
@@ -3406,6 +3571,11 @@ pub const Error = union(enum) {
     divide_by_0: struct {
         pos: usize,
     },
+    lossy_conversion: struct {
+        pos: usize,
+        value: Number,
+        target: dotnet.TypeKind,
+    },
     if_type: struct { pos: usize, type: ?Type },
     assign_dest_nothing: struct { dest_pos: usize },
     assign_src_nothing: struct { src_pos: usize },
@@ -3675,6 +3845,14 @@ const ErrorFmt = struct {
                 },
             ),
             .divide_by_0 => |d| try writer.print("{d}: divide by 0", .{getLineNum(f.text, d.pos)}),
+            .lossy_conversion => |l| {
+                try writer.print("{d}: cannot convert ", .{getLineNum(f.text, l.pos)});
+                switch (l.value) {
+                    .integer => |i| try writer.print("{d}", .{i}),
+                    .float => |v| try writer.print("{e}", .{v}),
+                }
+                try writer.print(" to {t} without losing precision", .{l.target});
+            },
             .if_type => |e| if (e.type) |t| try writer.print(
                 "{d}: if requires an integer but got {s}",
                 .{ getLineNum(f.text, e.pos), t.what() },
@@ -3803,8 +3981,23 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
     try testBadCode(dotnet_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
     try testBadCode(dotnet_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
-    try testBadCode(dotnet_funcs, "0+\"hello\"", "1: binary operation '+' expects integers but got a string literal");
-    try testBadCode(dotnet_funcs, "\"hello\"+0", "1: binary operation '+' expects integers but got a string literal");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoF32(16777217))
+    , "3: cannot convert 16777217 to r4 without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoF64(9007199254740993))
+    , "3: cannot convert 9007199254740993 to r8 without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoF32(MockTest.GetHugeF64()))
+    , "3: cannot convert 1e300 to r4 without losing precision");
+    try testBadCode(dotnet_funcs, "0+\"hello\"", "1: binary operation '+' expects integers or floats but got a string literal");
+    try testBadCode(dotnet_funcs, "\"hello\"+0", "1: binary operation '+' expects integers or floats but got a string literal");
     try testBadCode(dotnet_funcs, "0/0", "1: divide by 0");
     try testBadCode(dotnet_funcs, "1/0", "1: divide by 0");
     try testCode(dotnet_funcs, "@Log(9_223_372_036_854_775_807+0)");
@@ -4130,6 +4323,66 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var foo = MockTest.static_field_null
         \\@Assert(@IsNull(foo))
         \\@Assert(0 == @NotNull(foo))
+    );
+    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Math = @Class(mscorlib.System.Math)
+        \\@Log("Sqrt(4) = ", Math.Sqrt(4))
+        \\@Log("Sqrt(2) = ", Math.Sqrt(2))
+        \\@Assert(Math.Sqrt(4) == 2)
+        \\@Assert(Math.Sqrt(9) == 3)
+        \\@Assert(Math.Sqrt(0) == 0)
+        \\@Assert(Math.Sqrt(2) > 1)
+        \\@Assert(Math.Sqrt(2) < 2)
+        \\@Assert(Math.Sqrt(2) != 1)
+        \\@Assert(Math.Sqrt(Math.Sqrt(16)) == 2)
+    );
+    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var Math = @Class(mscorlib.System.Math)
+        \\var Single = @Class(mscorlib.System.Single)
+        \\@Assert(0 == Single.IsNaN(0))
+        \\@Assert(0 == Single.IsNaN(1))
+        \\@Assert(0 == Single.IsNaN(Math.Sqrt(2)))
+        \\var Double = @Class(mscorlib.System.Double)
+        \\@Assert(0 == Double.IsNaN(0))
+    );
+    if (is_monomock) try testCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Log("f32 return: ", MockTest.GetF32())
+        \\@Log("f64 return: ", MockTest.GetF64())
+        \\@Log("f32 field: ", MockTest.static_field_f32)
+        \\@Log("f64 field: ", MockTest.static_field_f64)
+        \\@Assert(MockTest.GetF32() == MockTest.GetF32())
+        \\@Assert(MockTest.GetF64() == MockTest.GetF64())
+        \\@Assert(MockTest.static_field_f32 == MockTest.static_field_f32)
+        \\@Assert(MockTest.static_field_f64 == MockTest.static_field_f64)
+        \\@Assert(MockTest.GetF32() != MockTest.GetF64())
+        \\@Assert(MockTest.GetF32() != MockTest.static_field_f32)
+        \\@Assert(MockTest.static_field_f32 != MockTest.static_field_f64)
+        \\@Assert(MockTest.GetF32() != 1)
+        \\@Assert(MockTest.GetF32() != 2)
+        \\@Assert(MockTest.GetF32() > 1)
+        \\@Assert(MockTest.GetF32() < 2)
+        \\@Assert(MockTest.static_field_f32 != 2)
+        \\@Assert(MockTest.GetF64() > 3)
+        \\@Assert(MockTest.GetF64() < 4)
+        \\@Assert(MockTest.static_field_f64 > 4)
+        \\@Assert(MockTest.static_field_f64 < 5)
+        \\@Assert(MockTest.EchoF32(MockTest.GetF32()) == MockTest.GetF32())
+        \\@Assert(MockTest.EchoF64(MockTest.GetF64()) == MockTest.GetF64())
+        \\@Assert(MockTest.EchoF32(MockTest.static_field_f32) == MockTest.static_field_f32)
+        \\@Assert(MockTest.EchoF64(MockTest.static_field_f64) == MockTest.static_field_f64)
+        \\@Assert(MockTest.EchoF32(2) == 2)
+        \\@Assert(MockTest.EchoF64(2) == 2)
+        \\@Assert(MockTest.EchoF32(0) == 0)
+        \\@Assert(MockTest.EchoF32(0 - 3) == 0 - 3)
+        \\@Assert(MockTest.EchoF32(2) != 3)
+        \\@Assert(MockTest.EchoF32(16777216) == 16777216)
+        \\@Assert(MockTest.EchoF64(9007199254740992) == 9007199254740992)
+        \\@Assert(MockTest.EchoF32(MockTest.GetF64()) == MockTest.GetF64())
+        \\@Assert(MockTest.EchoF64(MockTest.GetHugeF64()) == MockTest.GetHugeF64())
     );
     try testCode(dotnet_funcs,
         \\if (1) { var null_obj = 0 }

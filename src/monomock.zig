@@ -191,6 +191,12 @@ const MockClassField = struct {
 const MethodImpl = union(enum) {
     return_void: *const fn () void,
     return_i4: *const fn () i32,
+    return_r4: *const fn () f32,
+    return_r8: *const fn () f64,
+    take_r4_return_r4: *const fn (f32) f32,
+    take_r4_return_boolean: *const fn (f32) bool,
+    take_r8_return_boolean: *const fn (f64) bool,
+    take_r8_return_r8: *const fn (f64) f64,
     return_static_string: *const fn () [:0]const u8,
     return_datetime: *const fn () i64,
     return_object: *const fn () ?*const MockObject,
@@ -215,6 +221,8 @@ const LazyObject = enum {
 
 const MockValue = union(enum) {
     i4: i32,
+    r4: f32,
+    r8: f64,
     object: ?*const MockObject,
     object_lazy: LazyObject,
     pub fn getType(self: *const MockValue) *const MockType {
@@ -228,33 +236,57 @@ const MockValue = union(enum) {
 const method_sigs = struct {
     const return_void: MockMethodSignature = .{
         .return_type = .void,
-        .param_count = 0,
+        .params = &.{},
     };
     const return_i4: MockMethodSignature = .{
         .return_type = .i4,
-        .param_count = 0,
+        .params = &.{},
+    };
+    const return_r4: MockMethodSignature = .{
+        .return_type = .r4,
+        .params = &.{},
+    };
+    const return_r8: MockMethodSignature = .{
+        .return_type = .r8,
+        .params = &.{},
     };
     const return_static_string: MockMethodSignature = .{
         .return_type = .string,
-        .param_count = 0,
+        .params = &.{},
     };
     const return_datetime: MockMethodSignature = .{
         .return_type = mock_type.datetime,
-        .param_count = 0,
+        .params = &.{},
     };
     const return_object: MockMethodSignature = .{
         .return_type = mock_type.object,
-        .param_count = 0,
+        .params = &.{},
     };
     const take_string_return_object: MockMethodSignature = .{
         .return_type = mock_type.object,
-        .param_count = 1,
+        .params = &.{.string},
+    };
+    const take_r4_return_boolean: MockMethodSignature = .{
+        .return_type = .boolean,
+        .params = &.{.r4},
+    };
+    const take_r8_return_boolean: MockMethodSignature = .{
+        .return_type = .boolean,
+        .params = &.{.r8},
+    };
+    const take_r4_return_r4: MockMethodSignature = .{
+        .return_type = .r4,
+        .params = &.{.r4},
+    };
+    const take_r8_return_r8: MockMethodSignature = .{
+        .return_type = .r8,
+        .params = &.{.r8},
     };
 };
 
 const MockMethodSignature = struct {
     return_type: MockType,
-    param_count: c_int,
+    params: []const MockType,
     pub fn fromMono(sig: *const dotnet.MethodSignature) *const MockMethodSignature {
         return @ptrCast(@alignCast(sig));
     }
@@ -264,8 +296,11 @@ const MockMethodSignature = struct {
 };
 const MockType = union(enum) {
     void,
+    boolean,
     i4,
     u8,
+    r4,
+    r8,
     string,
     valuetype: struct { size: usize },
     object,
@@ -284,8 +319,11 @@ const MockType = union(enum) {
 };
 const mock_type = struct {
     pub const @"void": MockType = .void;
+    pub const boolean: MockType = .boolean;
     pub const @"i4": MockType = .i4;
     pub const @"u8": MockType = .u8;
+    pub const r4: MockType = .r4;
+    pub const r8: MockType = .r8;
     pub const datetime: MockType = .{ .valuetype = .{ .size = 8 } };
     pub const object: MockType = .object;
 };
@@ -294,7 +332,10 @@ const MockObject = struct {
     list_node: std.SinglyLinkedList.Node,
     data: Data,
     pub const Data = union(enum) {
+        boolean: c_int,
         i4: i32,
+        r4: f32,
+        r8: f64,
         static_string: [*:0]const u8,
         datetime: i64,
         decimal,
@@ -307,7 +348,10 @@ const MockObject = struct {
     }
     pub fn getClass(o: *const MockObject) *const MockClass {
         return switch (o.data) {
+            .boolean => &mock_class.@"System.Boolean",
             .i4 => &mock_class.@"System.Int32",
+            .r4 => &mock_class.@"System.Single",
+            .r8 => &mock_class.@"System.Double",
             .static_string => &mock_class.@"System.String",
             .datetime => &mock_class.@"System.DateTime",
             .decimal => &mock_class.@"System.Decimal",
@@ -364,6 +408,30 @@ fn @"MockTest.NewDecimal"() ?*const MockObject {
     const domain = domain_get().?;
     return domain.new(.decimal);
 }
+fn @"MockTest.GetF32"() f32 {
+    return 1.5;
+}
+fn @"MockTest.GetF64"() f64 {
+    return 3.25;
+}
+fn @"MockTest.EchoF32"(v: f32) f32 {
+    return v;
+}
+fn @"MockTest.EchoF64"(v: f64) f64 {
+    return v;
+}
+fn @"System.Math.Sqrt"(v: f64) f64 {
+    return @sqrt(v);
+}
+fn @"MockTest.GetHugeF64"() f64 {
+    return 1e300;
+}
+fn @"System.Single.IsNaN"(v: f32) bool {
+    return std.math.isNan(v);
+}
+fn @"System.Double.IsNaN"(v: f64) bool {
+    return std.math.isNan(v);
+}
 
 const mock_class = struct {
     const @"System.Int32": MockClass = .{
@@ -372,6 +440,32 @@ const mock_class = struct {
         .fields = &[_]MockClassField{
             .{ .name = "MaxValue", .protection = .public, .kind = .{ .static = .{ .i4 = std.math.maxInt(i32) } } },
         },
+    };
+    const @"System.Boolean": MockClass = .{
+        .name = "Boolean",
+        .methods = &[_]MockMethod{},
+        .fields = &[_]MockClassField{},
+    };
+    const @"System.Single": MockClass = .{
+        .name = "Single",
+        .methods = &[_]MockMethod{
+            .{ .name = "IsNaN", .impl = .{ .take_r4_return_boolean = &@"System.Single.IsNaN" } },
+        },
+        .fields = &[_]MockClassField{},
+    };
+    const @"System.Math": MockClass = .{
+        .name = "Math",
+        .methods = &[_]MockMethod{
+            .{ .name = "Sqrt", .impl = .{ .take_r8_return_r8 = &@"System.Math.Sqrt" } },
+        },
+        .fields = &[_]MockClassField{},
+    };
+    const @"System.Double": MockClass = .{
+        .name = "Double",
+        .methods = &[_]MockMethod{
+            .{ .name = "IsNaN", .impl = .{ .take_r8_return_boolean = &@"System.Double.IsNaN" } },
+        },
+        .fields = &[_]MockClassField{},
     };
     const @"System.String": MockClass = .{
         .name = "String",
@@ -414,9 +508,16 @@ const assemblies = [_]MockAssembly{
             .{ .prefix = "", .classes = &[_]MockClass{
                 .{ .name = "MockTest", .methods = &[_]MockMethod{
                     .{ .name = "NewDecimal", .impl = .{ .return_object = @"MockTest.NewDecimal" } },
+                    .{ .name = "GetF32", .impl = .{ .return_r4 = &@"MockTest.GetF32" } },
+                    .{ .name = "GetF64", .impl = .{ .return_r8 = &@"MockTest.GetF64" } },
+                    .{ .name = "EchoF32", .impl = .{ .take_r4_return_r4 = &@"MockTest.EchoF32" } },
+                    .{ .name = "EchoF64", .impl = .{ .take_r8_return_r8 = &@"MockTest.EchoF64" } },
+                    .{ .name = "GetHugeF64", .impl = .{ .return_r8 = &@"MockTest.GetHugeF64" } },
                 }, .fields = &[_]MockClassField{
                     .{ .name = "static_field_null", .protection = .private, .kind = .{ .static = .{ .object = null } } },
                     .{ .name = "static_field_string", .protection = .private, .kind = .{ .static = .{ .object_lazy = .@"mocktest.static_field_string" } } },
+                    .{ .name = "static_field_f32", .protection = .public, .kind = .{ .static = .{ .r4 = 2.25 } } },
+                    .{ .name = "static_field_f64", .protection = .public, .kind = .{ .static = .{ .r8 = 4.75 } } },
                 } },
             } },
         },
@@ -429,6 +530,10 @@ const assemblies = [_]MockAssembly{
                 mock_class.@"System.String",
                 mock_class.@"System.DateTime",
                 mock_class.@"System.Decimal",
+                mock_class.@"System.Math",
+                mock_class.@"System.Boolean",
+                mock_class.@"System.Single",
+                mock_class.@"System.Double",
                 .{ .name = "Console", .methods = &[_]MockMethod{
                     .{ .name = "WriteLine", .impl = .{ .return_void = &@"System.Console.WriteLine0" } },
                     .{ .name = "Beep", .impl = .{ .return_void = &@"System.Console.Beep" } },
@@ -526,7 +631,7 @@ export fn mono_class_get_method_from_name(
     const class: *const MockClass = .fromMonoClass(c);
     const name = std.mem.span(name_ptr);
     for (class.methods) |*method| {
-        if (method.impl.sig().param_count != param_count) continue;
+        if (method.impl.sig().params.len != param_count) continue;
         if (std.mem.eql(u8, method.name, name)) return method.toMono();
     }
     return null;
@@ -591,6 +696,8 @@ export fn mono_field_static_get_value(
     switch (field.kind) {
         .static => |*static_value| switch (static_value.*) {
             .i4 => |value| @as(*i32, @ptrCast(@alignCast(out_value))).* = value,
+            .r4 => |value| @as(*f32, @ptrCast(@alignCast(out_value))).* = value,
+            .r8 => |value| @as(*f64, @ptrCast(@alignCast(out_value))).* = value,
             .object => |o| @as(*?*const MockObject, @ptrCast(@alignCast(out_value))).* = o,
             .object_lazy => |lazy_object| {
                 const domain = domain_get().?;
@@ -675,9 +782,10 @@ export fn mono_signature_get_params(
     iter: *?*anyopaque,
 ) callconv(.c) ?*const dotnet.Type {
     const sig: *const MockMethodSignature = .fromMono(s);
-    if (sig.param_count > 0) @panic("todo");
-    _ = iter;
-    return null;
+    const index = @intFromPtr(iter.*);
+    if (index >= sig.params.len) return null;
+    iter.* = @ptrFromInt(index + 1);
+    return sig.params[index].toMono();
 }
 
 export fn mono_type_get_type(type_opaque: *const dotnet.Type) callconv(.c) dotnet.TypeKind {
@@ -696,7 +804,10 @@ export fn mono_object_new(
 export fn mono_object_unbox(o: *const dotnet.Object) callconv(.c) *anyopaque {
     const object: *const MockObject = .fromMono(o);
     return switch (object.data) {
+        .boolean => |*value| @ptrCast(@constCast(value)),
         .i4 => |*value| @ptrCast(@constCast(value)),
+        .r4 => |*value| @ptrCast(@constCast(value)),
+        .r8 => |*value| @ptrCast(@constCast(value)),
         .static_string => @panic("codebug?"),
         .datetime => @panic("todo: unbox datetime"),
         .decimal => @panic("todo"),
@@ -749,9 +860,7 @@ export fn mono_runtime_invoke(
 ) callconv(.c) ?*const dotnet.Object {
     const method: *const MockMethod = .fromMono(method_opaque);
     // std.debug.print("monomock: MockMethod '{s}' has been called\n", .{method.name});
-    if (method.impl.sig().param_count != 0) @panic("todo: implement params");
     _ = obj;
-    _ = params;
     _ = exception;
     const domain = domain_get().?;
     switch (method.impl) {
@@ -760,12 +869,34 @@ export fn mono_runtime_invoke(
             return null;
         },
         .return_i4 => |f| return domain.new(.{ .i4 = f() }).toMono(),
+        .return_r4 => |f| return domain.new(.{ .r4 = f() }).toMono(),
+        .return_r8 => |f| return domain.new(.{ .r8 = f() }).toMono(),
         .return_static_string => |f| return domain.new(.{ .static_string = f() }).toMono(),
         .return_datetime => |f| return domain.new(.{ .datetime = f() }).toMono(),
         .return_object => |f| return if (f()) |o| o.toMono() else null,
         .take_string_return_object => |f| {
             _ = f;
             @panic("todo");
+        },
+        .take_r4_return_boolean => |f| {
+            const param_ptrs: [*]const *anyopaque = @ptrCast(params.?);
+            const arg: *const f32 = @ptrCast(@alignCast(param_ptrs[0]));
+            return domain.new(.{ .boolean = if (f(arg.*)) 1 else 0 }).toMono();
+        },
+        .take_r8_return_boolean => |f| {
+            const param_ptrs: [*]const *anyopaque = @ptrCast(params.?);
+            const arg: *const f64 = @ptrCast(@alignCast(param_ptrs[0]));
+            return domain.new(.{ .boolean = if (f(arg.*)) 1 else 0 }).toMono();
+        },
+        .take_r4_return_r4 => |f| {
+            const param_ptrs: [*]const *anyopaque = @ptrCast(params.?);
+            const arg: *const f32 = @ptrCast(@alignCast(param_ptrs[0]));
+            return domain.new(.{ .r4 = f(arg.*) }).toMono();
+        },
+        .take_r8_return_r8 => |f| {
+            const param_ptrs: [*]const *anyopaque = @ptrCast(params.?);
+            const arg: *const f64 = @ptrCast(@alignCast(param_ptrs[0]));
+            return domain.new(.{ .r8 = f(arg.*) }).toMono();
         },
     }
 }

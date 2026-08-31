@@ -1,6 +1,6 @@
 Root <- Statement*
 Statement
-   <- if LPAREN Expr RPARN Block
+   <- if LPAREN Expr RPAREN Block
     / yield Expr
     / loop
     / break
@@ -22,12 +22,16 @@ ExprSingle <- PrimaryTypeExpr ExprSuffix*
 ExprSuffix
    <- LBRACKET Expr RBRACKET
     / DOT IDENTIFIER
-    / LPAREN (Expr ",")* Expr? RPAREN
+    / ArgList
 
 PrimaryTypeExpr
    <- IDENTIFIER
+    / BUILTIN ArgList
+    / LPAREN Expr RPAREN
     / NUMBER
     / STRINGLITERAL
+
+ArgList <- LPAREN (Expr COMMA)* Expr? RPAREN
 
 Block <- LBRACE Statement* RBRACE
 

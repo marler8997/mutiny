@@ -114,25 +114,54 @@ Things that will surprise you:
 ### The whole grammar
 
 ```
-program    := statement*
-statement  := "var" ident "=" expr        // declare, initializer required
-            | "set" ref "=" expr          // assign; ref may be a.b.c
-            | "if" "(" expr ")" block     // no else yet
-            | "loop"                      // marks the top of a loop
-            | "continue"                  // jumps back to "loop"
-            | "break"                     // exits the loop
-            | "yield" expr                // expr must be an integer (milliseconds)
-            | "fn" ident "(" params ")" block
-            | expr                        // ONLY if it produces no value
-block      := "{" statement* "}"
-ref        := ident ( "." ident )*
-expr       := operand ( binop operand )*
-operand    := number | string | ref | call | builtin "(" args ")"
-number     := "1"  (integer)  |  "1.5"  (float)
-call       := ref "(" args ")"
-binop      := "+" | "-" | "/"                        // math priority
-            | "==" | "!=" | "<" | "<=" | ">" | ">="  // comparison priority, lower
+Root <- Statement*
+Statement
+   <- if LPAREN Expr RPAREN Block
+    / yield Expr
+    / loop
+    / break
+    / continue
+    / fn IDENTIFIER ParamDeclList Block
+    / var IDENTIFIER EQUAL Expr
+    / set Reference EQUAL Expr
+    / Expr
+
+Reference
+   <- IDENTIFIER (DOT IDENTIFIER)*
+
+Expr <- ExprBinaryCompare
+ExprBinaryCompare <- ExprBinaryMath (BinaryOpComparison ExprBinaryMath)*
+ExprBinaryMath <- ExprSingle (BinaryOpMath ExprSingle)*
+ExprSingle <- PrimaryTypeExpr ExprSuffix*
+
+ExprSuffix
+   <- LBRACKET Expr RBRACKET
+    / DOT IDENTIFIER
+    / ArgList
+
+PrimaryTypeExpr
+   <- IDENTIFIER
+    / BUILTIN ArgList
+    / LPAREN Expr RPAREN
+    / NUMBER
+    / STRINGLITERAL
+
+ArgList <- LPAREN (Expr COMMA)* Expr? RPAREN
+
+Block <- LBRACE Statement* RBRACE
+
+ParamDeclList <- LPAREN (IDENTIFIER COMMA)* IDENTIFIER? RPAREN
+
+BinaryOpMath        <- "+" / "-" / "/"
+BinaryOpComparison  <- "==" / "!=" / "<" / "<=" / ">" / ">="
+NUMBER              <- "1" (integer) / "1.5" (float)
 ```
+
+`ExprSuffix`'s `LBRACKET Expr RBRACKET` is array indexing — it parses but is **not implemented**,
+so indexing fails at runtime. Everything else above works.
+
+A `Statement` that is a bare `Expr` is only legal if the expression produces no value; wrap
+anything that returns something in `@Discard`.
 
 Two precedence levels only: math binds tighter than comparison. That operator list is exhaustive
 **as of today** — the language is young and still being built out, so these are gaps rather than

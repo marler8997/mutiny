@@ -5,7 +5,8 @@ const usage =
     \\  scan                       every process with a mono/il2cpp runtime, and whether Mutiny is in it
     \\  inject PID                 inject Mutiny.dll into a running game
     \\  start EXE [ARGS...]        launch a game with Mutiny.dll injected before it runs
-    \\  run-script PID NAME        run scripts\SCRIPT in an injected game and print its output
+    \\  run-script PID NAME        run scripts\NAME in an injected game and print its output
+    \\                             an @-prefixed NAME is a builtin, e.g. @assemblies
     \\
 ;
 

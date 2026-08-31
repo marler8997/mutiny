@@ -458,6 +458,13 @@ const Client = struct {
     pid: u32,
 };
 
+const Builtin = enum { assemblies };
+
+const Run = union(enum) {
+    script: Mod.HaveText,
+    builtin: Builtin,
+};
+
 fn reportError(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) error{ WriteFailed, Reported } {
     writer.print(fmt ++ "\n", args) catch return error.WriteFailed;
     writer.flush() catch return error.WriteFailed;
@@ -504,32 +511,41 @@ fn addScript(
         }
     }
 
-    const localappdata = appdata.get() orelse return reportError(
-        writer,
-        "no LOCALAPPDATA environment variable",
-        .{},
-    );
-    const app_name = switch (logfile.global.getName()) {
-        .success => |s| s,
-        .err => |err| return reportError(writer, "{f}", .{err}),
-    };
-    var path_buf: [appdata.max_path]u16 = undefined;
-    const path = switch (appdata.format(&path_buf, localappdata, &.{
-        win32.L("mutiny"),
-        win32.L("app"),
-        app_name,
-        win32.L("scripts"),
-        name_w,
-    })) {
-        .ok => |p| p,
-        .too_long => return reportError(
-            writer,
-            "path for script '{f}' is too long",
-            .{fmtW(name_w)},
-        ),
-    };
+    const run: Run = blk: {
+        if (name[0] == '@') {
+            const builtin_script = std.meta.stringToEnum(Builtin, name[1..]) orelse return reportError(
+                writer,
+                "unknown builtin script '{s}'",
+                .{name},
+            );
+            break :blk .{ .builtin = builtin_script };
+        }
 
-    const text = blk: {
+        const localappdata = appdata.get() orelse return reportError(
+            writer,
+            "no LOCALAPPDATA environment variable",
+            .{},
+        );
+        const app_name = switch (logfile.global.getName()) {
+            .success => |s| s,
+            .err => |err| return reportError(writer, "{f}", .{err}),
+        };
+        var path_buf: [appdata.max_path]u16 = undefined;
+        const path = switch (appdata.format(&path_buf, localappdata, &.{
+            win32.L("mutiny"),
+            win32.L("app"),
+            app_name,
+            win32.L("scripts"),
+            name_w,
+        })) {
+            .ok => |p| p,
+            .too_long => return reportError(
+                writer,
+                "path for script '{f}' is too long",
+                .{fmtW(name_w)},
+            ),
+        };
+
         const prefixed = std.os.windows.wToPrefixedFileW(null, path) catch |err| return reportError(
             writer,
             "bad script path '{f}', {t}",
@@ -541,7 +557,7 @@ fn addScript(
             .{ fmtW(path), err },
         );
         defer file.close();
-        break :blk file.readToEndAlloc(
+        const text = file.readToEndAlloc(
             std.heap.page_allocator,
             std.math.maxInt(usize),
         ) catch |err| return reportError(
@@ -549,10 +565,14 @@ fn addScript(
             "read '{f}' failed with {t}",
             .{ fmtW(path), err },
         );
+        break :blk .{ .script = .{ .text = text } };
     };
 
     const script = std.heap.page_allocator.create(Script) catch {
-        std.heap.page_allocator.free(text);
+        switch (run) {
+            .script => |have_text| std.heap.page_allocator.free(have_text.text),
+            .builtin => {},
+        }
         return reportError(
             writer,
             "out of memory creating script '{f}'",
@@ -564,7 +584,7 @@ fn addScript(
         .client = .{ .pid = pid, .pipe = pipe },
         .name_len = @intCast(name_utf8_len),
         .name_buf = undefined,
-        .running = .{ .text = text },
+        .running = run,
     };
     @memcpy(script.name_buf[0..name.len], name);
     global.scripts.append(&script.list_node);
@@ -575,14 +595,17 @@ const Script = struct {
     client: Client,
     name_len: u8,
     name_buf: [255]u8,
-    running: Mod.HaveText,
+    running: Run,
 
     pub fn name(script: *const Script) []const u8 {
         return script.name_buf[0..script.name_len];
     }
 
     pub fn delete(script: *Script) void {
-        script.running.deinitFreeText();
+        switch (script.running) {
+            .script => |*have_text| have_text.deinitFreeText(),
+            .builtin => {},
+        }
         win32.closeHandle(script.client.pipe);
         global.scripts.remove(&script.list_node);
         script.* = undefined;
@@ -609,7 +632,11 @@ const Script = struct {
     }
 
     pub fn nextYieldSleepMs(script: *const Script, now: std.time.Instant) u64 {
-        const vm_state = &(script.running.vm_state orelse return std.math.maxInt(u64));
+        const have_text = switch (script.running) {
+            .script => |*t| t,
+            .builtin => return std.math.maxInt(u64),
+        };
+        const vm_state = &(have_text.vm_state orelse return std.math.maxInt(u64));
         const yielded = &(vm_state.yielded orelse return std.math.maxInt(u64));
         return yielded.nextSleepMs(now);
     }
@@ -920,19 +947,32 @@ fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool)
         var pipe_file: std.fs.File = .{ .handle = script.client.pipe };
         var pipe_buf: [4096]u8 = undefined;
         var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
+        const have_text = switch (script.running) {
+            .builtin => |builtin_script| {
+                runBuiltin(dotnet_funcs, builtin_script, &pipe_writer.interface) catch |err| switch (err) {
+                    error.WriteFailed => std.log.err(
+                        "write to client pipe failed with {t}",
+                        .{pipe_writer.err.?},
+                    ),
+                };
+                script.delete();
+                continue;
+            },
+            .script => |*t| t,
+        };
         runMod(
             dotnet_funcs,
             out_tests_scheduled,
             script.name(),
-            &script.running,
+            have_text,
             &pipe_writer.interface,
         );
 
-        const vm_state = &script.running.vm_state.?;
+        const vm_state = &have_text.vm_state.?;
         if (vm_state.yielded == null) {
             switch (vm_state.instance.error_result) {
                 .exit => {},
-                .err => |err| script.reportToClient("{f}", .{err.fmt(script.running.text)}),
+                .err => |err| script.reportToClient("{f}", .{err.fmt(have_text.text)}),
             }
             script.delete();
         } else {
@@ -940,6 +980,75 @@ fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool)
         }
     }
     return sleep_time_ms;
+}
+
+fn runBuiltin(
+    dotnet_funcs: *const dotnet.Funcs,
+    builtin_script: Builtin,
+    writer: *std.Io.Writer,
+) error{WriteFailed}!void {
+    switch (builtin_script) {
+        .assemblies => try writeAssemblies(dotnet_funcs, writer),
+    }
+    try writer.flush();
+}
+
+const WriteAssemblies = struct {
+    dotnet_funcs: *const dotnet.Funcs,
+    writer: *std.Io.Writer,
+    index: usize = 0,
+    write_failed: bool = false,
+};
+
+fn writeAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
+    const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
+    const ctx: *WriteAssemblies = @ptrCast(@alignCast(user_data));
+    defer ctx.index += 1;
+    const mono = &ctx.dotnet_funcs.kind.mono;
+    const assembly_name = mono.assembly_get_name(assembly) orelse {
+        std.log.err("  assembly[{}] mono_assembly_get_name failed", .{ctx.index});
+        return;
+    };
+    const str = mono.assembly_name_get_name(assembly_name) orelse {
+        std.log.err(
+            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
+            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(assembly_name) },
+        );
+        return;
+    };
+    ctx.writer.print("{s}\n", .{std.mem.span(str)}) catch |err| switch (err) {
+        error.WriteFailed => ctx.write_failed = true,
+    };
+}
+
+fn writeAssemblies(
+    dotnet_funcs: *const dotnet.Funcs,
+    writer: *std.Io.Writer,
+) error{WriteFailed}!void {
+    switch (dotnet_funcs.kind) {
+        .mono => |*mono| {
+            var context: WriteAssemblies = .{ .dotnet_funcs = dotnet_funcs, .writer = writer };
+            mono.assembly_foreach(&writeAssembliesMono, &context);
+            if (context.write_failed) return error.WriteFailed;
+        },
+        .il2cpp => |*il2cpp| {
+            var assembly_count: usize = undefined;
+            const assemblies = il2cpp.domain_get_assemblies(
+                dotnet_funcs.domain_get().?,
+                &assembly_count,
+            );
+            for (0..assembly_count) |i| {
+                const image = il2cpp.assembly_get_image(assemblies[i]);
+                const image_name = std.mem.span(il2cpp.image_get_name(image));
+                if (std.mem.eql(u8, image_name, "__Generated")) continue;
+                if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
+                    "expected all image names to end with '.dll' but got '{s}'",
+                    .{image_name},
+                );
+                try writer.print("{s}\n", .{image_name[0 .. image_name.len - ".dll".len]});
+            }
+        },
+    }
 }
 
 fn runMod(

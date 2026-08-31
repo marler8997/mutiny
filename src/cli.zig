@@ -24,7 +24,7 @@ pub fn main() !u8 {
     if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
     if (std.mem.eql(u8, command, "inject")) return cmdInject(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
-    // if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
+    if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
     errExit("unknown command '{s}'", .{command});
 }
 
@@ -103,6 +103,49 @@ fn exists(path: []const u8) !bool {
     };
 }
 
+fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
+    const pid_string = args.next() orelse errExit(
+        "run-script requires a PID (run 'mutiny scan' to see what's running)",
+        .{},
+    );
+    const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit(
+        "invalid pid '{s}'",
+        .{pid_string},
+    );
+    const script = args.next() orelse errExit("run-script requires a script name", .{});
+    if (std.mem.indexOfAny(u8, script, "\\/:") != null) errExit(
+        "'{s}' looks like a path, pass just the name of a file in the scripts directory",
+        .{script},
+    );
+    noMoreArgs(args, "run-script");
+
+    const hwnd = mutinywindow.find(pid) orelse errExit(
+        "pid {} has no mutiny window (is Mutiny.dll injected?)",
+        .{pid},
+    );
+
+    const script_w = std.unicode.wtf8ToWtf16LeAlloc(arena, script) catch |err| switch (err) {
+        error.InvalidWtf8 => errExit("script name '{s}' is not valid UTF-8", .{script}),
+        error.OutOfMemory => |e| oom(e),
+    };
+    const copy_data: win32.COPYDATASTRUCT = .{
+        .dwData = mutinywindow.copydata_run_script,
+        .cbData = @intCast(script_w.len * 2),
+        .lpData = @ptrCast(@constCast(script_w.ptr)),
+    };
+    const result = win32.SendMessageW(
+        hwnd,
+        win32.WM_COPYDATA,
+        win32.GetCurrentProcessId(),
+        @bitCast(@intFromPtr(&copy_data)),
+    );
+    if (result != mutinywindow.copydata_result) errExit(
+        "pid {} did not handle the request (returned {}), is it running a compatible Mutiny.dll?",
+        .{ pid, result },
+    );
+    return 0;
+}
+
 fn noMoreArgs(args: *std.process.ArgIterator, command: []const u8) void {
     if (args.next()) |extra| errExit(
         "unexpected argument '{s}' after the {s} command",
@@ -119,5 +162,7 @@ fn oom(e: error{OutOfMemory}) noreturn {
 }
 
 const std = @import("std");
+const win32 = @import("win32").everything;
 const cliscan = @import("cliscan.zig");
 const injector = @import("injector.zig");
+const mutinywindow = @import("mutinywindow.zig");

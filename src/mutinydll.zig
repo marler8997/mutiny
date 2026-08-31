@@ -911,7 +911,28 @@ fn wndProc(
     wparam: win32.WPARAM,
     lparam: win32.LPARAM,
 ) callconv(.winapi) win32.LRESULT {
-    return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+    switch (msg) {
+        win32.WM_COPYDATA => {
+            const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (copy_data.dwData != mutinywindow.copydata_run_script) {
+                std.log.warn("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
+                return 0;
+            }
+            if (copy_data.cbData == 0 or copy_data.cbData % 2 != 0) {
+                std.log.warn("bad run-script cbData {}", .{copy_data.cbData});
+                return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            const script_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
+            const script: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
+            std.log.info(
+                "run-script '{f}' requested by pid {}",
+                .{ fmtW(script), wparam },
+            );
+            return mutinywindow.copydata_result;
+        },
+        mutinywindow.wm_heartbeat => return mutinywindow.heartbeat_result,
+        else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 const fmtW = std.unicode.fmtUtf16Le;

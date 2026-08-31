@@ -58,6 +58,8 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
                     .VM_OPERATION = 1, // Required for VirtualAllocEx/VirtualFreeEx
                     .VM_WRITE = 1, // Required for WriteProcessMemory
                     .CREATE_THREAD = 1, // Required for CreateRemoteThread
+                    .SYNCHRONIZE = 1, // Required for WaitForSingleObject
+                    .QUERY_LIMITED_INFORMATION = 1, // Required for GetExitCodeProcess
                 },
                 0, // do not inherit handle,
                 pid,
@@ -71,7 +73,7 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
         if (process.created) {
             std.log.info("terminating process {}", .{process.pid});
             if (0 == win32.TerminateProcess(process.process, 1)) {
-                std.log.err("TerminateProcess {} failed, error={}", .{ process.pid, win32.GetLastError() });
+                std.log.err("TerminateProcess {} failed, error={f}", .{ process.pid, win32.GetLastError() });
             }
         }
     }
@@ -91,7 +93,60 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
         std.log.info("process thread resumed (suspend_count={})", .{suspend_count});
     }
 
+    try waitForWindow(process);
     std.log.info("success", .{});
+}
+
+const wait_for_window_ms = 10000;
+
+fn waitForWindow(process: ProcessResult) !void {
+    var attempt: u32 = 0;
+    const start = try std.time.Instant.now();
+    while (true) : (attempt += 1) {
+        if (mutinywindow.find(process.pid)) |hwnd| {
+            var heartbeat: usize = undefined;
+            const sent = win32.SendMessageTimeoutW(
+                hwnd,
+                mutinywindow.wm_heartbeat,
+                0,
+                0,
+                win32.SMTO_ABORTIFHUNG,
+                1000,
+                &heartbeat,
+            );
+            if (sent != 0 and heartbeat == @as(usize, @bitCast(mutinywindow.heartbeat_result))) {
+                std.log.info("mutiny window 0x{x} is serving pid {}", .{
+                    @intFromPtr(hwnd),
+                    process.pid,
+                });
+                return;
+            }
+        }
+
+        const elapsed_ms = @divTrunc((try std.time.Instant.now()).since(start), std.time.ns_per_ms);
+        if (elapsed_ms >= wait_for_window_ms) errExit(
+            "no mutiny window in pid {} after {} ms ({} attempts)",
+            .{ process.pid, elapsed_ms, attempt },
+        );
+        switch (win32.WaitForSingleObject(process.process, 50)) {
+            @intFromEnum(win32.WAIT_OBJECT_0) => {
+                var exit_code: u32 = undefined;
+                if (0 == win32.GetExitCodeProcess(process.process, &exit_code)) win32.panicWin32(
+                    "GetExitCodeProcess",
+                    win32.GetLastError(),
+                );
+                errExit(
+                    "process {} exited with {} before mutiny started serving it",
+                    .{ process.pid, exit_code },
+                );
+            },
+            @intFromEnum(win32.WAIT_TIMEOUT) => {},
+            else => |result| errExit(
+                "wait on process {} returned {}, error={f}",
+                .{ process.pid, result, win32.GetLastError() },
+            ),
+        }
+    }
 }
 
 const ProcessResult = struct {
@@ -340,3 +395,4 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const getname = @import("getname.zig");
 const appdata = @import("appdata.zig");
+const mutinywindow = @import("mutinywindow.zig");

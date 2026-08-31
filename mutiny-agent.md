@@ -170,9 +170,6 @@ deliberate exclusions, and they will likely be filled in over time:
 - **No `*` yet.** Division exists, multiplication doesn't. Use repeated addition, or restructure
   to avoid needing it.
 - **No `&&` or `||` yet.** Nest `if`s instead.
-- **A conversion that would lose precision is a hard error**, not a silent rounding. Passing an
-  integer too large to be represented exactly stops the script with
-  "cannot convert N to r4 without losing precision" rather than corrupting the value.
 - `+` and `-` overflow is a runtime error, and dividing by zero is a runtime error. Both stop the
   script rather than wrapping silently.
 
@@ -207,12 +204,12 @@ These are not style advice. Each one is a way to take the game down.
    that your arguments match the parameters. Passing the wrong types is not an error; it is
    silent memory corruption followed by a crash later.
 
-2. **`float` and `double` parameters are converted properly**, and a value that can't be
-   represented is refused rather than corrupted — `Heal(100)` and `Heal(87.5)` on a
-   `Heal(float)` both work. **Integer parameters are passed as a raw 64-bit value with no range
-   check**, so a value too large for the declared width — 70000 into a `short` — is expected to
-   truncate silently rather than error. Keep integer arguments within the range the parameter
-   actually declares.
+2. **Argument values are checked against the declared parameter type.** `float`, `double`, and
+   every integer width convert correctly, and a value that doesn't fit stops the script with a
+   message naming the value and the type, instead of silently truncating — passing 70000 to a
+   `short` tells you so rather than quietly becoming 4464. The game is unaffected either way, so
+   this is a safe thing to hit and correct. `Heal(100)` and `Heal(87.5)` on a `Heal(float)` both
+   work.
 
 3. **Scripts run on Mutiny's own thread, not Unity's main thread.** Most Unity engine APIs must be
    called from the main thread and will fault elsewhere. Prefer plain field reads/writes and

@@ -1119,7 +1119,14 @@ fn callMethod(
                             .target = target,
                         } }),
                     },
-                    else => break :blk vm.mem.toPointer(i64, value_addr),
+                    else => {
+                        if (!integerFitsKind(i, target)) return vm.setError(.{ .lossy_conversion = .{
+                            .pos = after_lparen,
+                            .value = .{ .integer = i },
+                            .target = target,
+                        } });
+                        break :blk vm.mem.toPointer(i64, value_addr);
+                    },
                 }
                 break :blk managed_arg_storage[arg_index].getPtr();
             },
@@ -1388,10 +1395,20 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = if (unboxed.* == 0) 0 else 1;
         },
-        .i4 => {
-            const unboxed: *align(1) i32 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
+        .i1, .u1, .i2, .u2, .i4, .u4, .i8 => |kind| {
+            const unboxed = vm.dotnet_funcs.object_unbox(object);
+            const value: i64 = switch (kind) {
+                .i1 => @as(*align(1) i8, @ptrCast(unboxed)).*,
+                .u1 => @as(*align(1) u8, @ptrCast(unboxed)).*,
+                .i2 => @as(*align(1) i16, @ptrCast(unboxed)).*,
+                .u2 => @as(*align(1) u16, @ptrCast(unboxed)).*,
+                .i4 => @as(*align(1) i32, @ptrCast(unboxed)).*,
+                .u4 => @as(*align(1) u32, @ptrCast(unboxed)).*,
+                .i8 => @as(*align(1) i64, @ptrCast(unboxed)).*,
+                else => unreachable,
+            };
             (try vm.push(Type)).* = .integer;
-            (try vm.push(i64)).* = unboxed.*;
+            (try vm.push(i64)).* = value;
         },
         .r4 => {
             const unboxed: *align(1) f32 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
@@ -2705,6 +2722,21 @@ fn paramTypeKind(vm: *Vm, method: *const dotnet.Method, index: usize) dotnet.Typ
         },
     };
     return vm.dotnet_funcs.type_get_type(param_type);
+}
+
+fn integerFitsKind(value: i64, kind: dotnet.TypeKind) bool {
+    return switch (kind) {
+        .boolean => value == 0 or value == 1,
+        .i1 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
+        .u1 => value >= 0 and value <= std.math.maxInt(u8),
+        .i2 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
+        .u2 => value >= 0 and value <= std.math.maxInt(u16),
+        .i4 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
+        .u4 => value >= 0 and value <= std.math.maxInt(u32),
+        .i8 => true,
+        .u8 => value >= 0,
+        else => true,
+    };
 }
 
 fn narrowF64ToF32(value: f64) ?f32 {
@@ -4025,6 +4057,26 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     if (is_monomock) try testBadCode(dotnet_funcs,
         \\var mocktest = @Assembly("mocktest")
         \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoI16(70000))
+    , "3: cannot convert 70000 to i2 without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoI8(128))
+    , "3: cannot convert 128 to i1 without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoU8(0 - 1))
+    , "3: cannot convert -1 to u1 without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
+        \\@Discard(MockTest.EchoBool(2))
+    , "3: cannot convert 2 to boolean without losing precision");
+    if (is_monomock) try testBadCode(dotnet_funcs,
+        \\var mocktest = @Assembly("mocktest")
+        \\var MockTest = @Class(mocktest.MockTest)
         \\@Discard(MockTest.EchoF32(MockTest.GetHugeF64()))
     , "3: cannot convert 1e300 to r4 without losing precision");
     try testBadCode(dotnet_funcs, "0+\"hello\"", "1: binary operation '+' expects integers or floats but got a string literal");
@@ -4431,6 +4483,19 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(MockTest.EchoF32(1.5) == 1.5)
         \\@Assert(MockTest.EchoF64(3.25) == 3.25)
         \\@Assert(MockTest.EchoF32(1.1) != 1.1)
+        \\@Assert(MockTest.EchoBool(1) == 1)
+        \\@Assert(MockTest.EchoBool(0) == 0)
+        \\@Assert(MockTest.EchoI16(1234) == 1234)
+        \\@Assert(MockTest.EchoI16(0 - 1234) == 0 - 1234)
+        \\@Assert(MockTest.EchoI16(32767) == 32767)
+        \\@Assert(MockTest.EchoI8(127) == 127)
+        \\@Assert(MockTest.EchoI8(0 - 128) == 0 - 128)
+        \\@Assert(MockTest.EchoU8(255) == 255)
+        \\@Assert(MockTest.EchoU8(0) == 0)
+        \\@Assert(MockTest.EchoI32(2000000000) == 2000000000)
+        \\@Assert(MockTest.EchoI32(0 - 2000000000) == 0 - 2000000000)
+        \\@Assert(MockTest.EchoI64(9007199254740993) == 9007199254740993)
+        \\@Assert(MockTest.EchoI64(0 - 9007199254740993) == 0 - 9007199254740993)
     );
     try testCode(dotnet_funcs,
         \\if (1) { var null_obj = 0 }

@@ -41,6 +41,31 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
+        b.path("mutiny-agent.md"),
+        .{ .custom = "appdata" },
+        "mutiny-agent.md",
+    ).step);
+
+    {
+        const tool = b.addExecutable(.{
+            .name = "installappdata",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/installappdata.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+            }),
+        });
+        tool.root_module.addImport("win32", win32_mod);
+        const run = b.addRunArtifact(tool);
+        run.step.dependOn(b.getInstallStep());
+        run.addArg(b.getInstallPath(.{ .custom = "appdata" }, ""));
+        b.step(
+            "install-appdata",
+            "install this build to %LOCALAPPDATA%\\mutiny",
+        ).dependOn(&run.step);
+    }
+
     const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{
         .dest_dir = .{ .override = .{ .custom = "appdata/dll" } },
     });

@@ -51,7 +51,7 @@ var attempt = 1
 loop
     if (SteamClient.get_IsValid()) { break }
     @Log("  no steam id yet, attempt ", attempt)
-    attempt = attempt + 1
+    set attempt = attempt + 1
     yield 2000
 continue
 
@@ -70,46 +70,46 @@ var punManagerInstance = PunManager.instance
 var value = 0
 var diff = 0
 
-value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, 0)
 @Log("Sprint current=", value)
-diff = 7 - value
-value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, diff)
+set diff = 7 - value
+set value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, diff)
 @Log("Sprint new   =", value)
 
-value = punManagerInstance.UpgradePlayerEnergy(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerEnergy(steam_id, 0)
 @Log("Stamina current=", value)
-diff = 1000 - value
-value = punManagerInstance.UpgradePlayerEnergy(steam_id, diff)
+set diff = 1000 - value
+set value = punManagerInstance.UpgradePlayerEnergy(steam_id, diff)
 @Log("Stamina new    =", value)
 
-value = punManagerInstance.UpgradePlayerHealth(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerHealth(steam_id, 0)
 @Log("Health current=", value)
-diff = 1000 - value
-value = punManagerInstance.UpgradePlayerHealth(steam_id, diff)
+set diff = 1000 - value
+set value = punManagerInstance.UpgradePlayerHealth(steam_id, diff)
 @Log("Health new    =", value)
 
-value = punManagerInstance.UpgradePlayerExtraJump(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerExtraJump(steam_id, 0)
 @Log("Jump current=", value)
-diff = 1000 - value
-value = punManagerInstance.UpgradePlayerExtraJump(steam_id, diff)
+set diff = 1000 - value
+set value = punManagerInstance.UpgradePlayerExtraJump(steam_id, diff)
 @Log("Jump new    =", value)
 
-value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, 0)
 @Log("Throw current=", value)
-diff = 1 - value
-value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, diff)
+set diff = 1 - value
+set value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, diff)
 @Log("Throw new    =", value)
 
-value = punManagerInstance.UpgradePlayerGrabRange(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerGrabRange(steam_id, 0)
 @Log("Range current=", value)
-diff = 3 - value
-value = punManagerInstance.UpgradePlayerGrabRange(steam_id, diff)
+set diff = 3 - value
+set value = punManagerInstance.UpgradePlayerGrabRange(steam_id, diff)
 @Log("Range new    =", value)
 
-value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, 0)
+set value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, 0)
 @Log("Strength current=", value)
-diff = 50 - value
-value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, diff)
+set diff = 50 - value
+set value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, diff)
 @Log("Strength new    =", value)
 
 var SemiFunc = @Class(game.SemiFunc)

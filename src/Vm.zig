@@ -1875,17 +1875,22 @@ fn log(
 }
 
 fn info(vm: *Vm, comptime fmt: []const u8, args: anytype) error{WriteFailed}!void {
-    std.log.info(fmt, args);
-    const out = vm.out orelse return;
+    const out = vm.out orelse {
+        std.log.info(fmt, args);
+        return;
+    };
     try out.print(fmt ++ "\n", args);
     try out.flush();
 }
 
 fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
-    try vm.info("@LogClass name='{s}' namespace='{s}':", .{
-        vm.dotnet_funcs.class_get_name(class),
-        vm.dotnet_funcs.class_get_namespace(class),
-    });
+    const class_name = vm.dotnet_funcs.class_get_name(class);
+    const class_namespace = vm.dotnet_funcs.class_get_namespace(class);
+    if (vm.out != null) std.log.info(
+        "@LogClass name='{s}' namespace='{s}' written to pipe",
+        .{ class_name, class_namespace },
+    );
+    try vm.info("@LogClass name='{s}' namespace='{s}':", .{ class_name, class_namespace });
     {
         var iterator: ?*anyopaque = null;
         while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {

@@ -1152,7 +1152,6 @@ fn wndProc(
             }
             var pipe_owned = true;
             defer if (pipe_owned) win32.closeHandle(pipe);
-            std.log.info("connected to '{f}'", .{fmtW(pipe_name)});
 
             var pipe_file: std.fs.File = .{ .handle = pipe };
             var pipe_write_buf: [400]u8 = undefined;

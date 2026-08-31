@@ -1,17 +1,17 @@
-pub const class_name = "MutinyWindow";
-pub const copydata_run_script: usize = 0x4d55544e;
-pub const copydata_result: win32.LRESULT = 0x3b7e15a2;
+pub const window_class_name = "MutinyWindow";
+pub const wm_copydata_run_script: usize = 0x4d55544e;
+pub const wm_copydata_result: win32.LRESULT = 0x3b7e15a2;
 
 pub const wm_heartbeat = win32.WM_APP + 0;
 pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
-pub fn find(pid: u32) ?win32.HWND {
+pub fn findWindow(pid: u32) ?win32.HWND {
     var prev: ?win32.HWND = null;
     while (true) {
         const hwnd = win32.FindWindowExW(
             win32.HWND_MESSAGE,
             prev,
-            win32.L(class_name),
+            win32.L(window_class_name),
             null,
         ) orelse return null;
         var hwnd_pid: u32 = undefined;

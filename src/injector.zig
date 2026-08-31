@@ -103,18 +103,18 @@ fn waitForWindow(process: ProcessResult) !void {
     var attempt: u32 = 0;
     const start = try std.time.Instant.now();
     while (true) : (attempt += 1) {
-        if (mutinywindow.find(process.pid)) |hwnd| {
+        if (mutinyipc.findWindow(process.pid)) |hwnd| {
             var heartbeat: usize = undefined;
             const sent = win32.SendMessageTimeoutW(
                 hwnd,
-                mutinywindow.wm_heartbeat,
+                mutinyipc.wm_heartbeat,
                 0,
                 0,
                 win32.SMTO_ABORTIFHUNG,
                 1000,
                 &heartbeat,
             );
-            if (sent != 0 and heartbeat == @as(usize, @bitCast(mutinywindow.heartbeat_result))) {
+            if (sent != 0 and heartbeat == @as(usize, @bitCast(mutinyipc.heartbeat_result))) {
                 std.log.info("mutiny window 0x{x} is serving pid {}", .{
                     @intFromPtr(hwnd),
                     process.pid,
@@ -395,4 +395,4 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const getname = @import("getname.zig");
 const appdata = @import("appdata.zig");
-const mutinywindow = @import("mutinywindow.zig");
+const mutinyipc = @import("mutinyipc.zig");

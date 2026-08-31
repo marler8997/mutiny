@@ -270,7 +270,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             .hCursor = null,
             .hbrBackground = null,
             .lpszMenuName = null,
-            .lpszClassName = win32.L(mutinywindow.class_name),
+            .lpszClassName = win32.L(mutinyipc.window_class_name),
             .hIconSm = null,
         };
         if (0 == win32.RegisterClassExW(&wc)) switch (win32.GetLastError()) {
@@ -284,7 +284,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     }
     const hwnd = win32.CreateWindowExW(
         .{},
-        win32.L(mutinywindow.class_name),
+        win32.L(mutinyipc.window_class_name),
         null,
         .{},
         0,
@@ -914,7 +914,7 @@ fn wndProc(
     switch (msg) {
         win32.WM_COPYDATA => {
             const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
-            if (copy_data.dwData != mutinywindow.copydata_run_script) {
+            if (copy_data.dwData != mutinyipc.wm_copydata_run_script) {
                 std.log.warn("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
                 return 0;
             }
@@ -928,9 +928,9 @@ fn wndProc(
                 "run-script '{f}' requested by pid {}",
                 .{ fmtW(script), wparam },
             );
-            return mutinywindow.copydata_result;
+            return mutinyipc.wm_copydata_result;
         },
-        mutinywindow.wm_heartbeat => return mutinywindow.heartbeat_result,
+        mutinyipc.wm_heartbeat => return mutinyipc.heartbeat_result,
         else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -942,7 +942,7 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const appdata = @import("appdata.zig");
 const Mutex = @import("Mutex.zig");
-const mutinywindow = @import("mutinywindow.zig");
+const mutinyipc = @import("mutinyipc.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");

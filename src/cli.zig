@@ -119,7 +119,7 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     );
     noMoreArgs(args, "run-script");
 
-    const hwnd = mutinywindow.find(pid) orelse errExit(
+    const hwnd = mutinyipc.findWindow(pid) orelse errExit(
         "pid {} has no mutiny window (is Mutiny.dll injected?)",
         .{pid},
     );
@@ -129,7 +129,7 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         error.OutOfMemory => |e| oom(e),
     };
     const copy_data: win32.COPYDATASTRUCT = .{
-        .dwData = mutinywindow.copydata_run_script,
+        .dwData = mutinyipc.wm_copydata_run_script,
         .cbData = @intCast(script_w.len * 2),
         .lpData = @ptrCast(@constCast(script_w.ptr)),
     };
@@ -139,7 +139,7 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         win32.GetCurrentProcessId(),
         @bitCast(@intFromPtr(&copy_data)),
     );
-    if (result != mutinywindow.copydata_result) errExit(
+    if (result != mutinyipc.wm_copydata_result) errExit(
         "pid {} did not handle the request (returned {}), is it running a compatible Mutiny.dll?",
         .{ pid, result },
     );
@@ -165,4 +165,4 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const cliscan = @import("cliscan.zig");
 const injector = @import("injector.zig");
-const mutinywindow = @import("mutinywindow.zig");
+const mutinyipc = @import("mutinyipc.zig");

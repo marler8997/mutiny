@@ -1692,12 +1692,6 @@ fn evalBuiltin(
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
         },
-        .@"@LogAssemblies" => vm.logAssemblies() catch |err| switch (err) {
-            error.WriteFailed => return vm.setError(.{ .log_error = .{
-                .pos = builtin_extent.start,
-                .err = error.Unexpected,
-            } }),
-        },
         .@"@LogClass" => {
             const class = switch (vm.pop(args_addr)) {
                 .class => |c| c,
@@ -1885,37 +1879,6 @@ fn info(vm: *Vm, comptime fmt: []const u8, args: anytype) error{WriteFailed}!voi
     const out = vm.out orelse return;
     try out.print(fmt ++ "\n", args);
     try out.flush();
-}
-
-fn logAssemblies(vm: *Vm) error{WriteFailed}!void {
-    switch (vm.dotnet_funcs.kind) {
-        .mono => |*mono| {
-            var context: LogAssemblies = .{ .vm = vm, .index = 0 };
-            try vm.info("mono_assembly_foreach:", .{});
-            mono.assembly_foreach(&logAssembliesMono, &context);
-            if (context.write_failed) return error.WriteFailed;
-            try vm.info("mono_assembly_foreach done", .{});
-        },
-        .il2cpp => |*il2cpp| {
-            var assembly_count: usize = undefined;
-            const assemblies = il2cpp.domain_get_assemblies(
-                vm.dotnet_funcs.domain_get().?,
-                &assembly_count,
-            );
-            for (0..assembly_count) |i| {
-                const assembly = assemblies[i];
-                const image = il2cpp.assembly_get_image(assembly);
-                const image_name = std.mem.span(il2cpp.image_get_name(image));
-                if (std.mem.eql(u8, image_name, "__Generated")) continue;
-                if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
-                    "expected all image names to end with '.dll' but got '{s}'",
-                    .{image_name},
-                );
-                const name = image_name[0 .. image_name.len - dll_suffix.len];
-                try vm.info("  assembly[{}] name='{s}'", .{ i, name });
-            }
-        },
-    }
 }
 
 fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
@@ -2762,31 +2725,6 @@ fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callcon
     // std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
-const LogAssemblies = struct {
-    vm: *Vm,
-    index: usize,
-    write_failed: bool = false,
-};
-fn logAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
-    const ctx: *LogAssemblies = @ptrCast(@alignCast(user_data));
-    defer ctx.index += 1;
-    const name = ctx.vm.dotnet_funcs.kind.mono.assembly_get_name(assembly) orelse {
-        std.log.err("  assembly[{}] get name failed", .{ctx.index});
-        return;
-    };
-    const str = ctx.vm.dotnet_funcs.kind.mono.assembly_name_get_name(name) orelse {
-        std.log.err(
-            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
-            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
-        );
-        return;
-    };
-    ctx.vm.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) }) catch |err| switch (err) {
-        error.WriteFailed => ctx.write_failed = true,
-    };
-}
-
 fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) dotnet.GcHandleV2 {
     const handle: dotnet.GcHandleV2 = switch (dotnet_funcs.kind) {
         .mono => |*mono| mono.gchandle_new_v2(object, 0),
@@ -2849,7 +2787,6 @@ const Builtin = enum {
     @"@Nothing", // temporary builtin for testing, remove this later
     @"@Exit",
     @"@Log",
-    @"@LogAssemblies",
     @"@LogClass",
     @"@Assembly",
     @"@TryAssembly",
@@ -2866,7 +2803,6 @@ const Builtin = enum {
             .@"@Nothing" => &.{},
             .@"@Exit" => &.{},
             .@"@Log" => null,
-            .@"@LogAssemblies" => &.{},
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@TryAssembly" => &.{.{ .concrete = .string_literal }},
@@ -2885,7 +2821,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Nothing", .@"@Nothing" },
     .{ "@Exit", .@"@Exit" },
     .{ "@Log", .@"@Log" },
-    .{ "@LogAssemblies", .@"@LogAssemblies" },
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@TryAssembly", .@"@TryAssembly" },
@@ -4020,9 +3955,9 @@ fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
 
 fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testCode(dotnet_funcs, "fn foo(){}");
-    try testCode(dotnet_funcs, "@LogAssemblies()");
-    try testCode(dotnet_funcs, "fn foo(){ @LogAssemblies() }");
-    try testCode(dotnet_funcs, "fn foo(){ @LogAssemblies() }foo()foo()");
+    try testCode(dotnet_funcs, "@Nothing()");
+    try testCode(dotnet_funcs, "fn foo(){ @Nothing() }");
+    try testCode(dotnet_funcs, "fn foo(){ @Nothing() }foo()foo()");
     try testCode(dotnet_funcs, "@Discard(0)");
     try testCode(dotnet_funcs, "@Discard(\"Hello\")");
     try testCode(dotnet_funcs, "@Discard(@Assembly(\"mscorlib\"))");

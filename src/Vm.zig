@@ -4,6 +4,7 @@ dotnet_funcs: *const dotnet.Funcs,
 error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
+out: ?*std.Io.Writer = null,
 
 symbol_state: union(enum) {
     none,
@@ -1682,37 +1683,20 @@ fn evalBuiltin(
                     .err = file_writer.err orelse error.Unexpected,
                 } }),
             };
+            if (vm.out) |out| vm.logOut(out, args_addr) catch |err| switch (err) {
+                error.WriteFailed => return vm.setError(.{ .log_error = .{
+                    .pos = builtin_extent.start,
+                    .err = error.Unexpected,
+                } }),
+            };
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
         },
-        .@"@LogAssemblies" => {
-            switch (vm.dotnet_funcs.kind) {
-                .mono => |*mono| {
-                    var context: LogAssemblies = .{ .vm = vm, .index = 0 };
-                    std.log.info("mono_assembly_foreach:", .{});
-                    mono.assembly_foreach(&logAssembliesMono, &context);
-                    std.log.info("mono_assembly_foreach done", .{});
-                },
-                .il2cpp => |*il2cpp| {
-                    var assembly_count: usize = undefined;
-                    const assemblies = il2cpp.domain_get_assemblies(
-                        vm.dotnet_funcs.domain_get().?,
-                        &assembly_count,
-                    );
-                    for (0..assembly_count) |i| {
-                        const assembly = assemblies[i];
-                        const image = il2cpp.assembly_get_image(assembly);
-                        const image_name = std.mem.span(il2cpp.image_get_name(image));
-                        if (std.mem.eql(u8, image_name, "__Generated")) continue;
-                        if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
-                            "expected all image names to end with '.dll' but got '{s}'",
-                            .{image_name},
-                        );
-                        const name = image_name[0 .. image_name.len - dll_suffix.len];
-                        std.log.info("  assembly[{}] name='{s}'", .{ i, name });
-                    }
-                },
-            }
+        .@"@LogAssemblies" => vm.logAssemblies() catch |err| switch (err) {
+            error.WriteFailed => return vm.setError(.{ .log_error = .{
+                .pos = builtin_extent.start,
+                .err = error.Unexpected,
+            } }),
         },
         .@"@LogClass" => {
             const class = switch (vm.pop(args_addr)) {
@@ -1721,28 +1705,12 @@ fn evalBuiltin(
             };
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
-            std.log.info("@LogClass name='{s}' namespace='{s}':", .{
-                vm.dotnet_funcs.class_get_name(class),
-                vm.dotnet_funcs.class_get_namespace(class),
-            });
-            {
-                var iterator: ?*anyopaque = null;
-                while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {
-                    const name = vm.dotnet_funcs.field_get_name(field);
-                    const flags = vm.dotnet_funcs.field_get_flags(field);
-                    const stinst: []const u8 = if (flags.static) "static  " else "instance";
-                    std.log.info(" - {s} field '{s}'", .{ stinst, name });
-                }
-            }
-            {
-                var iterator: ?*anyopaque = null;
-                while (vm.dotnet_funcs.class_get_methods(class, &iterator)) |method| {
-                    const name = vm.dotnet_funcs.method_get_name(method);
-                    const flags = vm.dotnet_funcs.method_get_flags(method, null);
-                    const stinst: []const u8 = if (flags.static) "static  " else "instance";
-                    std.log.info(" - {s} method '{s}'", .{ stinst, name });
-                }
-            }
+            vm.logClass(class) catch |err| switch (err) {
+                error.WriteFailed => return vm.setError(.{ .log_error = .{
+                    .pos = builtin_extent.start,
+                    .err = error.Unexpected,
+                } }),
+            };
         },
         .@"@Assembly" => {
             const extent = switch (vm.pop(args_addr)) {
@@ -1907,7 +1875,89 @@ fn log(
 
     try logfile.writeLogPrefix(writer);
     try writer.writeAll("@Log|");
+    try vm.logValues(writer, args_addr);
+    try writer.writeAll("\n");
+    try writer.flush();
+}
 
+fn info(vm: *Vm, comptime fmt: []const u8, args: anytype) error{WriteFailed}!void {
+    std.log.info(fmt, args);
+    const out = vm.out orelse return;
+    try out.print(fmt ++ "\n", args);
+    try out.flush();
+}
+
+fn logAssemblies(vm: *Vm) error{WriteFailed}!void {
+    switch (vm.dotnet_funcs.kind) {
+        .mono => |*mono| {
+            var context: LogAssemblies = .{ .vm = vm, .index = 0 };
+            try vm.info("mono_assembly_foreach:", .{});
+            mono.assembly_foreach(&logAssembliesMono, &context);
+            if (context.write_failed) return error.WriteFailed;
+            try vm.info("mono_assembly_foreach done", .{});
+        },
+        .il2cpp => |*il2cpp| {
+            var assembly_count: usize = undefined;
+            const assemblies = il2cpp.domain_get_assemblies(
+                vm.dotnet_funcs.domain_get().?,
+                &assembly_count,
+            );
+            for (0..assembly_count) |i| {
+                const assembly = assemblies[i];
+                const image = il2cpp.assembly_get_image(assembly);
+                const image_name = std.mem.span(il2cpp.image_get_name(image));
+                if (std.mem.eql(u8, image_name, "__Generated")) continue;
+                if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
+                    "expected all image names to end with '.dll' but got '{s}'",
+                    .{image_name},
+                );
+                const name = image_name[0 .. image_name.len - dll_suffix.len];
+                try vm.info("  assembly[{}] name='{s}'", .{ i, name });
+            }
+        },
+    }
+}
+
+fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
+    try vm.info("@LogClass name='{s}' namespace='{s}':", .{
+        vm.dotnet_funcs.class_get_name(class),
+        vm.dotnet_funcs.class_get_namespace(class),
+    });
+    {
+        var iterator: ?*anyopaque = null;
+        while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {
+            const name = vm.dotnet_funcs.field_get_name(field);
+            const flags = vm.dotnet_funcs.field_get_flags(field);
+            const stinst: []const u8 = if (flags.static) "static  " else "instance";
+            try vm.info(" - {s} field '{s}'", .{ stinst, name });
+        }
+    }
+    {
+        var iterator: ?*anyopaque = null;
+        while (vm.dotnet_funcs.class_get_methods(class, &iterator)) |method| {
+            const name = vm.dotnet_funcs.method_get_name(method);
+            const flags = vm.dotnet_funcs.method_get_flags(method, null);
+            const stinst: []const u8 = if (flags.static) "static  " else "instance";
+            try vm.info(" - {s} method '{s}'", .{ stinst, name });
+        }
+    }
+}
+
+fn logOut(
+    vm: *Vm,
+    writer: *std.Io.Writer,
+    args_addr: Memory.Addr,
+) error{WriteFailed}!void {
+    try vm.logValues(writer, args_addr);
+    try writer.writeAll("\n");
+    try writer.flush();
+}
+
+fn logValues(
+    vm: *Vm,
+    writer: *std.Io.Writer,
+    args_addr: Memory.Addr,
+) error{WriteFailed}!void {
     {
         var next_addr = args_addr;
         while (!next_addr.eql(vm.mem.top())) {
@@ -1942,8 +1992,6 @@ fn log(
             }
         }
     }
-    try writer.writeAll("\n");
-    try writer.flush();
 }
 
 fn writeObject(
@@ -2717,6 +2765,7 @@ fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callcon
 const LogAssemblies = struct {
     vm: *Vm,
     index: usize,
+    write_failed: bool = false,
 };
 fn logAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
     const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
@@ -2733,7 +2782,9 @@ fn logAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callco
         );
         return;
     };
-    std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
+    ctx.vm.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) }) catch |err| switch (err) {
+        error.WriteFailed => ctx.write_failed = true,
+    };
 }
 
 fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) dotnet.GcHandleV2 {

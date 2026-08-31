@@ -5,6 +5,7 @@ const global = struct {
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
 
     var mods: std.DoublyLinkedList = .{};
+    var scripts: std.DoublyLinkedList = .{};
 };
 
 pub fn panic(
@@ -412,6 +413,8 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
             std.log.warn("reset scratch allocator failed?", .{});
         }
 
+        const scripts_sleep_time_ms = serviceScripts(&dotnet_funcs, &tests_scheduled);
+
         if (tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
             Vm.runTests(&dotnet_funcs) catch |err| {
@@ -425,7 +428,7 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         }
 
         // var sleep_time_ms: u64 = 5000;
-        var sleep_time_ms: u64 = 1000;
+        var sleep_time_ms: u64 = @min(1000, scripts_sleep_time_ms);
         const now = getNow();
         {
             var maybe_mod = global.mods.first;
@@ -449,6 +452,168 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
 
     return 0;
 }
+
+const Client = struct {
+    pipe: win32.HANDLE,
+    pid: u32,
+};
+
+fn reportError(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) error{ WriteFailed, Reported } {
+    writer.print(fmt ++ "\n", args) catch return error.WriteFailed;
+    writer.flush() catch return error.WriteFailed;
+    return error.Reported;
+}
+
+fn addScript(
+    pid: u32,
+    pipe: win32.HANDLE,
+    writer: *std.Io.Writer,
+    name_w: []const u16,
+) error{ Reported, WriteFailed }!void {
+    const name_utf8_len = std.unicode.calcWtf8Len(name_w);
+    if (name_utf8_len > 255) return reportError(
+        writer,
+        "script name is {} bytes, too long (max 255)",
+        .{name_utf8_len},
+    );
+    if (name_w.len == 0) return reportError(writer, "script name is empty", .{});
+    for (name_w) |c| switch (c) {
+        '\\', '/', ':' => return reportError(
+            writer,
+            "script name '{f}' must be a name, not a path",
+            .{fmtW(name_w)},
+        ),
+        else => {},
+    };
+    if (std.mem.eql(u16, name_w, win32.L(".")) or std.mem.eql(u16, name_w, win32.L(".."))) {
+        return reportError(writer, "script name '{f}' is not a file", .{fmtW(name_w)});
+    }
+
+    var name_buf: [255]u8 = undefined;
+    std.debug.assert(name_utf8_len == std.unicode.wtf16LeToWtf8(&name_buf, name_w));
+    const name = name_buf[0..name_utf8_len];
+    {
+        var maybe_node = global.scripts.first;
+        while (maybe_node) |list_node| : (maybe_node = list_node.next) {
+            const script: *Script = @fieldParentPtr("list_node", list_node);
+            if (std.mem.eql(u8, script.name(), name)) return reportError(
+                writer,
+                "script '{s}' is already running (requested by pid {})",
+                .{ name, script.client.pid },
+            );
+        }
+    }
+
+    const localappdata = appdata.get() orelse return reportError(
+        writer,
+        "no LOCALAPPDATA environment variable",
+        .{},
+    );
+    const app_name = switch (logfile.global.getName()) {
+        .success => |s| s,
+        .err => |err| return reportError(writer, "{f}", .{err}),
+    };
+    var path_buf: [appdata.max_path]u16 = undefined;
+    const path = switch (appdata.format(&path_buf, localappdata, &.{
+        win32.L("mutiny"),
+        win32.L("app"),
+        app_name,
+        win32.L("scripts"),
+        name_w,
+    })) {
+        .ok => |p| p,
+        .too_long => return reportError(
+            writer,
+            "path for script '{f}' is too long",
+            .{fmtW(name_w)},
+        ),
+    };
+
+    const text = blk: {
+        const prefixed = std.os.windows.wToPrefixedFileW(null, path) catch |err| return reportError(
+            writer,
+            "bad script path '{f}', {t}",
+            .{ fmtW(path), err },
+        );
+        var file = std.fs.cwd().openFileW(prefixed.span(), .{}) catch |err| return reportError(
+            writer,
+            "open '{f}' failed with {t}",
+            .{ fmtW(path), err },
+        );
+        defer file.close();
+        break :blk file.readToEndAlloc(
+            std.heap.page_allocator,
+            std.math.maxInt(usize),
+        ) catch |err| return reportError(
+            writer,
+            "read '{f}' failed with {t}",
+            .{ fmtW(path), err },
+        );
+    };
+
+    const script = std.heap.page_allocator.create(Script) catch {
+        std.heap.page_allocator.free(text);
+        return reportError(
+            writer,
+            "out of memory creating script '{f}'",
+            .{fmtW(name_w)},
+        );
+    };
+    script.* = .{
+        .list_node = .{},
+        .client = .{ .pid = pid, .pipe = pipe },
+        .name_len = @intCast(name_utf8_len),
+        .name_buf = undefined,
+        .running = .{ .text = text },
+    };
+    @memcpy(script.name_buf[0..name.len], name);
+    global.scripts.append(&script.list_node);
+}
+
+const Script = struct {
+    list_node: std.DoublyLinkedList.Node,
+    client: Client,
+    name_len: u8,
+    name_buf: [255]u8,
+    running: Mod.HaveText,
+
+    pub fn name(script: *const Script) []const u8 {
+        return script.name_buf[0..script.name_len];
+    }
+
+    pub fn delete(script: *Script) void {
+        script.running.deinitFreeText();
+        win32.closeHandle(script.client.pipe);
+        global.scripts.remove(&script.list_node);
+        script.* = undefined;
+        std.heap.page_allocator.destroy(script);
+    }
+
+    pub fn reportToClient(script: *Script, comptime fmt: []const u8, args: anytype) void {
+        var file: std.fs.File = .{ .handle = script.client.pipe };
+        var buf: [512]u8 = undefined;
+        var file_writer = file.writerStreaming(&buf);
+        const write_failed = blk: {
+            file_writer.interface.print(fmt ++ "\n", args) catch |e| switch (e) {
+                error.WriteFailed => break :blk true,
+            };
+            file_writer.interface.flush() catch |e| switch (e) {
+                error.WriteFailed => break :blk true,
+            };
+            break :blk false;
+        };
+        if (write_failed) std.log.err(
+            "write to client pipe failed with {t}",
+            .{file_writer.err.?},
+        );
+    }
+
+    pub fn nextYieldSleepMs(script: *const Script, now: std.time.Instant) u64 {
+        const vm_state = &(script.running.vm_state orelse return std.math.maxInt(u64));
+        const yielded = &(vm_state.yielded orelse return std.math.maxInt(u64));
+        return yielded.nextSleepMs(now);
+    }
+};
 
 const Mod = struct {
     list_node: std.DoublyLinkedList.Node,
@@ -735,7 +900,7 @@ fn updateMods(
 
         switch (mod.state) {
             .initial, .err_no_text => {},
-            .have_text => |*h| runMod(dotnet_funcs, out_tests_scheduled, mod.name(), h),
+            .have_text => |*h| runMod(dotnet_funcs, out_tests_scheduled, mod.name(), h, null),
         }
     }
 
@@ -746,11 +911,43 @@ fn updateMods(
     return null;
 }
 
+fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool) u64 {
+    var sleep_time_ms: u64 = std.math.maxInt(u64);
+    var maybe_node = global.scripts.first;
+    while (maybe_node) |list_node| {
+        maybe_node = list_node.next;
+        const script: *Script = @fieldParentPtr("list_node", list_node);
+        var pipe_file: std.fs.File = .{ .handle = script.client.pipe };
+        var pipe_buf: [4096]u8 = undefined;
+        var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
+        runMod(
+            dotnet_funcs,
+            out_tests_scheduled,
+            script.name(),
+            &script.running,
+            &pipe_writer.interface,
+        );
+
+        const vm_state = &script.running.vm_state.?;
+        if (vm_state.yielded == null) {
+            switch (vm_state.instance.error_result) {
+                .exit => {},
+                .err => |err| script.reportToClient("{f}", .{err.fmt(script.running.text)}),
+            }
+            script.delete();
+        } else {
+            sleep_time_ms = @min(sleep_time_ms, script.nextYieldSleepMs(getNow()));
+        }
+    }
+    return sleep_time_ms;
+}
+
 fn runMod(
     dotnet_funcs: *const dotnet.Funcs,
     out_tests_scheduled: *bool,
     mod_name: []const u8,
     have_text: *Mod.HaveText,
+    out: ?*std.Io.Writer,
 ) void {
     const Eval = struct {
         vm: *Vm,
@@ -787,6 +984,8 @@ fn runMod(
         }
     };
     if (maybe_eval) |eval| {
+        eval.vm.out = out;
+        defer eval.vm.out = null;
         if (eval.vm.evalRoot(eval.block_resume)) |yield| {
             // TODO: call vm.verifyStack?
             out_tests_scheduled.* = out_tests_scheduled.* or eval.vm.tests_scheduled;
@@ -915,22 +1114,26 @@ fn wndProc(
         win32.WM_COPYDATA => {
             const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             if (copy_data.dwData != mutinyipc.wm_copydata_run_script) {
-                std.log.warn("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
+                std.log.info("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
                 return 0x7fffffff;
             }
             if (copy_data.cbData == 0 or copy_data.cbData % 2 != 0) {
-                std.log.warn("bad run-script cbData {}", .{copy_data.cbData});
+                std.log.info("bad run-script cbData {}", .{copy_data.cbData});
                 return 0x7fffffff;
             }
             const script_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
             const script: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
+            const pid: u32 = std.math.cast(u32, wparam) orelse {
+                std.log.info("WM_COPYDATA wParam {} is not a valid 32-bit pid", .{wparam});
+                return 0x7fffffff;
+            };
             std.log.info(
                 "run-script '{f}' requested by pid {}",
-                .{ fmtW(script), wparam },
+                .{ fmtW(script), pid },
             );
 
             var pipe_name_buf: [mutinyipc.pipe_name_buf_len]u16 = undefined;
-            const pipe_name = mutinyipc.formatClientPipeName(&pipe_name_buf, @intCast(wparam));
+            const pipe_name = mutinyipc.formatClientPipeName(&pipe_name_buf, pid);
             const pipe = win32.CreateFileW(
                 pipe_name,
                 .{ .FILE_WRITE_DATA = 1 },
@@ -947,15 +1150,23 @@ fn wndProc(
                 });
                 return 0x7fffffff;
             }
+            var pipe_owned = true;
+            defer if (pipe_owned) win32.closeHandle(pipe);
             std.log.info("connected to '{f}'", .{fmtW(pipe_name)});
-            {
-                const hello = "run-script is not implemented yet\n";
-                var written: u32 = undefined;
-                if (0 == win32.WriteFile(pipe, hello, hello.len, &written, null)) {
-                    std.log.err("write to client pipe failed, error={f}", .{win32.GetLastError()});
-                }
+
+            var pipe_file: std.fs.File = .{ .handle = pipe };
+            var pipe_write_buf: [400]u8 = undefined;
+            var pipe_writer = pipe_file.writerStreaming(&pipe_write_buf);
+            const writer = &pipe_writer.interface;
+            if (addScript(pid, pipe, writer, script)) {
+                pipe_owned = false;
+            } else |e| switch (e) {
+                error.Reported => return mutinyipc.wm_copydata_result,
+                error.WriteFailed => {
+                    std.log.err("write to client pipe failed with {t}", .{pipe_writer.err.?});
+                    return mutinyipc.wm_copydata_result;
+                },
             }
-            win32.closeHandle(pipe);
             return mutinyipc.wm_copydata_result;
         },
         mutinyipc.wm_heartbeat => return mutinyipc.heartbeat_result,

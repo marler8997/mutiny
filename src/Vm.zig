@@ -1242,7 +1242,13 @@ const MonoObjectType = enum {
 
 const MarshalValue = union(enum) {
     boolean: c_int,
+    i1: i8,
+    u1: u8,
+    i2: i16,
+    u2: u16,
     i4: i32,
+    u4: u32,
+    i8: i64,
     r4: f32,
     r8: f64,
     u8: u64,
@@ -1256,15 +1262,15 @@ const MarshalValue = union(enum) {
             .void => null,
             .boolean => .{ .boolean = undefined },
             // .char => .{ .char = undefined },
-            // .i1 => .{ .i1 = undefined },
-            // .u1 => .{ .u1 = undefined },
-            // .i2 => .{ .i2 = undefined },
-            // .u2 => .{ .u2 = undefined },
+            .i1 => .{ .i1 = undefined },
+            .u1 => .{ .u1 = undefined },
+            .i2 => .{ .i2 = undefined },
+            .u2 => .{ .u2 = undefined },
             .i4 => .{ .i4 = undefined },
+            .u4 => .{ .u4 = undefined },
+            .i8 => .{ .i8 = undefined },
             .r4 => .{ .r4 = undefined },
             .r8 => .{ .r8 = undefined },
-            // .u4 => .{ .u4 = undefined },
-            // .i8 => .{ .i8 = undefined },
             .u8 => .{ .u8 = undefined },
             // .string => .{ .string = undefined },
             .string => .{ .maybe_object = undefined },
@@ -1275,7 +1281,7 @@ const MarshalValue = union(enum) {
             // .genericinst => .{ .genericinst = undefined },
             .genericinst => .{ .maybe_object = undefined },
             .object => .{ .maybe_object = undefined },
-            .char, .i1, .u1, .i2, .u2, .u4, .i8, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+            .char, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
                 std.log.warn("unsure if type '{s}' should be supported (MarshalValue)", .{@tagName(t)});
                 return null;
             },
@@ -1299,9 +1305,18 @@ fn pushMarshalValue(vm: *Vm, class: *const dotnet.Class, value: *const MarshalVa
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = if (value.boolean == 0) 0 else 1;
         },
-        .i4 => {
+        .i1, .u1, .i2, .u2, .i4, .u4, .i8 => {
             (try vm.push(Type)).* = .integer;
-            (try vm.push(i64)).* = value.i4;
+            (try vm.push(i64)).* = switch (value.*) {
+                .i1 => |v| v,
+                .u1 => |v| v,
+                .i2 => |v| v,
+                .u2 => |v| v,
+                .i4 => |v| v,
+                .u4 => |v| v,
+                .i8 => |v| v,
+                else => unreachable,
+            };
         },
         .r4 => {
             (try vm.push(Type)).* = .float;
@@ -2366,15 +2381,62 @@ const Value = union(enum) {
         value: MarshalValue,
     } {
         switch (kind) {
-            .i4 => switch (value.*) {
+            .boolean, .i1, .u1, .i2, .u2, .i4, .u4, .i8, .u8 => switch (value.*) {
                 .integer => |int| {
-                    const casted = std.math.cast(i32, int) orelse return .{ .overflow = .{
+                    if (!integerFitsKind(int, kind)) return .{ .overflow = .{
                         .value = int,
-                        .int = .{ .signedness = .signed, .bits = 32 },
+                        .int = switch (kind) {
+                            .boolean => .{ .signedness = .unsigned, .bits = 1 },
+                            .i1 => .{ .signedness = .signed, .bits = 8 },
+                            .u1 => .{ .signedness = .unsigned, .bits = 8 },
+                            .i2 => .{ .signedness = .signed, .bits = 16 },
+                            .u2 => .{ .signedness = .unsigned, .bits = 16 },
+                            .i4 => .{ .signedness = .signed, .bits = 32 },
+                            .u4 => .{ .signedness = .unsigned, .bits = 32 },
+                            .i8 => .{ .signedness = .signed, .bits = 64 },
+                            .u8 => .{ .signedness = .unsigned, .bits = 64 },
+                            else => unreachable,
+                        },
                     } };
-                    return .{ .value = .{ .i4 = casted } };
+                    return .{ .value = switch (kind) {
+                        .boolean => .{ .boolean = @intCast(int) },
+                        .i1 => .{ .i1 = @intCast(int) },
+                        .u1 => .{ .u1 = @intCast(int) },
+                        .i2 => .{ .i2 = @intCast(int) },
+                        .u2 => .{ .u2 = @intCast(int) },
+                        .i4 => .{ .i4 = @intCast(int) },
+                        .u4 => .{ .u4 = @intCast(int) },
+                        .i8 => .{ .i8 = int },
+                        .u8 => .{ .u8 = @intCast(int) },
+                        else => unreachable,
+                    } };
                 },
                 else => return .{ .unexpected_type = .{ .expected = "an integer", .actual = value.getType() } },
+            },
+            .r4 => switch (value.*) {
+                .float => |f| return .{ .value = .{
+                    .r4 = narrowF64ToF32(f) orelse return .{ .overflow = .{
+                        .value = 0,
+                        .int = .{ .signedness = .signed, .bits = 32 },
+                    } },
+                } },
+                .integer => |int| return .{ .value = .{
+                    .r4 = exactI64ToF32(int) orelse return .{ .overflow = .{
+                        .value = int,
+                        .int = .{ .signedness = .signed, .bits = 32 },
+                    } },
+                } },
+                else => return .{ .unexpected_type = .{ .expected = "a number", .actual = value.getType() } },
+            },
+            .r8 => switch (value.*) {
+                .float => |f| return .{ .value = .{ .r8 = f } },
+                .integer => |int| return .{ .value = .{
+                    .r8 = exactI64ToF64(int) orelse return .{ .overflow = .{
+                        .value = int,
+                        .int = .{ .signedness = .signed, .bits = 64 },
+                    } },
+                } },
+                else => return .{ .unexpected_type = .{ .expected = "a number", .actual = value.getType() } },
             },
             else => {
                 std.log.err("todo: getMarshalConst mono type kind {t}", .{kind});
@@ -4416,6 +4478,13 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var foo = MockTest.static_field_null
         \\@Assert(@IsNull(foo))
         \\@Assert(0 == @NotNull(foo))
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\var dt = DateTime.get_Now()
+        \\set dt._dateData = 123
+        \\@Assert(dt._dateData == 123)
     );
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")

@@ -26,7 +26,7 @@ ExprSuffix
 
 PrimaryTypeExpr
    <- IDENTIFIER
-    / INTEGER
+    / NUMBER
     / STRINGLITERAL
 
 Block <- LBRACE Statement* RBRACE

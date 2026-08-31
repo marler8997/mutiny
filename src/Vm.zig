@@ -1543,6 +1543,14 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
         },
         .number_literal => {
             const str = vm.text[first_token.start..first_token.end];
+            if (std.mem.indexOfScalar(u8, str, '.') != null) {
+                const value = std.fmt.parseFloat(f64, str) catch return vm.setError(.{
+                    .bad_num_literal = first_token.extent(),
+                });
+                (try vm.push(Type)).* = .float;
+                (try vm.push(f64)).* = value;
+                return first_token.end;
+            }
             const value = std.fmt.parseInt(i64, str, 10) catch |err| switch (err) {
                 error.Overflow => return vm.setError(.{ .num_literal_overflow = first_token.extent() }),
                 error.InvalidCharacter => return vm.setError(.{ .bad_num_literal = first_token.extent() }),
@@ -3201,6 +3209,8 @@ fn lex(text: []const u8, lex_start: usize) Token {
         slash: usize,
         line_comment,
         int: usize,
+        int_period: usize,
+        float: usize,
         angle_bracket_left: usize,
         angle_bracket_right: usize,
     };
@@ -3221,7 +3231,8 @@ fn lex(text: []const u8, lex_start: usize) Token {
             .equal => |start| .{ .tag = .@"=", .start = start, .end = index },
             .bang => |start| .{ .tag = .@"!", .start = start, .end = index },
             .slash => |start| .{ .tag = .slash, .start = start, .end = index },
-            .int => |start| .{ .tag = .number_literal, .start = start, .end = index },
+            .int, .float => |start| .{ .tag = .number_literal, .start = start, .end = index },
+            .int_period => |start| .{ .tag = .number_literal, .start = start, .end = index - 1 },
             .angle_bracket_left => |start| .{ .tag = .@"<", .start = start, .end = index },
             .angle_bracket_right => |start| .{ .tag = .@">", .start = start, .end = index },
         };
@@ -3335,6 +3346,23 @@ fn lex(text: []const u8, lex_start: usize) Token {
                 else => index += 1,
             },
             .int => |start| switch (text[index]) {
+                '.' => {
+                    state = .{ .int_period = start };
+                    index += 1;
+                },
+                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
+                    index += 1;
+                },
+                else => return .{ .tag = .number_literal, .start = start, .end = index },
+            },
+            .int_period => |start| switch (text[index]) {
+                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
+                    state = .{ .float = start };
+                    index += 1;
+                },
+                else => return .{ .tag = .number_literal, .start = start, .end = index - 1 },
+            },
+            .float => |start| switch (text[index]) {
                 '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
                     index += 1;
                 },
@@ -3647,7 +3675,7 @@ const ErrorFmt = struct {
                 .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
             ),
             .bad_num_literal => |e| try writer.print(
-                "{d}: invalid integer literal '{s}'",
+                "{d}: invalid number literal '{s}'",
                 .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
             ),
             .called_non_function => |e| if (e.unexpected_type) |t| switch (t) {
@@ -3955,7 +3983,7 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     // try testCode("@Assembly(\"mscorlib\")" ++ (".a" ** max_fields));
     // try testBadCode(dotnet_funcs, "@Assembly(\"mscorlib\")" ++ (".a" ** (max_fields + 1)), "1: too many assembly fields");
 
-    try testBadCode(dotnet_funcs, "0n", "1: invalid integer literal '0n'");
+    try testBadCode(dotnet_funcs, "0n", "1: invalid number literal '0n'");
 
     try testBadCode(dotnet_funcs, "fn a(", "1: syntax error: expected an identifier or close paren ')' but got EOF");
     try testBadCode(dotnet_funcs, "fn a(0){}", "1: syntax error: expected an identifier or close paren ')' but got a number literal 0");
@@ -3981,6 +4009,9 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "(0", "1: syntax error: expected a close paren ')' to end expression but got EOF");
     try testBadCode(dotnet_funcs, "0+@Nothing()", "1: one side of binary operation '+' is nothing");
     try testBadCode(dotnet_funcs, "@Nothing()+0", "1: one side of binary operation '+' is nothing");
+    try testBadCode(dotnet_funcs, "@Log(1.)", "1: syntax error: expected an identifier after '.' but got a close paren ')'");
+    try testBadCode(dotnet_funcs, "@Log(1.5.5)", "1: syntax error: expected an identifier after '.' but got a number literal 5");
+    try testBadCode(dotnet_funcs, "@Log(1.foo)", "1: invalid number literal '1.foo'");
     if (is_monomock) try testBadCode(dotnet_funcs,
         \\var mocktest = @Assembly("mocktest")
         \\var MockTest = @Class(mocktest.MockTest)
@@ -4226,6 +4257,16 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     );
     try testCode(dotnet_funcs, "@Log((0))");
     try testCode(dotnet_funcs, "@Log(((0)))");
+    try testCode(dotnet_funcs, "@Log(1.5)");
+    try testCode(dotnet_funcs, "@Assert(1.5 == 1.5)");
+    try testCode(dotnet_funcs, "@Assert(1.5 != 1.25)");
+    try testCode(dotnet_funcs, "@Assert(1.5 > 1)");
+    try testCode(dotnet_funcs, "@Assert(1.5 < 2)");
+    try testCode(dotnet_funcs, "@Assert(2.0 == 2)");
+    try testCode(dotnet_funcs, "@Assert(1.5 + 1.5 == 3)");
+    try testCode(dotnet_funcs, "@Assert(1.5 + 1 == 2.5)");
+    try testCode(dotnet_funcs, "@Assert(3.0 / 2 == 1.5)");
+    try testCode(dotnet_funcs, "@Assert(0.5 + 0.5 == 1)");
     try testCode(dotnet_funcs, "@Log(3+4)");
     try testCode(dotnet_funcs, "@Log(3/4)");
     try testCode(dotnet_funcs, "@Log(15/(1+4))");
@@ -4383,6 +4424,13 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(MockTest.EchoF64(9007199254740992) == 9007199254740992)
         \\@Assert(MockTest.EchoF32(MockTest.GetF64()) == MockTest.GetF64())
         \\@Assert(MockTest.EchoF64(MockTest.GetHugeF64()) == MockTest.GetHugeF64())
+        \\@Assert(MockTest.GetF32() == 1.5)
+        \\@Assert(MockTest.GetF64() == 3.25)
+        \\@Assert(MockTest.static_field_f32 == 2.25)
+        \\@Assert(MockTest.static_field_f64 == 4.75)
+        \\@Assert(MockTest.EchoF32(1.5) == 1.5)
+        \\@Assert(MockTest.EchoF64(3.25) == 3.25)
+        \\@Assert(MockTest.EchoF32(1.1) != 1.1)
     );
     try testCode(dotnet_funcs,
         \\if (1) { var null_obj = 0 }

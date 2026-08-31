@@ -127,7 +127,8 @@ statement  := "var" ident "=" expr        // declare, initializer required
 block      := "{" statement* "}"
 ref        := ident ( "." ident )*
 expr       := operand ( binop operand )*
-operand    := int | string | ref | call | builtin "(" args ")"
+operand    := number | string | ref | call | builtin "(" args ")"
+number     := "1"  (integer)  |  "1.5"  (float)
 call       := ref "(" args ")"
 binop      := "+" | "-" | "/"                        // math priority
             | "==" | "!=" | "<" | "<=" | ">" | ">="  // comparison priority, lower
@@ -140,11 +141,6 @@ deliberate exclusions, and they will likely be filled in over time:
 - **No `*` yet.** Division exists, multiplication doesn't. Use repeated addition, or restructure
   to avoid needing it.
 - **No `&&` or `||` yet.** Nest `if`s instead.
-- **Floats can be read and compared, but not written as literals yet.** Reading a `float`/`double`
-  field or return value works, and comparing it against an integer works
-  (`if (health < 50)`). You can pass an integer where a `float` or `double` parameter is expected
-  — `SetHealth(100)` converts correctly. What you cannot yet write is a fractional literal like
-  `1.5`, so a value between integers has to come from the game itself.
 - **A conversion that would lose precision is a hard error**, not a silent rounding. Passing an
   integer too large to be represented exactly stops the script with
   "cannot convert N to r4 without losing precision" rather than corrupting the value.
@@ -182,10 +178,12 @@ These are not style advice. Each one is a way to take the game down.
    that your arguments match the parameters. Passing the wrong types is not an error; it is
    silent memory corruption followed by a crash later.
 
-2. **Every integer you pass is sent as a 64-bit integer, whatever the method declares.** A method
-   taking `float`, `int`, or `bool` will reinterpret those bits as garbage. `Heal(100)` on a
-   `Heal(float)` does *not* heal 100. This is the single most likely way to break something, and
-   there is currently no way to pass a real float.
+2. **`float` and `double` parameters are converted properly**, and a value that can't be
+   represented is refused rather than corrupted — `Heal(100)` and `Heal(87.5)` on a
+   `Heal(float)` both work. **Integer parameters are passed as a raw 64-bit value with no range
+   check**, so a value too large for the declared width — 70000 into a `short` — is expected to
+   truncate silently rather than error. Keep integer arguments within the range the parameter
+   actually declares.
 
 3. **Scripts run on Mutiny's own thread, not Unity's main thread.** Most Unity engine APIs must be
    called from the main thread and will fault elsewhere. Prefer plain field reads/writes and

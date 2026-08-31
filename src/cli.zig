@@ -124,6 +124,24 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         .{pid},
     );
 
+    var pipe_name_buf: [mutinyipc.pipe_name_buf_len]u16 = undefined;
+    const pipe_name = mutinyipc.formatClientPipeName(&pipe_name_buf, win32.GetCurrentProcessId());
+    const pipe = win32.CreateNamedPipeW(
+        pipe_name,
+        win32.PIPE_ACCESS_INBOUND,
+        .{},
+        1,
+        0,
+        4096,
+        0,
+        null,
+    );
+    if (pipe == win32.INVALID_HANDLE_VALUE) errExit(
+        "CreateNamedPipe '{f}' failed, error={f}",
+        .{ std.unicode.fmtUtf16Le(pipe_name), win32.GetLastError() },
+    );
+    defer win32.closeHandle(pipe);
+
     const script_w = std.unicode.wtf8ToWtf16LeAlloc(arena, script) catch |err| switch (err) {
         error.InvalidWtf8 => errExit("script name '{s}' is not valid UTF-8", .{script}),
         error.OutOfMemory => |e| oom(e),
@@ -143,6 +161,29 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         "pid {} did not handle the request (returned {}), is it running a compatible Mutiny.dll?",
         .{ pid, result },
     );
+
+    const stdout = std.fs.File.stdout().handle;
+    while (true) {
+        var buf: [4096]u8 = undefined;
+        var read_len: u32 = undefined;
+        if (0 == win32.ReadFile(pipe, &buf, buf.len, &read_len, null)) switch (win32.GetLastError()) {
+            .ERROR_BROKEN_PIPE => break,
+            else => |e| errExit("read from pid {} failed, error={f}", .{ pid, e }),
+        };
+        if (read_len == 0) break;
+        var written: u32 = 0;
+        while (written < read_len) {
+            var wrote: u32 = undefined;
+            if (0 == win32.WriteFile(
+                stdout,
+                buf[written..].ptr,
+                read_len - written,
+                &wrote,
+                null,
+            )) win32.panicWin32("WriteFile(stdout)", win32.GetLastError());
+            written += wrote;
+        }
+    }
     return 0;
 }
 

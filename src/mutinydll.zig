@@ -916,11 +916,11 @@ fn wndProc(
             const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             if (copy_data.dwData != mutinyipc.wm_copydata_run_script) {
                 std.log.warn("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
-                return 0;
+                return 0x7fffffff;
             }
             if (copy_data.cbData == 0 or copy_data.cbData % 2 != 0) {
                 std.log.warn("bad run-script cbData {}", .{copy_data.cbData});
-                return win32.DefWindowProcW(hwnd, msg, wparam, lparam);
+                return 0x7fffffff;
             }
             const script_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
             const script: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
@@ -928,6 +928,34 @@ fn wndProc(
                 "run-script '{f}' requested by pid {}",
                 .{ fmtW(script), wparam },
             );
+
+            var pipe_name_buf: [mutinyipc.pipe_name_buf_len]u16 = undefined;
+            const pipe_name = mutinyipc.formatClientPipeName(&pipe_name_buf, @intCast(wparam));
+            const pipe = win32.CreateFileW(
+                pipe_name,
+                .{ .FILE_WRITE_DATA = 1 },
+                .{},
+                null,
+                .OPEN_EXISTING,
+                .{},
+                null,
+            );
+            if (pipe == win32.INVALID_HANDLE_VALUE) {
+                std.log.err("connect to '{f}' failed, error={f}", .{
+                    fmtW(pipe_name),
+                    win32.GetLastError(),
+                });
+                return 0x7fffffff;
+            }
+            std.log.info("connected to '{f}'", .{fmtW(pipe_name)});
+            {
+                const hello = "run-script is not implemented yet\n";
+                var written: u32 = undefined;
+                if (0 == win32.WriteFile(pipe, hello, hello.len, &written, null)) {
+                    std.log.err("write to client pipe failed, error={f}", .{win32.GetLastError()});
+                }
+            }
+            win32.closeHandle(pipe);
             return mutinyipc.wm_copydata_result;
         },
         mutinyipc.wm_heartbeat => return mutinyipc.heartbeat_result,

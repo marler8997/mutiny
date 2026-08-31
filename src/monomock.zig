@@ -803,11 +803,23 @@ export fn mono_field_static_get_value(
         .instance => @panic("cannot call field_get_value for non-static field, MONO crashes in this case"),
     }
 }
+fn assertRooted(o: *const dotnet.Object) void {
+    const domain = domain_get().?;
+    for (domain.gc_handles.items) |slot| {
+        if (slot == o) return;
+    }
+    std.debug.panic(
+        "mock: object 0x{x} used with no gc handle rooting it (use after free?)",
+        .{@intFromPtr(o)},
+    );
+}
+
 export fn mono_field_get_value(
     o: *const dotnet.Object,
     f: *const dotnet.ClassField,
     out_value: *anyopaque,
 ) callconv(.c) void {
+    assertRooted(o);
     const field: *const MockClassField = .fromMono(f);
     switch (field.kind) {
         // I think mono crashes if you do this

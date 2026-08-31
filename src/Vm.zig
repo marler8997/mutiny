@@ -735,9 +735,7 @@ fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
 const Reference = union(enum) {
     symbol_entry: SymbolEntry,
     object_field: struct {
-        // for now this handle is a weak reference, we rely on it being owned by something else
-        // for the duration of the set statement that this reference is apart of
-        handle: dotnet.GcHandleV2,
+        handle_addr: Memory.Addr,
         extent: Extent,
     },
 };
@@ -759,7 +757,8 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
             }
         },
         .object_field => |*field| {
-            const obj = gchandleTarget(vm.dotnet_funcs, field.handle);
+            const gc_handle, _ = vm.readValue(dotnet.GcHandleV2, field.handle_addr);
+            const obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
             const class = vm.dotnet_funcs.object_get_class(obj);
             const name = try vm.managedId(field.extent);
             // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
@@ -796,14 +795,10 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
         .symbol_entry => |*entry| {
             const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
             switch (symbol_type) {
-                .object => {
-                    const gc_handle, const end = vm.readValue(dotnet.GcHandleV2, symbol_value_addr);
-                    std.debug.assert(end.eql(vm.mem.top()));
-                    ref.* = .{ .object_field = .{
-                        .handle = gc_handle,
-                        .extent = id_extent,
-                    } };
-                },
+                .object => ref.* = .{ .object_field = .{
+                    .handle_addr = symbol_value_addr,
+                    .extent = id_extent,
+                } },
                 else => {
                     std.log.err(
                         "todo: get field '{s}' on type {t}",
@@ -960,9 +955,7 @@ fn evalExprSuffix(
                     const name = try vm.managedId(id_extent);
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
                     if (vm.dotnet_funcs.class_get_field_from_name(class, name.slice())) |field| {
-                        // is it a problem that we free the GC handle here?
-                        // maybe we NEED to free it after pushing the monjo field by using defer?
-                        gchandleFree(vm.dotnet_funcs, gc_handle);
+                        defer gchandleFree(vm.dotnet_funcs, gc_handle);
                         _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, obj, id_extent);
                     } else {
@@ -4484,6 +4477,21 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var dt = DateTime.get_Now()
         \\set dt._dateData = 123
         \\@Assert(dt._dateData == 123)
+        \\var declared_after = 7
+        \\set dt._dateData = 456
+        \\@Assert(dt._dateData == 456)
+        \\@Assert(declared_after == 7)
+    );
+    if (is_monomock) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\@Discard(DateTime.get_Now()._dateData)
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+        \\@Assert(TimeSpan.FromSeconds(1)._ticks == 10000000)
+        \\@Assert(TimeSpan.FromSeconds(2)._ticks == 20000000)
     );
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")

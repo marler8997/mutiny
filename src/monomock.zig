@@ -114,6 +114,7 @@ const MockAssembly = struct {
     }
 };
 const MockImage = struct {
+    filename: [:0]const u8,
     namespaces: []const Namespace,
     pub fn fromMono(image: *const dotnet.Image) *const MockImage {
         return @ptrCast(@alignCast(image));
@@ -401,8 +402,14 @@ const mock_class = struct {
     };
 };
 
+const mock_root = switch (builtin.os.tag) {
+    .windows => "C:\\monomock" ++ "\\",
+    else => "/monomock/",
+};
+
 const assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mocktest" }, .image = .{
+        .filename = mock_root ++ "mocktest.dll",
         .namespaces = &[_]Namespace{
             .{ .prefix = "", .classes = &[_]MockClass{
                 .{ .name = "MockTest", .methods = &[_]MockMethod{
@@ -415,6 +422,7 @@ const assemblies = [_]MockAssembly{
         },
     } },
     .{ .name = .{ .cstr = "mscorlib" }, .image = .{
+        .filename = mock_root ++ "mscorlib.dll",
         .namespaces = &[_]Namespace{
             .{ .prefix = "System", .classes = &[_]MockClass{
                 mock_class.@"System.Int32",
@@ -447,6 +455,10 @@ export fn mono_assembly_get_name(a: *const dotnet.Assembly) callconv(.c) ?*const
 export fn mono_assembly_get_image(a: *const dotnet.Assembly) callconv(.c) ?*const dotnet.Image {
     const assembly: *const MockAssembly = .fromMono(a);
     return assembly.image.toMono();
+}
+export fn mono_image_get_filename(i: *const dotnet.Image) callconv(.c) ?[*:0]const u8 {
+    const image: *const MockImage = .fromMono(i);
+    return image.filename;
 }
 export fn mono_assembly_name_get_name(n: *const dotnet.AssemblyName) callconv(.c) ?[*:0]const u8 {
     const name: *const MockAssemblyName = .fromMono(n);

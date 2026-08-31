@@ -30,7 +30,10 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
   stderr.txt
 ```
 
-A name starting with `@` is a builtin that needs no file at all, i.e. `mutiny run-script <PID> @assemblies` prints the assemblies the game has loaded.
+A name starting with `@` is a builtin that needs no file at all:
+
+- `mutiny run-script <PID> @assemblies` prints the assemblies the game has loaded, one per line.
+- `mutiny run-script <PID> @decomp` prints where the game's code lives — the runtime kind, the exe, and each loaded assembly with its path on disk (or the `GameAssembly.dll` path, for il2cpp games where the assemblies have no separate files). Tab-separated, meant to be fed to other tools.
 
 The difference between the two directories is *when they run*, not what's in them — both hold the same script language. A file in `mods\` runs by itself and re-runs whenever you edit it, which is what you want for a persistent effect like godmode. A file in `scripts\` does nothing until `mutiny run-script` names it, and its output comes back to your terminal instead of only going to the log, which is what you want for a one-off question like "which assemblies are loaded".
 

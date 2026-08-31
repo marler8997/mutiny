@@ -458,7 +458,7 @@ const Client = struct {
     pid: u32,
 };
 
-const Builtin = enum { assemblies };
+const Builtin = enum { assemblies, decomp };
 
 const Run = union(enum) {
     script: Mod.HaveText,
@@ -982,20 +982,54 @@ fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool)
     return sleep_time_ms;
 }
 
+
 fn runBuiltin(
     dotnet_funcs: *const dotnet.Funcs,
     builtin_script: Builtin,
     writer: *std.Io.Writer,
 ) error{WriteFailed}!void {
     switch (builtin_script) {
-        .assemblies => try writeAssemblies(dotnet_funcs, writer),
+        .assemblies => try writeAssemblies(dotnet_funcs, writer, .names),
+        .decomp => try writeDecomp(dotnet_funcs, writer),
     }
     try writer.flush();
+}
+
+const AssemblyFormat = enum { names, decomp };
+
+fn writeDecomp(
+    dotnet_funcs: *const dotnet.Funcs,
+    writer: *std.Io.Writer,
+) error{WriteFailed}!void {
+    try writer.print("runtime\t{s}\n", .{@tagName(dotnet_funcs.kind)});
+
+    var path_buf: [appdata.max_path:0]u16 = undefined;
+    {
+        const len = win32.GetModuleFileNameW(null, &path_buf, path_buf.len);
+        if (len == 0) win32.panicWin32("GetModuleFileNameW(null)", win32.GetLastError());
+        try writer.print("exe\t{f}\n", .{fmtW(path_buf[0..len])});
+    }
+    switch (dotnet_funcs.kind) {
+        .mono => {},
+        .il2cpp => {
+            const module = win32.GetModuleHandleW(
+                win32.L(dotnet.dll_name_il2cpp),
+            ) orelse win32.panicWin32("GetModuleHandleW", win32.GetLastError());
+            const len = win32.GetModuleFileNameW(module, &path_buf, path_buf.len);
+            if (len == 0) win32.panicWin32("GetModuleFileNameW", win32.GetLastError());
+            try writer.print("module\t{s}\t{f}\n", .{
+                dotnet.dll_name_il2cpp,
+                fmtW(path_buf[0..len]),
+            });
+        },
+    }
+    try writeAssemblies(dotnet_funcs, writer, .decomp);
 }
 
 const WriteAssemblies = struct {
     dotnet_funcs: *const dotnet.Funcs,
     writer: *std.Io.Writer,
+    format: AssemblyFormat,
     index: usize = 0,
     write_failed: bool = false,
 };
@@ -1016,7 +1050,22 @@ fn writeAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) call
         );
         return;
     };
-    ctx.writer.print("{s}\n", .{std.mem.span(str)}) catch |err| switch (err) {
+    const name = std.mem.span(str);
+    const result = switch (ctx.format) {
+        .names => ctx.writer.print("{s}\n", .{name}),
+        .decomp => blk: {
+            const image = ctx.dotnet_funcs.assembly_get_image(assembly) orelse {
+                std.log.err("  assembly[{}] mono_assembly_get_image failed", .{ctx.index});
+                return;
+            };
+            const filename = mono.image_get_filename(image) orelse {
+                std.log.err("  assembly[{}] mono_image_get_filename failed", .{ctx.index});
+                return;
+            };
+            break :blk ctx.writer.print("assembly\t{s}\t{s}\n", .{ name, std.mem.span(filename) });
+        },
+    };
+    result catch |err| switch (err) {
         error.WriteFailed => ctx.write_failed = true,
     };
 }
@@ -1024,10 +1073,15 @@ fn writeAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) call
 fn writeAssemblies(
     dotnet_funcs: *const dotnet.Funcs,
     writer: *std.Io.Writer,
+    format: AssemblyFormat,
 ) error{WriteFailed}!void {
     switch (dotnet_funcs.kind) {
         .mono => |*mono| {
-            var context: WriteAssemblies = .{ .dotnet_funcs = dotnet_funcs, .writer = writer };
+            var context: WriteAssemblies = .{
+                .dotnet_funcs = dotnet_funcs,
+                .writer = writer,
+                .format = format,
+            };
             mono.assembly_foreach(&writeAssembliesMono, &context);
             if (context.write_failed) return error.WriteFailed;
         },
@@ -1045,7 +1099,11 @@ fn writeAssemblies(
                     "expected all image names to end with '.dll' but got '{s}'",
                     .{image_name},
                 );
-                try writer.print("{s}\n", .{image_name[0 .. image_name.len - ".dll".len]});
+                const name = image_name[0 .. image_name.len - ".dll".len];
+                switch (format) {
+                    .names => try writer.print("{s}\n", .{name}),
+                    .decomp => try writer.print("assembly\t{s}\n", .{name}),
+                }
             }
         },
     }

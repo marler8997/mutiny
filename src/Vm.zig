@@ -738,7 +738,48 @@ const Reference = union(enum) {
         handle_addr: Memory.Addr,
         extent: Extent,
     },
+    class_field: struct {
+        class_addr: Memory.Addr,
+        extent: Extent,
+    },
 };
+fn resolveFieldForSet(
+    vm: *Vm,
+    class: *const dotnet.Class,
+    extent: Extent,
+    value: *const Value,
+    named: struct { want_static: bool },
+) error{Vm}!struct { *const dotnet.ClassField, MarshalValue } {
+    const name = try vm.managedId(extent);
+    const field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
+        .class = class,
+        .id_extent = extent,
+    } });
+    const flags = vm.dotnet_funcs.field_get_flags(field);
+    if (flags.static != named.want_static) return if (named.want_static)
+        vm.setError(.{ .non_static_field = .{ .id_extent = extent } })
+    else
+        vm.setError(.{ .static_field = .{ .id_extent = extent } });
+    const mono_type = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(field));
+    const marshal_value: MarshalValue = switch (value.getMarshalConst(mono_type)) {
+        .not_implemented => |msg| return vm.setError(.{ .not_implemented2 = .{
+            .pos = extent.start,
+            .msg = msg,
+        } }),
+        .value => |v| v,
+        .unexpected_type => |u| return vm.setError(.{ .unexpected_type = .{
+            .pos = extent.start,
+            .expected = u.expected,
+            .actual = u.actual,
+        } }),
+        .overflow => |o| return vm.setError(.{ .overflow = .{
+            .pos = extent.start,
+            .value = o.value,
+            .int = o.int,
+        } }),
+    };
+    return .{ field, marshal_value };
+}
 fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
     switch (ref.*) {
         .symbol_entry => |*entry| {
@@ -750,6 +791,7 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
             } });
             switch (value.*) {
                 .integer => |int| vm.mem.toPointer(i64, symbol_value_addr).* = int,
+                .float => |f| vm.mem.toPointer(f64, symbol_value_addr).* = f,
                 else => {
                     std.log.err("todo: implement set value of type {t}", .{value.*});
                     return vm.setError(.{ .not_implemented = "set value of this type" });
@@ -760,33 +802,23 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
             const gc_handle, _ = vm.readValue(dotnet.GcHandleV2, field.handle_addr);
             const obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
             const class = vm.dotnet_funcs.object_get_class(obj);
-            const name = try vm.managedId(field.extent);
-            // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
-            const mono_field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
-                .class = class,
-                .id_extent = field.extent,
-            } });
-            const flags = vm.dotnet_funcs.field_get_flags(mono_field);
-            if (flags.static) return vm.setError(.{ .static_field = .{ .id_extent = field.extent } });
-            const mono_type = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(mono_field));
-            const marshal_value: MarshalValue = switch (value.getMarshalConst(mono_type)) {
-                .not_implemented => |msg| return vm.setError(.{ .not_implemented2 = .{
-                    .pos = field.extent.start,
-                    .msg = msg,
-                } }),
-                .value => |v| v,
-                .unexpected_type => |u| return vm.setError(.{ .unexpected_type = .{
-                    .pos = field.extent.start,
-                    .expected = u.expected,
-                    .actual = u.actual,
-                } }),
-                .overflow => |o| return vm.setError(.{ .overflow = .{
-                    .pos = field.extent.start,
-                    .value = o.value,
-                    .int = o.int,
-                } }),
-            };
+            const mono_field, const marshal_value = try vm.resolveFieldForSet(class, field.extent, value, .{ .want_static = false });
             vm.dotnet_funcs.field_set_value(obj, mono_field, marshal_value.getPtrConst());
+        },
+        .class_field => |*field| {
+            const class, _ = vm.readValue(*const dotnet.Class, field.class_addr);
+            const mono_field, const marshal_value = try vm.resolveFieldForSet(class, field.extent, value, .{ .want_static = true });
+            switch (vm.dotnet_funcs.kind) {
+                .mono => |*mono| {
+                    const vtable = mono.class_vtable(vm.dotnet_funcs.domain_get().?, class);
+                    mono.runtime_class_init(vtable);
+                    mono.field_static_set_value(vtable, mono_field, marshal_value.getPtrConst());
+                },
+                .il2cpp => |*il2cpp| {
+                    il2cpp.runtime_class_init(class);
+                    il2cpp.field_static_set_value(mono_field, marshal_value.getPtrConst());
+                },
+            }
         },
     }
 }
@@ -797,6 +829,10 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
             switch (symbol_type) {
                 .object => ref.* = .{ .object_field = .{
                     .handle_addr = symbol_value_addr,
+                    .extent = id_extent,
+                } },
+                .class => ref.* = .{ .class_field = .{
+                    .class_addr = symbol_value_addr,
                     .extent = id_extent,
                 } },
                 else => {
@@ -811,6 +847,10 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
         .object_field => |*field| {
             _ = field;
             return vm.setError(.{ .not_implemented = "get field on object field" });
+        },
+        .class_field => |*field| {
+            _ = field;
+            return vm.setError(.{ .not_implemented = "get field on class field" });
         },
     }
 }
@@ -1234,7 +1274,7 @@ const MonoObjectType = enum {
 };
 
 const MarshalValue = union(enum) {
-    boolean: c_int,
+    boolean: u8,
     i1: i8,
     u1: u8,
     i2: i16,
@@ -1399,7 +1439,7 @@ fn pushMonoField(
 fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Object) error{Vm}!void {
     switch (object_type) {
         .boolean => {
-            const unboxed: *align(1) c_int = @ptrCast(vm.dotnet_funcs.object_unbox(object));
+            const unboxed: *align(1) u8 = @ptrCast(vm.dotnet_funcs.object_unbox(object));
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = if (unboxed.* == 0) 0 else 1;
         },
@@ -1585,7 +1625,10 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             return first_token.end;
         },
         .keyword_new => {
-            @panic("todo");
+            return vm.setError(.{ .not_implemented2 = .{
+                .pos = first_token.start,
+                .msg = "the 'new' keyword",
+            } });
             // const id_extent = blk: {
             //     const token = lex(vm.text, first_token.end);
             //     if (token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
@@ -2088,7 +2131,7 @@ fn writeObject(
         try writer.print("{s}=", .{field_name});
         switch (type_kind) {
             .boolean => {
-                var value: c_int = undefined;
+                var value: u8 = undefined;
                 dotnet_funcs.field_get_value(obj, field, &value);
                 try writer.print("{}", .{value != 0});
             },
@@ -2692,7 +2735,10 @@ const VmEat = struct {
                 return try vm.evalFnCallArgs(after_l_paren);
             },
             .keyword_new => {
-                @panic("todo");
+                return vm.setError(.{ .not_implemented2 = .{
+                    .pos = first_token.start,
+                    .msg = "the 'new' keyword",
+                } });
                 // const after_id = try vm.eatToken(first_token.end, .identifier);
                 // const after_l_paren = try vm.eatToken(after_id, .l_paren);
                 // return try vm.evalFnCallArgs(after_l_paren);
@@ -3707,13 +3753,14 @@ pub const Error = union(enum) {
         err.* = .oom;
         return error.Vm;
     }
-    pub fn fmt(err: *const Error, text: []const u8) ErrorFmt {
-        return .{ .err = err, .text = text };
+    pub fn fmt(err: *const Error, text: []const u8, dotnet_funcs: *const dotnet.Funcs) ErrorFmt {
+        return .{ .err = err, .text = text, .dotnet_funcs = dotnet_funcs };
     }
 };
 const ErrorFmt = struct {
     err: *const Error,
     text: []const u8,
+    dotnet_funcs: *const dotnet.Funcs,
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
             .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
@@ -3884,16 +3931,18 @@ const ErrorFmt = struct {
                 );
             },
             .missing_field => |e| try writer.print(
-                "{d}: missing field '{s}'",
+                "{d}: class '{s}' has no field '{s}'",
                 .{
                     getLineNum(f.text, e.id_extent.start),
+                    f.dotnet_funcs.class_get_name(e.class),
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
             .missing_method => |m| try writer.print(
-                "{d}: method {s} with {} params does not exist in this class",
+                "{d}: class '{s}' has no method {s} with {} params",
                 .{
                     getLineNum(f.text, m.id_extent.start),
+                    f.dotnet_funcs.class_get_name(m.class),
                     f.text[m.id_extent.start..m.id_extent.end],
                     m.arg_count,
                 },
@@ -4025,7 +4074,7 @@ fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_err
                 .exit => return error.TestUnexpectedSuccess,
                 .err => |err| {
                     var buf: [2000]u8 = undefined;
-                    const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text)});
+                    const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)});
                     if (!std.mem.eql(u8, expected_error, actual_error)) {
                         std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
                         return error.TestUnexpectedError;
@@ -4050,6 +4099,9 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "fn foo \"hello\"", "1: syntax error: expected an open paren '(' to start function args but got a string literal \"hello\"");
     try testBadCode(dotnet_funcs, "fn foo )", "1: syntax error: expected an open paren '(' to start function args but got a close paren ')'");
     try testBadCode(dotnet_funcs, "foo()", "1: undefined identifier 'foo'");
+    try testBadCode(dotnet_funcs, "var o = new Foo()", "1: the 'new' keyword not implemented");
+    try testBadCode(dotnet_funcs, "if (0) { var o = new Foo() }", "1: the 'new' keyword not implemented");
+    try testBadCode(dotnet_funcs, "\nvar o = new Foo()", "2: the 'new' keyword not implemented");
     try testBadCode(dotnet_funcs, "var foo = \"hello\" foo()", "1: can't call a string literal");
     try testBadCode(dotnet_funcs, "@Assembly(\"wontbefound\")", "1: assembly \"wontbefound\" not found");
     try testBadCode(dotnet_funcs, "var mscorlib = @Assembly(\"mscorlib\") mscorlib()", "1: can't call an assembly");
@@ -4088,7 +4140,7 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\Console.ThisMethodShouldNotExist();
-    , "3: method ThisMethodShouldNotExist with 0 params does not exist in this class");
+    , "3: class 'Console' has no method ThisMethodShouldNotExist with 0 params");
     try testBadCode(dotnet_funcs, "0", "1: return value of type integer was ignored, use @Discard to discard it");
     try testBadCode(dotnet_funcs, "\"hello\"", "1: return value of type string_literal was ignored, use @Discard to discard it");
     try testBadCode(dotnet_funcs, "(", "1: syntax error: expected an expression after '(' but got EOF");
@@ -4150,7 +4202,7 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\DateTime.get_Now().this_field_wont_exist
-    , "3: missing field 'this_field_wont_exist'");
+    , "3: class 'DateTime' has no field 'this_field_wont_exist'");
     try testBadCode(dotnet_funcs, "@Assert(0 == 1 - 2)", "1: assert");
     try testBadCode(dotnet_funcs, "@IsNull()", "1: expected 1 args but got 0");
     try testBadCode(dotnet_funcs, "@NotNull()", "1: expected 1 args but got 0");
@@ -4176,7 +4228,7 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
         \\set now.does_not_exist = 0
-    , "4: missing field 'does_not_exist'");
+    , "4: class 'DateTime' has no field 'does_not_exist'");
     try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var String = @Class(mscorlib.System.String)
@@ -4241,7 +4293,7 @@ fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
             .err => |err| {
                 std.debug.print(
                     "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
-                    .{ text, err.fmt(text) },
+                    .{ text, err.fmt(text, dotnet_funcs) },
                 );
                 return error.VmError;
             },
@@ -4273,6 +4325,19 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testCode(dotnet_funcs, "fn foo(x) { }");
     try testCode(dotnet_funcs, "var a = 0 set a = 1 @Log(\"a is now \", a)");
     try testCode(dotnet_funcs, "var a = 0 set a = 1234 @Log(\"a is now \", a)");
+    try testCode(dotnet_funcs, "var v = 0.0 set v = 1.5 @Assert(v == 1.5)");
+    try testCode(dotnet_funcs, "var v = 0.0 set v = v + 1.5 @Assert(v == 1.5)");
+    try testCode(dotnet_funcs, "var v = 1.5 set v = 3.25 @Assert(v == 3.25)");
+    try testBadCode(
+        dotnet_funcs,
+        "var v = 0.0 set v = 1",
+        "1: cannot assign an integer to identifier 'v' which is a float",
+    );
+    try testBadCode(
+        dotnet_funcs,
+        "var v = 0 set v = 1.5",
+        "1: cannot assign a float to identifier 'v' which is an integer",
+    );
     if (false) try testCode(dotnet_funcs,
         \\fn fib(n) {
         \\  if (n <= 1) return n
@@ -4488,6 +4553,11 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(inst.F32Field == 9.5)
         \\set inst.I64Field = 123456789
         \\@Assert(inst.I64Field == 123456789)
+        \\@Assert(inst.BoolField == 1)
+        \\set inst.BoolField = 0
+        \\@Assert(inst.BoolField == 0)
+        \\set inst.BoolField = 1
+        \\@Assert(inst.BoolField == 1)
         \\@Assert(Statics.F32Field != Statics.F64Field)
         \\@Assert(Statics.F32Field > 1)
         \\@Assert(Statics.F32Field < 2)
@@ -4501,6 +4571,50 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var Constants = @Class(t.MutinyTest.Constants)
         \\@Assert(Echo.F64(Constants.F64Huge()) == Constants.F64Huge())
     );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.I32Field = 7
+        \\@Assert(Statics.I32Field == 7)
+        \\set Statics.I32Field = 0 - 32
+        \\@Assert(Statics.I32Field == 0 - 32)
+        \\set Statics.F32Field = 9.5
+        \\@Assert(Statics.F32Field == 9.5)
+        \\set Statics.F64Field = 0 - 0.125
+        \\@Assert(Statics.F64Field == 0 - 0.125)
+        \\set Statics.I64Field = 9007199254740993
+        \\@Assert(Statics.I64Field == 9007199254740993)
+        \\set Statics.BoolField = 0
+        \\@Assert(Statics.BoolField == 0)
+        \\set Statics.I8Field = 0 - 128
+        \\@Assert(Statics.I8Field == 0 - 128)
+        \\set Statics.U8Field = 255
+        \\@Assert(Statics.U8Field == 255)
+        \\set Statics.I16Field = 32767
+        \\@Assert(Statics.I16Field == 32767)
+        \\set Statics.U16Field = 65535
+        \\@Assert(Statics.U16Field == 65535)
+        \\set Statics.U32Field = 4294967295
+        \\@Assert(Statics.U32Field == 4294967295)
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\set Statics.F32Field = 1.5
+        \\@Assert(Echo.F32(Statics.F32Field) == 1.5)
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Instances = @Class(t.MutinyTest.Instances)
+        \\set Instances.I32Field = 1
+    , "3: cannot access non-static field 'I32Field' on class, need an object");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.NotAField = 1
+    , "3: class 'Statics' has no field 'NotAField'");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.I32Field = 4294967295
+    , "3: integer overflow, value 4294967295 to 32-bit signed integer");
     if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)

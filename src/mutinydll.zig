@@ -1002,7 +1002,7 @@ fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool)
         if (vm_state.yielded == null) {
             switch (vm_state.instance.error_result) {
                 .exit => {},
-                .err => |err| script.reportToClient("error: {f}", .{err.fmt(have_text.text)}),
+                .err => |err| script.reportToClient("error: {f}", .{err.fmt(have_text.text, dotnet_funcs)}),
             }
             script.delete();
         } else {
@@ -1200,7 +1200,7 @@ fn runMod(
                 have_text.vm_state.?.yielded = null;
             },
             .err => |err| {
-                std.log.err("{s}:{f}", .{ mod_name, err.fmt(have_text.text) });
+                std.log.err("{s}:{f}", .{ mod_name, err.fmt(have_text.text, dotnet_funcs) });
             },
         }
     }

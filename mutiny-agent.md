@@ -87,12 +87,6 @@ continue                    // `continue` jumps back to `loop`; it ENDS the loop
 fn name(a, b) { @Log(a) }   // functions
 ```
 
-**Never write `new`.** It is a reserved keyword that is parsed but *not yet implemented* — the
-body is an unfinished `@panic`. It is meant to work eventually, but today it does not give you a
-syntax error; it panics Mutiny inside the game process, and the game can then never be closed
-normally. Until it lands there is no way to construct an object, so work with objects the game
-already has.
-
 Things that will surprise you:
 
 - **`loop` ... `continue` is the loop.** `loop` marks the top, `continue` jumps back to it, and

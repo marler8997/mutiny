@@ -17,7 +17,7 @@ pub fn startExe(
         .name = name,
     } });
 }
-pub fn inject(arena: std.mem.Allocator, dll: []const u8, pid: u32) !void {
+pub fn attach(arena: std.mem.Allocator, dll: []const u8, pid: u32) !void {
     try go(arena, dll, .{ .attach = pid });
 }
 
@@ -31,6 +31,17 @@ const Kind = union(enum) {
 };
 
 fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
+    switch (kind) {
+        .attach => |pid| switch (mutinyipc.checkLiveness(pid)) {
+            .serving => errExit("pid {} already has mutiny running in it", .{pid}),
+            .unresponsive => errExit(
+                "pid {} has a mutiny window that isn't responding, it may be in the middle of a managed call, restart the app",
+                .{pid},
+            ),
+            .no_window => {},
+        },
+        .start => {},
+    }
 
     // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
     //       overriden by something else?
@@ -78,10 +89,22 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
         }
     }
 
-    const inject_dll = true;
-    if (inject_dll) injectDLL(process.process, mutiny_dll_realpath_w) catch |err| {
-        return err;
+    const maybe_loaded: ?*u8 = switch (kind) {
+        .attach => findRemoteModule(process.pid),
+        .start => null,
     };
+    const remote_base = blk: {
+        if (maybe_loaded) |base| {
+            std.log.info("Mutiny.dll already loaded in pid {}", .{process.pid});
+            break :blk base;
+        }
+        try injectDLL(process.process, mutiny_dll_realpath_w);
+        break :blk findRemoteModule(process.pid) orelse errExit(
+            "Mutiny.dll is not loaded in pid {} even after injecting it",
+            .{process.pid},
+        );
+    };
+    try startThread(process, remote_base, mutiny_dll_realpath_w);
 
     if (process.maybe_suspended_thread) |thread| {
         std.log.info("resuming new process thread...", .{});
@@ -97,30 +120,89 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
     std.log.info("success", .{});
 }
 
+fn startThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16) !void {
+    const start_rva = blk: {
+        const local = win32.LoadLibraryW(dll_path) orelse win32.panicWin32(
+            "LoadLibrary(ourself)",
+            win32.GetLastError(),
+        );
+        const local_start = win32.GetProcAddress(
+            local,
+            mutinyipc.start_export_name,
+        ) orelse win32.panicWin32(
+            "GetProcAddress(" ++ mutinyipc.start_export_name ++ ")",
+            win32.GetLastError(),
+        );
+        break :blk @intFromPtr(local_start) - @intFromPtr(local);
+    };
+    const remote_start = @intFromPtr(remote_base) + start_rva;
+    std.log.info("calling {s} at 0x{x} in pid {}", .{
+        mutinyipc.start_export_name,
+        remote_start,
+        process.pid,
+    });
+    const thread = win32.CreateRemoteThread(
+        process.process,
+        null,
+        mutinyipc.thread_stack_size,
+        @ptrFromInt(remote_start),
+        null,
+        0,
+        null,
+    ) orelse win32.panicWin32("CreateRemoteThread", win32.GetLastError());
+    win32.closeHandle(thread);
+}
+
+fn findRemoteModule(pid: u32) ?*u8 {
+    const modules = blk: while (true) {
+        const snapshot = win32.CreateToolhelp32Snapshot(win32.TH32CS_SNAPMODULE, pid);
+        if (snapshot != win32.INVALID_HANDLE_VALUE) break :blk snapshot;
+        switch (win32.GetLastError()) {
+            .ERROR_BAD_LENGTH => {},
+            else => |e| win32.panicWin32("CreateToolhelp32Snapshot", e),
+        }
+    };
+    defer win32.closeHandle(modules);
+
+    var module: win32.MODULEENTRY32W = undefined;
+    module.dwSize = @sizeOf(win32.MODULEENTRY32W);
+    if (0 == win32.Module32FirstW(modules, &module)) switch (win32.GetLastError()) {
+        .ERROR_NO_MORE_FILES => return null,
+        else => |e| win32.panicWin32("Module32First", e),
+    };
+    while (true) {
+        const name = std.mem.sliceTo(@as([*:0]const u16, @ptrCast(&module.szModule)), 0);
+        if (eqlAsciiIgnoreCase(name, mutiny_dll_name)) return module.modBaseAddr;
+        if (0 == win32.Module32NextW(modules, &module)) switch (win32.GetLastError()) {
+            .ERROR_NO_MORE_FILES => return null,
+            else => |e| win32.panicWin32("Module32Next", e),
+        };
+    }
+}
+
+const mutiny_dll_name = "Mutiny.dll";
+
+fn eqlAsciiIgnoreCase(wide: []const u16, ascii: []const u8) bool {
+    if (wide.len != ascii.len) return false;
+    for (wide, ascii) |w, a| {
+        if (w > 127) return false;
+        if (std.ascii.toLower(@intCast(w)) != std.ascii.toLower(a)) return false;
+    }
+    return true;
+}
+
 const wait_for_window_ms = 10000;
 
 fn waitForWindow(process: ProcessResult) !void {
     var attempt: u32 = 0;
     const start = try std.time.Instant.now();
     while (true) : (attempt += 1) {
-        if (mutinyipc.findWindow(process.pid)) |hwnd| {
-            var heartbeat: usize = undefined;
-            const sent = win32.SendMessageTimeoutW(
-                hwnd,
-                mutinyipc.wm_heartbeat,
-                0,
-                0,
-                win32.SMTO_ABORTIFHUNG,
-                1000,
-                &heartbeat,
-            );
-            if (sent != 0 and heartbeat == @as(usize, @bitCast(mutinyipc.heartbeat_result))) {
-                std.log.info("mutiny window 0x{x} is serving pid {}", .{
-                    @intFromPtr(hwnd),
-                    process.pid,
-                });
+        switch (mutinyipc.checkLiveness(process.pid)) {
+            .serving => {
+                std.log.info("mutiny is serving pid {}", .{process.pid});
                 return;
-            }
+            },
+            .no_window, .unresponsive => {},
         }
 
         const elapsed_ms = @divTrunc((try std.time.Instant.now()).since(start), std.time.ns_per_ms);

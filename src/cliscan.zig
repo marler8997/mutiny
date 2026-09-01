@@ -25,10 +25,15 @@ pub fn go(arena: std.mem.Allocator) !u8 {
             found += 1;
             const exe = std.mem.sliceTo(@as([*:0]const u16, @ptrCast(&entry.szExeFile)), 0);
             const name = getname.fromExe(exe) catch exe;
-            try out.print("{d: <7} \"{f}\" injected={} ({s})\n", .{
+            const status: Status = if (!target.injected) .clean else switch (mutinyipc.checkLiveness(entry.th32ProcessID)) {
+                .no_window => .injected,
+                .serving => .attached,
+                .unresponsive => .unresponsive,
+            };
+            try out.print("{d: <7} \"{f}\" {s} ({s})\n", .{
                 entry.th32ProcessID,
                 std.unicode.fmtUtf16Le(name),
-                @intFromBool(target.injected),
+                @tagName(status),
                 @tagName(target.runtime),
             });
         }
@@ -42,6 +47,13 @@ pub fn go(arena: std.mem.Allocator) !u8 {
     try out.flush();
     return 0;
 }
+
+const Status = enum {
+    clean,
+    injected,
+    attached,
+    unresponsive,
+};
 
 const Target = struct {
     runtime: dotnetkind.Kind,
@@ -105,3 +117,4 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const dotnetkind = @import("dotnetkind.zig");
 const getname = @import("getname.zig");
+const mutinyipc = @import("mutinyipc.zig");

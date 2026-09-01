@@ -10,8 +10,8 @@ Launch the game like normal. At any point you can inject `Mutiny.dll`. This can 
 # scan every process to find a game/PID you want to inject
 mutiny scan
 
-# inject Mutiny.dll using the PID
-mutiny inject <PID>
+# get Mutiny running in the game using the PID
+mutiny attach <PID>
 
 # run a one-off script and print what it logs
 mutiny run-script <PID> <NAME>

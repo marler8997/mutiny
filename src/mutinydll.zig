@@ -85,17 +85,6 @@ pub export fn _DllMainCRTStartup(
             // !!! WARNING !!! do not log here...logging uses APIs that we probably
             // aren't supposed to call at this phase.
             if (false) win32.OutputDebugStringW(win32.L("mutiny: proces attach\n"));
-
-            // NOTE: the default thread stack size when specyfing 0 is too small when
-            //       injecting into .NET asemblies, so, let' just ask for a reasonable 2MB
-            //       no matter what.
-            const thread_stack_size = 2 * 1024 * 1024;
-            const thread = win32.CreateThread(null, thread_stack_size, initThreadEntry, null, .{}, null) orelse {
-                win32.OutputDebugStringW(win32.L("mutiny: CreateThread failed"));
-                // TODO: how can we log the error code?
-                return 1; // fail
-            };
-            win32.closeHandle(thread);
         },
         win32.DLL_THREAD_ATTACH => {
             std.debug.assert(global.hinstance == hinst);
@@ -199,7 +188,10 @@ fn initIl2cpp() ?win32.HINSTANCE {
     }
 }
 
-fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
+comptime {
+    @export(&MutinyStart, .{ .name = mutinyipc.start_export_name });
+}
+fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("Init Thread running!", .{});
 
@@ -374,6 +366,10 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
         return 0xffffffff;
     };
     std.log.info("thread attach success 0x{x}", .{@intFromPtr(thread)});
+    defer {
+        std.log.info("detaching thread 0x{x}", .{@intFromPtr(thread)});
+        dotnet_funcs.thread_detach(thread);
+    }
 
     // domain_get is how the Vm accesses the domain, make sure it's
     // what we expect after attaching our thread to it
@@ -382,10 +378,14 @@ fn initThreadEntry(context: ?*anyopaque) callconv(.winapi) u32 {
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var last_update_mods_error: ?UpdateModsError = null;
 
-    while (true) {
+    main_loop: while (true) {
         {
             var msg: win32.MSG = undefined;
             while (0 != win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE)) {
+                if (msg.message == win32.WM_QUIT) {
+                    std.log.info("got WM_QUIT, exiting the mutiny thread", .{});
+                    break :main_loop;
+                }
                 _ = win32.TranslateMessage(&msg);
                 _ = win32.DispatchMessageW(&msg);
             }

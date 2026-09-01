@@ -2,11 +2,13 @@ const usage =
     \\Usage: mutiny COMMAND [ARGS...]
     \\
     \\Commands:
-    \\  scan                       every process with a mono/il2cpp runtime, and whether Mutiny is in it
-    \\  inject PID                 inject Mutiny.dll into a running game
-    \\  start EXE [ARGS...]        launch a game with Mutiny.dll injected before it runs
+    \\  scan                       every process with a mono/il2cpp runtime, and whether Mutiny is in it.
+    \\  attach PID                 get Mutiny running inside an already-running game.
+    \\  start EXE [ARGS...]        launch a game with Mutiny.dll injected before it runs.
     \\  run-script PID NAME        run scripts\NAME in an injected game and print its output
-    \\                             an @-prefixed NAME is a builtin, e.g. @assemblies
+    \\                             an @-prefixed NAME is a builtin, e.g. @assemblies.
+    \\  detach PID                 stop Mutiny.dll's thread, dll remains injected and attach
+    \\                             restarts the thread.
     \\
 ;
 
@@ -23,9 +25,10 @@ pub fn main() !u8 {
         return 0xff;
     };
     if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
-    if (std.mem.eql(u8, command, "inject")) return cmdInject(arena, &args);
+    if (std.mem.eql(u8, command, "attach")) return cmdAttach(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
     if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
+    if (std.mem.eql(u8, command, "detach")) return cmdDetach(&args);
     errExit("unknown command '{s}'", .{command});
 }
 
@@ -34,11 +37,11 @@ fn cmdScan(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     return try cliscan.go(arena);
 }
 
-fn cmdInject(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
+fn cmdAttach(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     var maybe_dll: ?[]const u8 = null;
     const pid_string = blk: {
         while (true) {
-            const arg = args.next() orelse errExit("inject requires a PID (run 'mutiny scan' to see what's running)", .{});
+            const arg = args.next() orelse errExit("attach requires a PID (run 'mutiny scan' to see what's running)", .{});
             if (!std.mem.startsWith(u8, arg, "-")) {
                 break :blk arg;
             } else if (std.mem.eql(u8, arg, "--dll")) {
@@ -50,9 +53,9 @@ fn cmdInject(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
         "invalid pid '{s}'",
         .{pid_string},
     );
-    noMoreArgs(args, "inject");
+    noMoreArgs(args, "attach");
     const dll = maybe_dll orelse try findDll(arena);
-    try injector.inject(arena, dll, pid);
+    try injector.attach(arena, dll, pid);
     return 0;
 }
 
@@ -103,6 +106,48 @@ fn exists(path: []const u8) !bool {
         else => |e| e,
     };
 }
+
+fn cmdDetach(args: *std.process.ArgIterator) !u8 {
+    const pid_string = args.next() orelse errExit(
+        "detach requires a PID (run 'mutiny scan' to see what's running)",
+        .{},
+    );
+    const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit(
+        "invalid pid '{s}'",
+        .{pid_string},
+    );
+    noMoreArgs(args, "detach");
+
+    const hwnd = mutinyipc.findWindow(pid) orelse errExit(
+        "pid {} has no mutiny window (is Mutiny.dll injected?)",
+        .{pid},
+    );
+    var hwnd_pid: u32 = undefined;
+    const tid = win32.GetWindowThreadProcessId(hwnd, &hwnd_pid);
+    if (tid == 0) errExit(
+        "GetWindowThreadProcessId failed, error={f}",
+        .{win32.GetLastError()},
+    );
+    if (0 == win32.PostThreadMessageW(tid, win32.WM_QUIT, 0, 0)) errExit(
+        "PostThreadMessage(WM_QUIT) to thread {} failed, error={f}",
+        .{ tid, win32.GetLastError() },
+    );
+
+    const start = try std.time.Instant.now();
+    while (true) {
+        if (mutinyipc.findWindow(pid) == null) {
+            std.log.info("mutiny detached from pid {}", .{pid});
+            return 0;
+        }
+        const elapsed_ms = @divTrunc((try std.time.Instant.now()).since(start), std.time.ns_per_ms);
+        if (elapsed_ms >= detach_timeout_ms) errExit(
+            "mutiny window in pid {} still there after {} ms",
+            .{ pid, elapsed_ms },
+        );
+        std.Thread.sleep(std.time.ns_per_ms * 50);
+    }
+}
+const detach_timeout_ms = 10000;
 
 fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     const pid_string = args.next() orelse errExit(

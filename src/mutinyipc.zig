@@ -7,6 +7,12 @@ pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
 pub const max_string_len = std.math.maxInt(u16);
 
+pub const start_export_name = "MutinyStart";
+
+/// The default thread stack is too small when injecting into .NET assemblies, so always ask
+/// for a reasonable 2MB.
+pub const thread_stack_size = 2 * 1024 * 1024;
+
 pub const StringList = struct {
     data: []const u16,
     remaining: u16,
@@ -43,6 +49,31 @@ pub fn formatClientPipeName(buf: *[pipe_name_buf_len]u16, client_pid: u32) [:0]u
     const len = std.unicode.wtf8ToWtf16Le(buf, name) catch unreachable;
     buf[len] = 0;
     return buf[0..len :0];
+}
+
+const heartbeat_timeout_ms = 1000;
+
+pub const Liveness = enum {
+    no_window,
+    serving,
+    unresponsive,
+};
+
+pub fn checkLiveness(pid: u32) Liveness {
+    const hwnd = findWindow(pid) orelse return .no_window;
+    var result: usize = undefined;
+    const sent = win32.SendMessageTimeoutW(
+        hwnd,
+        wm_heartbeat,
+        0,
+        0,
+        win32.SMTO_ABORTIFHUNG,
+        heartbeat_timeout_ms,
+        &result,
+    );
+    if (sent == 0) return .unresponsive;
+    if (result != @as(usize, @bitCast(heartbeat_result))) return .unresponsive;
+    return .serving;
 }
 
 pub fn findWindow(pid: u32) ?win32.HWND {

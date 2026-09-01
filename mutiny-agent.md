@@ -20,7 +20,7 @@ works.
 ## The loop you will follow
 
 1. `mutiny scan` - lists every process with a mono or il2cpp runtime. Find the game's PID.
-2. `mutiny inject <PID>` - gets Mutiny into the process. Only needed once per unique PID.
+2. `mutiny attach <PID>` - gets Mutiny running in the process. Only needed once per unique PID.
 3. `mutiny run-script <PID> @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
    lives on disk.
 4. Work out which classes and methods you need (see "Finding the right code").

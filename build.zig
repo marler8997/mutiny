@@ -215,8 +215,33 @@ pub fn build(b: *std.Build) void {
         dotnet_test.step.dependOn(&install_dotnet_test.step);
         dotnet_test.addArg("--mock");
         dotnet_test.addArtifactArg(mock);
-        b.step("dotnet-test-mock", "").dependOn(&dotnet_test.step);
+        b.step("test-mock", "").dependOn(&dotnet_test.step);
         test_step.dependOn(&dotnet_test.step);
+    }
+
+    {
+        const peak = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PEAK";
+        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.dependOn(&install_dotnet_test.step);
+        dotnet_test.addArg(peak ++ "\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll");
+        dotnet_test.addArg("--assembly-path");
+        dotnet_test.addArg(peak ++ "\\PEAK_Data\\Managed");
+        b.step(
+            "test-peak",
+            "run dotnet-test against PEAK's mono runtime",
+        ).dependOn(&dotnet_test.step);
+    }
+    {
+        const schedule1 = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Schedule I";
+        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.dependOn(&install_dotnet_test.step);
+        dotnet_test.addArg(schedule1 ++ "\\GameAssembly.dll");
+        dotnet_test.addArg("--data-dir");
+        dotnet_test.addArg(schedule1 ++ "\\Schedule I_Data\\il2cpp_data");
+        b.step(
+            "test-schedule1",
+            "run dotnet-test against Schedule I's il2cpp runtime",
+        ).dependOn(&dotnet_test.step);
     }
 
     {

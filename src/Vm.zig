@@ -4334,6 +4334,8 @@ fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
 }
 
 fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
+    const have_mutiny_test = !is_monomock and dotnet_funcs.kind == .mono;
+
     try testCode(dotnet_funcs, "fn foo(){}");
     try testCode(dotnet_funcs, "@Nothing()");
     try testCode(dotnet_funcs, "fn foo(){ @Nothing() }");
@@ -4556,7 +4558,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(ts._ticks == 123)
         \\@Assert(declared_after == 0)
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Assert(Echo.I32(0 - 32) == 0 - 32)
@@ -4599,7 +4601,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var Constants = @Class(t.MutinyTest.Constants)
         \\@Assert(Echo.F64(Constants.F64Huge()) == Constants.F64Huge())
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 7
@@ -4630,7 +4632,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Statics.ConstI32 == 42)
         \\@Assert(Statics.ConstF32 == 2.5)
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Instances = @Class(t.MutinyTest.Instances)
         \\var n = Instances.NullInstance()
@@ -4642,70 +4644,70 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var real = Instances.New()
         \\@Assert(@NotNull(real))
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.ConstI32 = 1
     , "3: cannot assign to 'ConstI32' because it is a const, which has no storage to write to");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.ConstF32 = 1.5
     , "3: cannot assign to 'ConstF32' because it is a const, which has no storage to write to");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 5
         \\@Assert(Statics.I32Field == 5)
         \\@Assert(Statics.ConstI32 == 42)
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Instances = @Class(t.MutinyTest.Instances)
         \\set Instances.I32Field = 1
     , "3: cannot access non-static field 'I32Field' on class, need an object");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.NotAField = 1
     , "3: class 'Statics' has no field 'NotAField'");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 4294967295
     , "3: integer overflow, value 4294967295 to 32-bit signed integer");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.F32(16777217))
     , "3: cannot convert 16777217 to r4 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.F64(9007199254740993))
     , "3: cannot convert 9007199254740993 to r8 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\var Constants = @Class(t.MutinyTest.Constants)
         \\@Discard(Echo.F32(Constants.F64Huge()))
     , "4: cannot convert 1e300 to r4 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.I16(70000))
     , "3: cannot convert 70000 to i2 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.I8(128))
     , "3: cannot convert 128 to i1 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.U8(0 - 1))
     , "3: cannot convert -1 to u1 without losing precision");
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\@Discard(Echo.Bool(2))

@@ -170,6 +170,7 @@ pub fn build(b: *std.Build) void {
             t.root_module.addImport("win32", win32_mod);
         }
         const run = b.addRunArtifact(t);
+        b.step("unittest", "").dependOn(&run.step);
         test_step.dependOn(&run.step);
     }
 

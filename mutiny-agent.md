@@ -95,6 +95,8 @@ Things that will surprise you:
   inside an `if` block is not caught by that check, but nothing tests it and `break`/`continue`
   across that boundary is unexplored — so write one loop at a time.
 - **No `else` yet.** Write a second `if` with the inverted condition.
+- **A `const` field cannot be assigned**, only read. `@LogClass` marks each field `mutable`,
+  `readonly` or `const`.
 - **A statement whose value is unused is an error.** If you call a method that returns something
   and you don't want it, wrap it: `@Discard(obj.Method())`.
 - **You cannot reach a class straight off an assembly.** Call `@Class` first:

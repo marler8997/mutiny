@@ -760,6 +760,7 @@ fn resolveFieldForSet(
         vm.setError(.{ .non_static_field = .{ .id_extent = extent } })
     else
         vm.setError(.{ .static_field = .{ .id_extent = extent } });
+    if (flags.literal) return vm.setError(.{ .const_field = .{ .id_extent = extent } });
     const mono_type = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(field));
     const marshal_value: MarshalValue = switch (value.getMarshalConst(mono_type)) {
         .not_implemented => |msg| return vm.setError(.{ .not_implemented2 = .{
@@ -2041,7 +2042,13 @@ fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
             const name = vm.dotnet_funcs.field_get_name(field);
             const flags = vm.dotnet_funcs.field_get_flags(field);
             const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            try vm.info(" - {s} field '{s}'", .{ stinst, name });
+            const mutability: []const u8 = if (flags.literal)
+                "const   "
+            else if (flags.init_only)
+                "readonly"
+            else
+                "mutable ";
+            try vm.info(" - {s} {s} field '{s}'", .{ stinst, mutability, name });
         }
     }
     {
@@ -3697,6 +3704,9 @@ pub const Error = union(enum) {
     static_field: struct {
         id_extent: Extent,
     },
+    const_field: struct {
+        id_extent: Extent,
+    },
     null_field_access: struct {
         field_extent: Extent,
         kind: union(enum) {
@@ -3958,6 +3968,13 @@ const ErrorFmt = struct {
             ),
             .non_static_field => |e| try writer.print(
                 "{d}: cannot access non-static field '{s}' on class, need an object",
+                .{
+                    getLineNum(f.text, e.id_extent.start),
+                    f.text[e.id_extent.start..e.id_extent.end],
+                },
+            ),
+            .const_field => |e| try writer.print(
+                "{d}: cannot assign to '{s}' because it is a const, which has no storage to write to",
                 .{
                     getLineNum(f.text, e.id_extent.start),
                     f.text[e.id_extent.start..e.id_extent.end],
@@ -4599,6 +4616,25 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var Echo = @Class(t.MutinyTest.Echo)
         \\set Statics.F32Field = 1.5
         \\@Assert(Echo.F32(Statics.F32Field) == 1.5)
+        \\@Assert(Statics.ConstI32 == 42)
+        \\@Assert(Statics.ConstF32 == 2.5)
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.ConstI32 = 1
+    , "3: cannot assign to 'ConstI32' because it is a const, which has no storage to write to");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.ConstF32 = 1.5
+    , "3: cannot assign to 'ConstF32' because it is a const, which has no storage to write to");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.I32Field = 5
+        \\@Assert(Statics.I32Field == 5)
+        \\@Assert(Statics.ConstI32 == 42)
     );
     if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")

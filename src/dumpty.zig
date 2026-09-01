@@ -207,7 +207,13 @@ fn dumpClass(dotnet_funcs: *const dotnet.Funcs, writer: *std.Io.Writer, class: *
             const name = dotnet_funcs.field_get_name(field);
             const flags = dotnet_funcs.field_get_flags(field);
             const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            try writer.print(" - {s} field {t} name='{s}'\n", .{ stinst, type_kind, name });
+            const mutability: []const u8 = if (flags.literal)
+                "const   "
+            else if (flags.init_only)
+                "readonly"
+            else
+                "mutable ";
+            try writer.print(" - {s} {s} field {t} name='{s}'\n", .{ stinst, mutability, type_kind, name });
         }
     }
     {

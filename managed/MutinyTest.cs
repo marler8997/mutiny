@@ -28,6 +28,9 @@ namespace MutinyTest
         public static ulong U64Field = 64;
         public static float F32Field = 1.5f;
         public static double F64Field = 3.25;
+
+        public const int ConstI32 = 42;
+        public const float ConstF32 = 2.5f;
     }
 
     public class Instances

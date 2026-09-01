@@ -291,6 +291,60 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
     std.log.info("window 0x{x} created", .{@intFromPtr(hwnd)});
 
+    unity_version: {
+        const module = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse {
+            std.log.info("unity version: unknown (UnityPlayer.dll is not loaded)", .{});
+            break :unity_version;
+        };
+        var path_buf: [win32.MAX_PATH:0]u16 = undefined;
+        const path_len = win32.GetModuleFileNameW(module, &path_buf, path_buf.len);
+        if (path_len == 0) {
+            std.log.err("GetModuleFileName(UnityPlayer.dll) failed, error={f}", .{win32.GetLastError()});
+            break :unity_version;
+        }
+        path_buf[path_len] = 0;
+        const path: [:0]const u16 = path_buf[0..path_len :0];
+
+        const size = win32.GetFileVersionInfoSizeW(path, null);
+        if (size == 0) {
+            std.log.err("GetFileVersionInfoSize '{f}' failed, error={f}", .{ fmtW(path), win32.GetLastError() });
+            break :unity_version;
+        }
+        var info_buf: [4096]u8 = undefined;
+        if (size > info_buf.len) {
+            std.log.err("version info for '{f}' is {} bytes, too big for our {} byte buffer", .{
+                fmtW(path),
+                size,
+                info_buf.len,
+            });
+            break :unity_version;
+        }
+        if (0 == win32.GetFileVersionInfoW(path, 0, size, &info_buf)) {
+            std.log.err("GetFileVersionInfo '{f}' failed, error={f}", .{ fmtW(path), win32.GetLastError() });
+            break :unity_version;
+        }
+        var fixed: ?*anyopaque = null;
+        var fixed_len: u32 = 0;
+        if (0 == win32.VerQueryValueW(&info_buf, win32.L("\\"), &fixed, &fixed_len)) {
+            std.log.err("VerQueryValue '{f}' has no fixed version info", .{fmtW(path)});
+            break :unity_version;
+        }
+        if (fixed_len < @sizeOf(win32.VS_FIXEDFILEINFO)) {
+            std.log.err("VerQueryValue gave {} bytes, expected at least {}", .{
+                fixed_len,
+                @sizeOf(win32.VS_FIXEDFILEINFO),
+            });
+            break :unity_version;
+        }
+        const info: *const win32.VS_FIXEDFILEINFO = @ptrCast(@alignCast(fixed.?));
+        std.log.info("unity version: {}.{}.{}.{}", .{
+            info.dwFileVersionMS >> 16,
+            info.dwFileVersionMS & 0xffff,
+            info.dwFileVersionLS >> 16,
+            info.dwFileVersionLS & 0xffff,
+        });
+    }
+
     var mods_path_buf: [appdata.max_path]u16 = undefined;
     const mods_path = switch (appdata.format(
         &mods_path_buf,

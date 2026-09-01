@@ -9,6 +9,30 @@ export fn mono_set_assemblies_path(path: [*:0]const u8) callconv(.c) void {
     _ = path;
 }
 
+export fn mono_image_open_from_data(
+    data: [*]const u8,
+    data_len: u32,
+    need_copy: i32,
+    status: *c_int,
+) callconv(.c) ?*const dotnet.Image {
+    _ = data;
+    _ = data_len;
+    _ = need_copy;
+    _ = status;
+    @panic("the mock cannot load a managed assembly, it provides 'mocktest' instead");
+}
+
+export fn mono_assembly_load_from(
+    image: *const dotnet.Image,
+    name: [*:0]const u8,
+    status: *c_int,
+) callconv(.c) ?*const dotnet.Assembly {
+    _ = image;
+    _ = name;
+    _ = status;
+    @panic("the mock cannot load a managed assembly, it provides 'mocktest' instead");
+}
+
 pub const Domain = struct {
     attached_thread: ?MockThread = null,
     gpa: std.heap.DebugAllocator(.{
@@ -454,41 +478,8 @@ fn @"MockTest.NewDecimal"() ?*const MockObject {
     const domain = domain_get().?;
     return domain.new(.decimal);
 }
-fn @"MockTest.GetF32"() f32 {
-    return 1.5;
-}
-fn @"MockTest.GetF64"() f64 {
-    return 3.25;
-}
-fn @"MockTest.EchoF32"(v: f32) f32 {
-    return v;
-}
-fn @"MockTest.EchoF64"(v: f64) f64 {
-    return v;
-}
 fn @"System.Math.Sqrt"(v: f64) f64 {
     return @sqrt(v);
-}
-fn @"MockTest.GetHugeF64"() f64 {
-    return 1e300;
-}
-fn @"MockTest.EchoBool"(v: bool) bool {
-    return v;
-}
-fn @"MockTest.EchoI8"(v: i8) i8 {
-    return v;
-}
-fn @"MockTest.EchoU8"(v: u8) u8 {
-    return v;
-}
-fn @"MockTest.EchoI16"(v: i16) i16 {
-    return v;
-}
-fn @"MockTest.EchoI32"(v: i32) i32 {
-    return v;
-}
-fn @"MockTest.EchoI64"(v: i64) i64 {
-    return v;
 }
 fn @"System.Single.IsNaN"(v: f32) bool {
     return std.math.isNan(v);
@@ -585,29 +576,16 @@ const mock_root = switch (builtin.os.tag) {
     else => "/monomock/",
 };
 
-const assemblies = [_]MockAssembly{
+var assemblies = [_]MockAssembly{
     .{ .name = .{ .cstr = "mocktest" }, .image = .{
         .filename = mock_root ++ "mocktest.dll",
         .namespaces = &[_]Namespace{
             .{ .prefix = "", .classes = &[_]MockClass{
                 .{ .name = "MockTest", .methods = &[_]MockMethod{
                     .{ .name = "NewDecimal", .impl = .{ .return_object = @"MockTest.NewDecimal" } },
-                    .{ .name = "GetF32", .impl = .{ .return_r4 = &@"MockTest.GetF32" } },
-                    .{ .name = "GetF64", .impl = .{ .return_r8 = &@"MockTest.GetF64" } },
-                    .{ .name = "EchoF32", .impl = .{ .take_r4_return_r4 = &@"MockTest.EchoF32" } },
-                    .{ .name = "EchoF64", .impl = .{ .take_r8_return_r8 = &@"MockTest.EchoF64" } },
-                    .{ .name = "GetHugeF64", .impl = .{ .return_r8 = &@"MockTest.GetHugeF64" } },
-                    .{ .name = "EchoBool", .impl = .{ .take_boolean_return_boolean = &@"MockTest.EchoBool" } },
-                    .{ .name = "EchoI8", .impl = .{ .take_i1_return_i1 = &@"MockTest.EchoI8" } },
-                    .{ .name = "EchoU8", .impl = .{ .take_u1_return_u1 = &@"MockTest.EchoU8" } },
-                    .{ .name = "EchoI16", .impl = .{ .take_i2_return_i2 = &@"MockTest.EchoI16" } },
-                    .{ .name = "EchoI32", .impl = .{ .take_i4_return_i4 = &@"MockTest.EchoI32" } },
-                    .{ .name = "EchoI64", .impl = .{ .take_i8_return_i8 = &@"MockTest.EchoI64" } },
                 }, .fields = &[_]MockClassField{
                     .{ .name = "static_field_null", .protection = .private, .kind = .{ .static = .{ .object = null } } },
                     .{ .name = "static_field_string", .protection = .private, .kind = .{ .static = .{ .object_lazy = .@"mocktest.static_field_string" } } },
-                    .{ .name = "static_field_f32", .protection = .public, .kind = .{ .static = .{ .r4 = 2.25 } } },
-                    .{ .name = "static_field_f64", .protection = .public, .kind = .{ .static = .{ .r8 = 4.75 } } },
                 } },
             } },
         },
@@ -765,6 +743,9 @@ export fn mono_field_get_name(f: *const dotnet.ClassField) callconv(.c) [*:0]con
 export fn mono_field_get_type(f: *const dotnet.ClassField) callconv(.c) *const dotnet.Type {
     const field: *const MockClassField = .fromMono(f);
     return field.kind.getType().toMono();
+}
+export fn mono_runtime_class_init(vtable: *const dotnet.VTable) callconv(.c) void {
+    _ = vtable;
 }
 export fn mono_field_static_set_value(
     vtable: *const dotnet.VTable,

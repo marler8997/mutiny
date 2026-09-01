@@ -32,6 +32,7 @@ pub const String = opaque {};
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
 
 const MonoFuncs = struct {
+    runtime_class_init: *const fn (*const VTable) callconv(.c) void,
     assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
     assembly_get_name: *const fn (*const Assembly) callconv(.c) ?*const AssemblyName,
     assembly_name_get_name: *const fn (*const AssemblyName) callconv(.c) ?[*:0]const u8,
@@ -53,6 +54,7 @@ const MonoFuncs = struct {
 };
 
 const Il2cppFuncs = struct {
+    runtime_class_init: *const fn (*const Class) callconv(.c) void,
     domain_get_assemblies: *const fn (*const Domain, size: *usize) callconv(.c) [*]const *const Assembly,
     image_get_name: *const fn (*const Image) callconv(.c) [*:0]const u8,
     image_get_class_count: *const fn (*const Image) callconv(.c) usize,
@@ -149,6 +151,7 @@ pub const Funcs = struct {
             .free = try funcs.sharedGet(kind, mod, .free, proc_ref),
             .kind = switch (kind) {
                 .mono => .{ .mono = .{
+                    .runtime_class_init = try mono_funcs.monoGet(mod, .runtime_class_init, proc_ref),
                     .assembly_foreach = try mono_funcs.monoGet(mod, .assembly_foreach, proc_ref),
                     .assembly_get_name = try mono_funcs.monoGet(mod, .assembly_get_name, proc_ref),
                     .assembly_name_get_name = try mono_funcs.monoGet(mod, .assembly_name_get_name, proc_ref),
@@ -166,6 +169,7 @@ pub const Funcs = struct {
                 } },
                 .il2cpp => .{
                     .il2cpp = .{
+                        .runtime_class_init = try il2cpp_funcs.il2cppGet(mod, .runtime_class_init, proc_ref),
                         .domain_get_assemblies = try il2cpp_funcs.il2cppGet(mod, .domain_get_assemblies, proc_ref),
                         .image_get_name = try il2cpp_funcs.il2cppGet(mod, .image_get_name, proc_ref),
                         .image_get_class_count = try il2cpp_funcs.il2cppGet(mod, .image_get_class_count, proc_ref),

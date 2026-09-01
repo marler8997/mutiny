@@ -1377,15 +1377,15 @@ fn pushMonoField(
     } });
     switch (method) {
         .static => switch (vm.dotnet_funcs.kind) {
-            .mono => |*mono| mono.field_static_get_value(
-                mono.class_vtable(vm.dotnet_funcs.domain_get().?, class),
-                field,
-                value.getPtr(),
-            ),
-            .il2cpp => |*il2cpp| il2cpp.field_static_get_value(
-                field,
-                value.getPtr(),
-            ),
+            .mono => |*mono| {
+                const vtable = mono.class_vtable(vm.dotnet_funcs.domain_get().?, class);
+                mono.runtime_class_init(vtable);
+                mono.field_static_get_value(vtable, field, value.getPtr());
+            },
+            .il2cpp => |*il2cpp| {
+                il2cpp.runtime_class_init(class);
+                il2cpp.field_static_get_value(field, value.getPtr());
+            },
         },
         .instance => |obj| vm.dotnet_funcs.field_get_value(
             obj,
@@ -4098,41 +4098,6 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "@Log(1.)", "1: syntax error: expected an identifier after '.' but got a close paren ')'");
     try testBadCode(dotnet_funcs, "@Log(1.5.5)", "1: syntax error: expected an identifier after '.' but got a number literal 5");
     try testBadCode(dotnet_funcs, "@Log(1.foo)", "1: invalid number literal '1.foo'");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoF32(16777217))
-    , "3: cannot convert 16777217 to r4 without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoF64(9007199254740993))
-    , "3: cannot convert 9007199254740993 to r8 without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoI16(70000))
-    , "3: cannot convert 70000 to i2 without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoI8(128))
-    , "3: cannot convert 128 to i1 without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoU8(0 - 1))
-    , "3: cannot convert -1 to u1 without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoBool(2))
-    , "3: cannot convert 2 to boolean without losing precision");
-    if (is_monomock) try testBadCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Discard(MockTest.EchoF32(MockTest.GetHugeF64()))
-    , "3: cannot convert 1e300 to r4 without losing precision");
     try testBadCode(dotnet_funcs, "0+\"hello\"", "1: binary operation '+' expects integers or floats but got a string literal");
     try testBadCode(dotnet_funcs, "\"hello\"+0", "1: binary operation '+' expects integers or floats but got a string literal");
     try testBadCode(dotnet_funcs, "0/0", "1: divide by 0");
@@ -4498,6 +4463,81 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(ts._ticks == 123)
         \\@Assert(declared_after == 0)
     );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Assert(Echo.I32(0 - 32) == 0 - 32)
+        \\@Assert(Echo.I64(9007199254740993) == 9007199254740993)
+        \\@Assert(Echo.F32(1.5) == 1.5)
+        \\@Assert(Echo.F64(3.25) == 3.25)
+        \\@Assert(Echo.Bool(1) == 1)
+        \\@Assert(Echo.I8(0 - 128) == 0 - 128)
+        \\@Assert(Echo.U8(255) == 255)
+        \\@Assert(Echo.I16(32767) == 32767)
+        \\@Assert(Echo.U16(65535) == 65535)
+        \\@Assert(Echo.U32(4294967295) == 4294967295)
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\@Assert(Statics.I32Field == 0 - 32)
+        \\@Assert(Statics.F32Field == 1.5)
+        \\@Assert(Statics.F64Field == 3.25)
+        \\var Instances = @Class(t.MutinyTest.Instances)
+        \\var inst = Instances.New()
+        \\@Assert(inst.I32Field == 0 - 32)
+        \\@Assert(inst.F32Field == 1.5)
+        \\set inst.F32Field = 9.5
+        \\@Assert(inst.F32Field == 9.5)
+        \\set inst.I64Field = 123456789
+        \\@Assert(inst.I64Field == 123456789)
+        \\@Assert(Statics.F32Field != Statics.F64Field)
+        \\@Assert(Statics.F32Field > 1)
+        \\@Assert(Statics.F32Field < 2)
+        \\@Assert(Echo.F32(Statics.F32Field) == Statics.F32Field)
+        \\@Assert(Echo.F64(Statics.F64Field) == Statics.F64Field)
+        \\@Assert(Echo.F32(2) == 2)
+        \\@Assert(Echo.F32(0 - 3) == 0 - 3)
+        \\@Assert(Echo.F32(16777216) == 16777216)
+        \\@Assert(Echo.F64(9007199254740992) == 9007199254740992)
+        \\@Assert(Echo.F32(1.1) != 1.1)
+        \\var Constants = @Class(t.MutinyTest.Constants)
+        \\@Assert(Echo.F64(Constants.F64Huge()) == Constants.F64Huge())
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.F32(16777217))
+    , "3: cannot convert 16777217 to r4 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.F64(9007199254740993))
+    , "3: cannot convert 9007199254740993 to r8 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\var Constants = @Class(t.MutinyTest.Constants)
+        \\@Discard(Echo.F32(Constants.F64Huge()))
+    , "4: cannot convert 1e300 to r4 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.I16(70000))
+    , "3: cannot convert 70000 to i2 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.I8(128))
+    , "3: cannot convert 128 to i1 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.U8(0 - 1))
+    , "3: cannot convert -1 to u1 without losing precision");
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\@Discard(Echo.Bool(2))
+    , "3: cannot convert 2 to boolean without losing precision");
+
     // TODO: gated to mono because il2cpp strips unused mscorlib code per game, so Math/Single/
     //       Double may not exist in an arbitrary GameAssembly.dll. Replace these mscorlib
     //       fixtures with our own managed test library so we get every type and method the tests
@@ -4524,63 +4564,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(0 == Single.IsNaN(Math.Sqrt(2)))
         \\var Double = @Class(mscorlib.System.Double)
         \\@Assert(0 == Double.IsNaN(0))
-    );
-    if (is_monomock) try testCode(dotnet_funcs,
-        \\var mocktest = @Assembly("mocktest")
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Log("f32 return: ", MockTest.GetF32())
-        \\@Log("f64 return: ", MockTest.GetF64())
-        \\@Log("f32 field: ", MockTest.static_field_f32)
-        \\@Log("f64 field: ", MockTest.static_field_f64)
-        \\@Assert(MockTest.GetF32() == MockTest.GetF32())
-        \\@Assert(MockTest.GetF64() == MockTest.GetF64())
-        \\@Assert(MockTest.static_field_f32 == MockTest.static_field_f32)
-        \\@Assert(MockTest.static_field_f64 == MockTest.static_field_f64)
-        \\@Assert(MockTest.GetF32() != MockTest.GetF64())
-        \\@Assert(MockTest.GetF32() != MockTest.static_field_f32)
-        \\@Assert(MockTest.static_field_f32 != MockTest.static_field_f64)
-        \\@Assert(MockTest.GetF32() != 1)
-        \\@Assert(MockTest.GetF32() != 2)
-        \\@Assert(MockTest.GetF32() > 1)
-        \\@Assert(MockTest.GetF32() < 2)
-        \\@Assert(MockTest.static_field_f32 != 2)
-        \\@Assert(MockTest.GetF64() > 3)
-        \\@Assert(MockTest.GetF64() < 4)
-        \\@Assert(MockTest.static_field_f64 > 4)
-        \\@Assert(MockTest.static_field_f64 < 5)
-        \\@Assert(MockTest.EchoF32(MockTest.GetF32()) == MockTest.GetF32())
-        \\@Assert(MockTest.EchoF64(MockTest.GetF64()) == MockTest.GetF64())
-        \\@Assert(MockTest.EchoF32(MockTest.static_field_f32) == MockTest.static_field_f32)
-        \\@Assert(MockTest.EchoF64(MockTest.static_field_f64) == MockTest.static_field_f64)
-        \\@Assert(MockTest.EchoF32(2) == 2)
-        \\@Assert(MockTest.EchoF64(2) == 2)
-        \\@Assert(MockTest.EchoF32(0) == 0)
-        \\@Assert(MockTest.EchoF32(0 - 3) == 0 - 3)
-        \\@Assert(MockTest.EchoF32(2) != 3)
-        \\@Assert(MockTest.EchoF32(16777216) == 16777216)
-        \\@Assert(MockTest.EchoF64(9007199254740992) == 9007199254740992)
-        \\@Assert(MockTest.EchoF32(MockTest.GetF64()) == MockTest.GetF64())
-        \\@Assert(MockTest.EchoF64(MockTest.GetHugeF64()) == MockTest.GetHugeF64())
-        \\@Assert(MockTest.GetF32() == 1.5)
-        \\@Assert(MockTest.GetF64() == 3.25)
-        \\@Assert(MockTest.static_field_f32 == 2.25)
-        \\@Assert(MockTest.static_field_f64 == 4.75)
-        \\@Assert(MockTest.EchoF32(1.5) == 1.5)
-        \\@Assert(MockTest.EchoF64(3.25) == 3.25)
-        \\@Assert(MockTest.EchoF32(1.1) != 1.1)
-        \\@Assert(MockTest.EchoBool(1) == 1)
-        \\@Assert(MockTest.EchoBool(0) == 0)
-        \\@Assert(MockTest.EchoI16(1234) == 1234)
-        \\@Assert(MockTest.EchoI16(0 - 1234) == 0 - 1234)
-        \\@Assert(MockTest.EchoI16(32767) == 32767)
-        \\@Assert(MockTest.EchoI8(127) == 127)
-        \\@Assert(MockTest.EchoI8(0 - 128) == 0 - 128)
-        \\@Assert(MockTest.EchoU8(255) == 255)
-        \\@Assert(MockTest.EchoU8(0) == 0)
-        \\@Assert(MockTest.EchoI32(2000000000) == 2000000000)
-        \\@Assert(MockTest.EchoI32(0 - 2000000000) == 0 - 2000000000)
-        \\@Assert(MockTest.EchoI64(9007199254740993) == 9007199254740993)
-        \\@Assert(MockTest.EchoI64(0 - 9007199254740993) == 0 - 9007199254740993)
     );
     try testCode(dotnet_funcs,
         \\if (1) { var null_obj = 0 }

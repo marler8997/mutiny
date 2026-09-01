@@ -104,6 +104,7 @@ pub fn main() !void {
                 .{},
             );
             std.log.info("mono_jit_init success", .{});
+            if (!Vm.is_monomock) loadTestAssembly(init_funcs);
             break :blk result;
         },
         .il2cpp => {
@@ -207,13 +208,53 @@ const Il2cppInitFuncs = struct {
 const MonoInitFuncs = struct {
     jit_init: *const fn (name: [*:0]const u8) callconv(.c) ?*const dotnet.Domain,
     set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
+    image_open_from_data: *const fn (
+        data: [*]const u8,
+        data_len: u32,
+        need_copy: i32,
+        status: *MonoImageOpenStatus,
+    ) callconv(.c) ?*const dotnet.Image,
+    assembly_load_from: *const fn (
+        image: *const dotnet.Image,
+        name: [*:0]const u8,
+        status: *MonoImageOpenStatus,
+    ) callconv(.c) ?*const dotnet.Assembly,
     pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!MonoInitFuncs {
         return .{
             .jit_init = try mono_funcs.monoGet(mod, .jit_init, proc_ref),
             .set_assemblies_path = try mono_funcs.monoGet(mod, .set_assemblies_path, proc_ref),
+            .image_open_from_data = try mono_funcs.monoGet(mod, .image_open_from_data, proc_ref),
+            .assembly_load_from = try mono_funcs.monoGet(mod, .assembly_load_from, proc_ref),
         };
     }
 };
+
+const MonoImageOpenStatus = enum(c_int) {
+    ok = 0,
+    error_errno = 1,
+    image_invalid = 2,
+    missing_assemblyref = 3,
+    _,
+};
+
+const mutiny_test_dll = @embedFile("mutiny_test_dll");
+
+fn loadTestAssembly(init_funcs: MonoInitFuncs) void {
+    var status: MonoImageOpenStatus = .ok;
+    const image = init_funcs.image_open_from_data(
+        mutiny_test_dll,
+        @intCast(mutiny_test_dll.len),
+        1,
+        &status,
+    ) orelse errExit("mono_image_open_from_data failed with {t}", .{status});
+    if (status != .ok) errExit("mono_image_open_from_data gave status {t}", .{status});
+    _ = init_funcs.assembly_load_from(image, "MutinyTest", &status) orelse errExit(
+        "mono_assembly_load_from failed with {t}",
+        .{status},
+    );
+    if (status != .ok) errExit("mono_assembly_load_from gave status {t}", .{status});
+    std.log.info("loaded embedded MutinyTest.dll ({} bytes)", .{mutiny_test_dll.len});
+}
 
 fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.log.err(fmt, args);

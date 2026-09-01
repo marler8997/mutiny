@@ -1086,15 +1086,21 @@ fn callMethod(
         .string = "too many args for managed function (current max is 100)",
     } });
 
-    const method = vm.dotnet_funcs.class_get_method_from_name(
-        class,
-        method_id.slice(),
-        args.count,
-    ) orelse return vm.setError(.{ .missing_method = .{
-        .class = class,
-        .id_extent = method_id_extent,
-        .arg_count = args.count,
-    } });
+    const method = blk: {
+        var search = class;
+        while (true) {
+            if (vm.dotnet_funcs.class_get_method_from_name(
+                search,
+                method_id.slice(),
+                args.count,
+            )) |found| break :blk found;
+            search = vm.dotnet_funcs.class_get_parent(search) orelse return vm.setError(.{ .missing_method = .{
+                .class = class,
+                .id_extent = method_id_extent,
+                .arg_count = args.count,
+            } });
+        }
+    };
     const return_type = blk: switch (vm.dotnet_funcs.kind) {
         .mono => |*mono| {
             const method_sig = mono.method_signature(method) orelse @panic(
@@ -1326,7 +1332,8 @@ const MarshalValue = union(enum) {
             // .genericinst => .{ .genericinst = undefined },
             .genericinst => .{ .maybe_object = undefined },
             .object => .{ .maybe_object = undefined },
-            .char, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
+            .szarray => .{ .maybe_object = undefined },
+            .char, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
                 std.log.warn("unsure if type '{s}' should be supported (MarshalValue)", .{@tagName(t)});
                 return null;
             },
@@ -4643,6 +4650,30 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(@IsNull(o))
         \\var real = Instances.New()
         \\@Assert(@NotNull(real))
+    );
+    if (have_mutiny_test) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\var arr = Statics.I32Array
+        \\@Assert(@NotNull(arr))
+        \\@Assert(arr.get_Length() == 3)
+        \\var strs = Statics.StringArray
+        \\@Assert(@NotNull(strs))
+        \\@Assert(strs.get_Length() == 2)
+        \\@Assert(@IsNull(Statics.NullArray))
+    );
+    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\var arr = Statics.I32Array
+        \\@Discard(arr[0])
+    , "array index not implemented");
+    if (have_mutiny_test) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Derived = @Class(t.MutinyTest.Derived)
+        \\var d = Derived.New()
+        \\@Assert(d.BaseField == 8)
+        \\@Assert(d.BaseMethod() == 7)
     );
     if (have_mutiny_test) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")

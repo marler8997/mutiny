@@ -86,6 +86,7 @@ pub const Funcs = struct {
 
     class_from_name: *const fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class,
     class_get_name: *const fn (*const Class) callconv(.c) [*:0]const u8,
+    class_get_parent: *const fn (*const Class) callconv(.c) ?*const Class,
     class_get_namespace: *const fn (*const Class) callconv(.c) [*:0]const u8,
     class_get_fields: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const ClassField,
     class_get_methods: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Method,
@@ -131,6 +132,7 @@ pub const Funcs = struct {
                 .il2cpp => "il2cpp_class_from_type",
             }, proc_ref),
             .class_get_name = try funcs.sharedGet(kind, mod, .class_get_name, proc_ref),
+            .class_get_parent = try funcs.sharedGet(kind, mod, .class_get_parent, proc_ref),
             .class_get_namespace = try funcs.sharedGet(kind, mod, .class_get_namespace, proc_ref),
             .class_get_fields = try funcs.sharedGet(kind, mod, .class_get_fields, proc_ref),
             .class_get_methods = try funcs.sharedGet(kind, mod, .class_get_methods, proc_ref),

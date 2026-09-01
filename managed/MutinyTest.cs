@@ -31,6 +31,10 @@ namespace MutinyTest
 
         public const int ConstI32 = 42;
         public const float ConstF32 = 2.5f;
+
+        public static int[] I32Array = new int[] { 10, 20, 30 };
+        public static string[] StringArray = new string[] { "a", "b" };
+        public static int[] NullArray = null;
     }
 
     public class Instances
@@ -51,6 +55,17 @@ namespace MutinyTest
         public static Instances NullInstance() { return null; }
         public static string NullString() { return null; }
         public static object NullObject() { return null; }
+    }
+
+    public class Base
+    {
+        public int BaseMethod() { return 7; }
+        public int BaseField = 8;
+    }
+
+    public class Derived : Base
+    {
+        public static Derived New() { return new Derived(); }
     }
 
     public class Constants

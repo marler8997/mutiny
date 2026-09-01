@@ -115,6 +115,9 @@ pub const Funcs = struct {
     string_length: *const fn (*const String) callconv(.c) c_int,
 
     free: *const fn (*anyopaque) callconv(.c) void,
+
+    class_from_type: *const fn (*const Type) callconv(.c) ?*const Class,
+
     pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try funcs.monoGet(mod, .get_root_domain, proc_ref),
@@ -123,6 +126,10 @@ pub const Funcs = struct {
             .thread_detach = try funcs.sharedGet(kind, mod, .thread_detach, proc_ref),
             .assembly_get_image = try funcs.sharedGet(kind, mod, .assembly_get_image, proc_ref),
             .class_from_name = try funcs.sharedGet(kind, mod, .class_from_name, proc_ref),
+            .class_from_type = try funcs.get(mod, .class_from_type, switch (kind) {
+                .mono => "mono_class_from_mono_type",
+                .il2cpp => "il2cpp_class_from_type",
+            }, proc_ref),
             .class_get_name = try funcs.sharedGet(kind, mod, .class_get_name, proc_ref),
             .class_get_namespace = try funcs.sharedGet(kind, mod, .class_get_namespace, proc_ref),
             .class_get_fields = try funcs.sharedGet(kind, mod, .class_get_fields, proc_ref),

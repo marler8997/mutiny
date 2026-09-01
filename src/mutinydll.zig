@@ -1209,7 +1209,7 @@ fn runMod(
         if (have_text.vm_state) |*vm_state| {
             if (vm_state.yielded) |*yielded| {
                 if (yielded.isExpired()) {
-                    std.log.info("{s}: yield expired!", .{mod_name});
+                    std.log.debug("{s}: yield expired!", .{mod_name});
                     const block_resume = yielded.block_resume;
                     vm_state.yielded = null;
                     break :blk .{

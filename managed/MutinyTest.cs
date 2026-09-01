@@ -48,6 +48,9 @@ namespace MutinyTest
         public double F64Field = 3.25;
 
         public static Instances New() { return new Instances(); }
+        public static Instances NullInstance() { return null; }
+        public static string NullString() { return null; }
+        public static object NullObject() { return null; }
     }
 
     public class Constants

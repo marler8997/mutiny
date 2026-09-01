@@ -1217,9 +1217,20 @@ fn callMethod(
             return vm.setError(.{ .not_implemented = "error message for bad or unsupported return type" });
         };
         try vm.pushMonoObject(object_type, result);
-    } else if (return_type_kind != .void) {
-        std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
-        return vm.setError(.{ .not_implemented = "error message for non-void return type with null value" });
+    } else switch (return_type_kind) {
+        .void => {},
+        .string, .class, .array, .genericinst, .object, .szarray => {
+            const return_class = vm.dotnet_funcs.class_from_type(return_type) orelse {
+                std.log.warn("class_from_type returned null for kind {t}", .{return_type_kind});
+                return vm.setError(.{ .not_implemented = "null return value whose type has no class" });
+            };
+            (try vm.push(Type)).* = .null_object;
+            (try vm.push(*const dotnet.Class)).* = return_class;
+        },
+        else => {
+            std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
+            return vm.setError(.{ .not_implemented = "non-void return type with null value" });
+        },
     }
     return args.end;
 }
@@ -4618,6 +4629,18 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Echo.F32(Statics.F32Field) == 1.5)
         \\@Assert(Statics.ConstI32 == 42)
         \\@Assert(Statics.ConstF32 == 2.5)
+    );
+    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Instances = @Class(t.MutinyTest.Instances)
+        \\var n = Instances.NullInstance()
+        \\@Assert(@IsNull(n))
+        \\var s = Instances.NullString()
+        \\@Assert(@IsNull(s))
+        \\var o = Instances.NullObject()
+        \\@Assert(@IsNull(o))
+        \\var real = Instances.New()
+        \\@Assert(@NotNull(real))
     );
     if (!is_monomock and dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")

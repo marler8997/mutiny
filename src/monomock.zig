@@ -871,6 +871,10 @@ export fn mono_signature_get_params(
     return sig.params[index].toMono();
 }
 
+export fn mono_class_from_mono_type(type_opaque: *const dotnet.Type) callconv(.c) ?*const dotnet.Class {
+    _ = type_opaque;
+    @panic("mock: mono_class_from_mono_type is not implemented");
+}
 export fn mono_type_get_type(type_opaque: *const dotnet.Type) callconv(.c) dotnet.TypeKind {
     const t: *const MockType = .fromMono(type_opaque);
     return t.kind();

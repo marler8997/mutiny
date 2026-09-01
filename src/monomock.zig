@@ -664,6 +664,10 @@ export fn mono_class_get_name(c: *const dotnet.Class) callconv(.c) [*:0]const u8
     const class: *const MockClass = .fromMonoClass(c);
     return class.name;
 }
+export fn mono_class_get_type(c: *const dotnet.Class) callconv(.c) *const dotnet.Type {
+    _ = c;
+    @panic("mock: mono_class_get_type is not implemented");
+}
 export fn mono_class_get_parent(c: *const dotnet.Class) callconv(.c) ?*const dotnet.Class {
     _ = c;
     return null;

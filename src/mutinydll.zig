@@ -1,3 +1,4 @@
+
 const global = struct {
     var hinstance: win32.HINSTANCE = undefined;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
@@ -428,6 +429,24 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     // domain_get is how the Vm accesses the domain, make sure it's
     // what we expect after attaching our thread to it
     std.debug.assert(dotnet_funcs.domain_get() == root_domain);
+
+    const il2cpp_layouts: il2cppclass.Layouts = switch (dotnet_funcs.kind) {
+        .mono => undefined,
+        .il2cpp => blk: {
+            const start = getNow();
+            const layouts = il2cppclass.discover(&dotnet_funcs) catch |err| {
+                std.log.err("il2cpp layout could not be verified ({t})", .{err});
+                return 0xffffffff;
+            };
+            std.log.info("il2cpp layout verified in {} ms", .{
+                @divTrunc(getNow().since(start), std.time.ns_per_ms),
+            });
+            break :blk layouts;
+        },
+    };
+    // only the test fixture writes to the runtime today, and it discovers its own layouts;
+    // this call is the gate that refuses an unfamiliar layout before we run at all
+    _ = il2cpp_layouts;
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var last_update_mods_error: ?UpdateModsError = null;
@@ -1449,3 +1468,4 @@ const mutinyipc = @import("mutinyipc.zig");
 const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");
+const il2cppclass = @import("il2cppclass.zig");

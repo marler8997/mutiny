@@ -4079,11 +4079,12 @@ const ErrorFmt = struct {
 pub var is_monomock: bool = false;
 
 pub fn runTests(dotnet_funcs: *const dotnet.Funcs) !void {
+    try vmtest.run(dotnet_funcs);
     try badCodeTests(dotnet_funcs);
     try goodCodeTests(dotnet_funcs);
 }
 
-fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_error: []const u8) !void {
+pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4270,15 +4271,16 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var s = String.Empty
         \\set s.Empty = 0
     , "4: cannot access static field 'Empty' on an object, need a class");
+    if (is_monomock) return;
     // il2cpp doesn't have Decimal.Parse
-    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
+    if (dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
         \\set decimal.hi = 2147483648
     , "4: integer overflow, value 2147483648 to 32-bit signed integer");
     // il2cpp doesn't have Decimal.Parse
-    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
+    if (dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
@@ -4305,7 +4307,7 @@ const TestDomain = struct {
     }
 };
 
-fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
+pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4340,8 +4342,12 @@ fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     vm.deinit();
 }
 
+fn haveMutinyTest(dotnet_funcs: *const dotnet.Funcs) bool {
+    return dotnet_funcs.kind == .mono;
+}
+
 fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
-    const have_mutiny_test = !is_monomock and dotnet_funcs.kind == .mono;
+    const have_mutiny_test = haveMutinyTest(dotnet_funcs);
 
     try testCode(dotnet_funcs, "fn foo(){}");
     try testCode(dotnet_funcs, "@Nothing()");
@@ -4492,7 +4498,13 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
     );
-    if (!is_monomock) try testCode(dotnet_funcs,
+    if (is_monomock) try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\@Discard(DateTime.get_Now()._dateData)
+    );
+    if (is_monomock) return;
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
@@ -4538,7 +4550,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(@IsNull(foo))
         \\@Assert(0 == @NotNull(foo))
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var dt = DateTime.get_Now()
@@ -4549,12 +4561,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(dt._dateData == 456)
         \\@Assert(declared_after == 7)
     );
-    if (is_monomock) try testCode(dotnet_funcs,
-        \\var mscorlib = @Assembly("mscorlib")
-        \\var DateTime = @Class(mscorlib.System.DateTime)
-        \\@Discard(DateTime.get_Now()._dateData)
-    );
-    if (!is_monomock) try testCode(dotnet_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
         \\@Assert(TimeSpan.FromSeconds(1)._ticks == 10000000)
@@ -4568,16 +4575,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Assert(Echo.I32(0 - 32) == 0 - 32)
-        \\@Assert(Echo.I64(9007199254740993) == 9007199254740993)
-        \\@Assert(Echo.F32(1.5) == 1.5)
-        \\@Assert(Echo.F64(3.25) == 3.25)
-        \\@Assert(Echo.Bool(1) == 1)
-        \\@Assert(Echo.I8(0 - 128) == 0 - 128)
-        \\@Assert(Echo.U8(255) == 255)
-        \\@Assert(Echo.I16(32767) == 32767)
-        \\@Assert(Echo.U16(65535) == 65535)
-        \\@Assert(Echo.U32(4294967295) == 4294967295)
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\@Assert(Statics.I32Field == 0 - 32)
         \\@Assert(Statics.F32Field == 1.5)
@@ -4600,13 +4597,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Statics.F32Field < 2)
         \\@Assert(Echo.F32(Statics.F32Field) == Statics.F32Field)
         \\@Assert(Echo.F64(Statics.F64Field) == Statics.F64Field)
-        \\@Assert(Echo.F32(2) == 2)
-        \\@Assert(Echo.F32(0 - 3) == 0 - 3)
-        \\@Assert(Echo.F32(16777216) == 16777216)
-        \\@Assert(Echo.F64(9007199254740992) == 9007199254740992)
-        \\@Assert(Echo.F32(1.1) != 1.1)
-        \\var Constants = @Class(t.MutinyTest.Constants)
-        \\@Assert(Echo.F64(Constants.F64Huge()) == Constants.F64Huge())
     );
     if (have_mutiny_test) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
@@ -4783,7 +4773,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(x == 0)
     );
     // il2cpp doesn't have Decimal.Parse
-    if (!is_monomock and dotnet_funcs.kind != .il2cpp) try testCode(dotnet_funcs,
+    if (dotnet_funcs.kind != .il2cpp) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)
         \\var decimal = Decimal.Parse("0")
@@ -4792,6 +4782,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\set decimal.hi = 1
         \\@Assert(decimal.hi == 1)
     );
+
 }
 
 const monolog = std.log.scoped(.mono);
@@ -4801,3 +4792,4 @@ const std = @import("std");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");
 const Memory = @import("Memory.zig");
+const vmtest = @import("vmtest.zig");

@@ -4487,12 +4487,21 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\@Discard(DateTime.get_Now()._dateData)
     );
-    if (!is_monomock and dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    if (!is_monomock) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
         \\@Assert(TimeSpan.FromSeconds(1)._ticks == 10000000)
         \\@Assert(TimeSpan.FromSeconds(2)._ticks == 20000000)
+        \\var ts = TimeSpan.FromSeconds(1)
+        \\var declared_after = 0
+        \\set ts._ticks = 123
+        \\@Assert(ts._ticks == 123)
+        \\@Assert(declared_after == 0)
     );
+    // TODO: gated to mono because il2cpp strips unused mscorlib code per game, so Math/Single/
+    //       Double may not exist in an arbitrary GameAssembly.dll. Replace these mscorlib
+    //       fixtures with our own managed test library so we get every type and method the tests
+    //       need, on both runtimes, instead of hunting for something a game happens to keep.
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Math = @Class(mscorlib.System.Math)

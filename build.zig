@@ -26,16 +26,29 @@ pub fn build(b: *std.Build) void {
     );
     b.step("managed-dll", "").dependOn(&install_mutiny_managed_dll.step);
 
+    const mdc = b.addExecutable(.{
+        .name = "mdc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("mdc/mdcmain.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    {
+        const install_mdc = b.addInstallArtifact(mdc, .{});
+        b.step("install-mdc", "").dependOn(&install_mdc.step);
+    }
+
     const mutiny_test_dll = blk: {
-        const compile = b.addSystemCommand(&.{
-            "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
-            "/target:library",
-            "/nologo",
-        });
-        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MutinyTest.dll");
-        compile.addFileArg(b.path("managed/MutinyTest.cs"));
+        const compile = b.addRunArtifact(mdc);
+        compile.addFileArg(b.path("managed/MutinyTest.mds"));
+        compile.addArg("-o");
+        const out_dll = compile.addOutputFileArg("MutinyTest.dll");
         break :blk out_dll;
     };
+    b.step("install-test-dll", "").dependOn(
+        &b.addInstallLibFile(mutiny_test_dll, "MutinyTest.dll").step,
+    );
 
     const mutiny_native_dll = b.addLibrary(.{
         .name = "Mutiny",

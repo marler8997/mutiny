@@ -1,0 +1,426 @@
+timestamp 0x6a972d74
+version "MutinyTest.dll" "0.0.0.0"
+mvid 2573423F-8A23-49E2-AB96-2953B8D7ACB1
+
+assembly "MutinyTest" 0.0.0.0
+assemblyref mscorlib 4.0.0.0 keytoken b77a5c561934e089
+module "MutinyTest.dll"
+customattribute assembly CompilationRelaxationsAttribute::.ctor ca i4 8
+customattribute assembly RuntimeCompatibilityAttribute::.ctor ca property bool WrapNonExceptionThrows true
+
+typeref mscorlib System Object
+typeref mscorlib System.Runtime.CompilerServices CompilationRelaxationsAttribute
+typeref mscorlib System.Runtime.CompilerServices RuntimeCompatibilityAttribute
+typeref mscorlib System Int32
+typeref mscorlib System.Runtime.CompilerServices CompilerGeneratedAttribute
+typeref mscorlib System ValueType
+typeref mscorlib System.Runtime.CompilerServices RuntimeHelpers
+typeref mscorlib System Array
+typeref mscorlib System RuntimeFieldHandle
+typeref mscorlib System String
+
+typedef Echo MutinyTest public beforefieldinit extends Object {
+    method Bool public static hidebysig (bool v) bool {
+        locals bool
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I8 public static hidebysig (i1 v) i1 {
+        locals i1
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method U8 public static hidebysig (u1 v) u1 {
+        locals u1
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I16 public static hidebysig (i2 v) i2 {
+        locals i2
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method U16 public static hidebysig (u2 v) u2 {
+        locals u2
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I32 public static hidebysig (i4 v) i4 {
+        locals i4
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method U32 public static hidebysig (u4 v) u4 {
+        locals u4
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I64 public static hidebysig (i8 v) i8 {
+        locals i8
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method U64 public static hidebysig (u8 v) u8 {
+        locals u8
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method F32 public static hidebysig (r4 v) r4 {
+        locals r4
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method F64 public static hidebysig (r8 v) r8 {
+        locals r8
+        nop
+        ldarg.0
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    ctor public {
+        ldarg.0
+        call Object::.ctor
+        ret
+    }
+}
+
+typedef Statics MutinyTest public beforefieldinit extends Object {
+    field ConstI32 public static const i4 = 42
+    field ConstF32 public static const r4 = 2.5
+    field I32Array public static i4[]
+    field StringArray public static string[]
+    field NullArray public static i4[]
+    field BoolField public static bool
+    field I8Field public static i1
+    field U8Field public static u1
+    field I16Field public static i2
+    field U16Field public static u2
+    field I32Field public static i4
+    field U32Field public static u4
+    field I64Field public static i8
+    field U64Field public static u8
+    field F32Field public static r4
+    field F64Field public static r8
+    ctor public {
+        ldarg.0
+        call Object::.ctor
+        ret
+    }
+    cctor synthetic {
+        locals string[]
+        ldc.i4.3
+        newarr Int32
+        dup
+        ldtoken <PrivateImplementationDetails>{2573423F-8A23-49E2-AB96-2953B8D7ACB1}::$$method0x600001d-1
+        call RuntimeHelpers::InitializeArray
+        stsfld Statics::I32Array
+        ldc.i4.2
+        newarr String
+        stloc.0
+        ldloc.0
+        ldc.i4.0
+        ldstr "a"
+        stelem.ref
+        ldloc.0
+        ldc.i4.1
+        ldstr "b"
+        stelem.ref
+        ldloc.0
+        stsfld Statics::StringArray
+        ldnull
+        stsfld Statics::NullArray
+        ldc.i4.1
+        stsfld Statics::BoolField
+        ldc.i4.s -8
+        stsfld Statics::I8Field
+        ldc.i4.8
+        stsfld Statics::U8Field
+        ldc.i4.s -16
+        stsfld Statics::I16Field
+        ldc.i4.s 16
+        stsfld Statics::U16Field
+        ldc.i4.s -32
+        stsfld Statics::I32Field
+        ldc.i4.s 32
+        stsfld Statics::U32Field
+        ldc.i4.s -64
+        conv.i8
+        stsfld Statics::I64Field
+        ldc.i4.s 64
+        conv.i8
+        stsfld Statics::U64Field
+        ldc.r4 1.5
+        stsfld Statics::F32Field
+        ldc.r8 3.25
+        stsfld Statics::F64Field
+        ret
+    }
+}
+
+typedef Instances MutinyTest public beforefieldinit extends Object {
+    field BoolField public bool
+    field I8Field public i1
+    field U8Field public u1
+    field I16Field public i2
+    field U16Field public u2
+    field I32Field public i4
+    field U32Field public u4
+    field I64Field public i8
+    field U64Field public u8
+    field F32Field public r4
+    field F64Field public r8
+    method New public static hidebysig () class Instances {
+        locals class Instances
+        nop
+        newobj Instances::.ctor
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method NullInstance public static hidebysig () class Instances {
+        locals class Instances
+        nop
+        ldnull
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method NullString public static hidebysig () string {
+        locals string
+        nop
+        ldnull
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method NullObject public static hidebysig () object {
+        locals object
+        nop
+        ldnull
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    ctor public {
+        ldarg.0
+        ldc.i4.1
+        stfld Instances::BoolField
+        ldarg.0
+        ldc.i4.s -8
+        stfld Instances::I8Field
+        ldarg.0
+        ldc.i4.8
+        stfld Instances::U8Field
+        ldarg.0
+        ldc.i4.s -16
+        stfld Instances::I16Field
+        ldarg.0
+        ldc.i4.s 16
+        stfld Instances::U16Field
+        ldarg.0
+        ldc.i4.s -32
+        stfld Instances::I32Field
+        ldarg.0
+        ldc.i4.s 32
+        stfld Instances::U32Field
+        ldarg.0
+        ldc.i4.s -64
+        conv.i8
+        stfld Instances::I64Field
+        ldarg.0
+        ldc.i4.s 64
+        conv.i8
+        stfld Instances::U64Field
+        ldarg.0
+        ldc.r4 1.5
+        stfld Instances::F32Field
+        ldarg.0
+        ldc.r8 3.25
+        stfld Instances::F64Field
+        ldarg.0
+        call Object::.ctor
+        nop
+        ret
+    }
+}
+
+typedef Base MutinyTest public beforefieldinit extends Object {
+    field BaseField public i4
+    method BaseMethod public hidebysig instance () i4 {
+        locals i4
+        nop
+        ldc.i4.7
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    ctor public {
+        ldarg.0
+        ldc.i4.8
+        stfld Base::BaseField
+        ldarg.0
+        call Object::.ctor
+        nop
+        ret
+    }
+}
+
+typedef Derived MutinyTest public beforefieldinit extends Base {
+    method New public static hidebysig () class Derived {
+        locals class Derived
+        nop
+        newobj Derived::.ctor
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    ctor public {
+        ldarg.0
+        call Base::.ctor
+        ret
+    }
+}
+
+typedef Constants MutinyTest public beforefieldinit extends Object {
+    method U64Max public static hidebysig () u8 {
+        locals u8
+        nop
+        ldc.i4.m1
+        conv.i8
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I64Max public static hidebysig () i8 {
+        locals i8
+        nop
+        ldc.i8 9223372036854775807
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method I64Min public static hidebysig () i8 {
+        locals i8
+        nop
+        ldc.i8 -9223372036854775808
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method F32Huge public static hidebysig () r4 {
+        locals r4
+        nop
+        ldc.r4 3.4e38
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    method F64Huge public static hidebysig () r8 {
+        locals r8
+        nop
+        ldc.r8 1e300
+        stloc.0
+        br.s done
+    done:
+        ldloc.0
+        ret
+    }
+    ctor public {
+        ldarg.0
+        call Object::.ctor
+        ret
+    }
+}
+
+typedef "<PrivateImplementationDetails>{2573423F-8A23-49E2-AB96-2953B8D7ACB1}" "" synthetic extends Object {
+    customattribute CompilerGeneratedAttribute::.ctor ca
+    field $$method0x600001d-1 assembly static hasfieldrva valuetype __StaticArrayInitTypeSize=12
+    typedef "__StaticArrayInitTypeSize=12" "" nested-private explicit-layout sealed synthetic extends ValueType {
+    }
+}
+
+# ---- member references
+memberref CompilationRelaxationsAttribute .ctor instance (i4) void
+memberref RuntimeCompatibilityAttribute .ctor instance () void
+memberref Object .ctor instance () void
+memberref CompilerGeneratedAttribute .ctor instance () void
+memberref RuntimeHelpers InitializeArray (class Array valuetype RuntimeFieldHandle) void
+
+
+classlayout "__StaticArrayInitTypeSize=12" 1 12
+
+data I32ArrayData i4 10 20 30
+fieldrva <PrivateImplementationDetails>{2573423F-8A23-49E2-AB96-2953B8D7ACB1}::$$method0x600001d-1 I32ArrayData

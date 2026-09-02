@@ -20,6 +20,35 @@ symbol_state: union(enum) {
 
 tests_scheduled: bool = false,
 
+// optional tracking of handles to find lifetime bugs in our Vm
+handle_tracker: ?*HandleTracker = null,
+
+pub const HandleTracker = struct {
+    allocator: std.mem.Allocator,
+    live: std.AutoHashMapUnmanaged(dotnet.GcHandleV2, void) = .{},
+
+    pub fn deinit(tracker: *HandleTracker) void {
+        std.debug.assert(tracker.live.count() == 0);
+        tracker.live.deinit(tracker.allocator);
+    }
+    fn track(tracker: *HandleTracker, handle: dotnet.GcHandleV2) void {
+        const gop = tracker.live.getOrPut(tracker.allocator, handle) catch @panic("OOM");
+        if (gop.found_existing) std.debug.panic(
+            "gchandle_new returned handle {} that the VM already holds live",
+            .{handle},
+        );
+    }
+    fn untrack(tracker: *HandleTracker, handle: dotnet.GcHandleV2) void {
+        if (!tracker.live.remove(handle)) std.debug.panic(
+            "freeing handle {} the VM does not hold (double free?)",
+            .{handle},
+        );
+    }
+    fn assertLive(tracker: *HandleTracker, handle: dotnet.GcHandleV2) void {
+        if (!tracker.live.contains(handle)) std.debug.panic("handle {} used after free", .{handle});
+    }
+};
+
 const ErrorResult = union(enum) {
     exit,
     err: Error,
@@ -149,7 +178,7 @@ pub fn reset(vm: *Vm) void {
             previous_id_addr, type_addr = vm.readValue(Memory.Addr, after_id_addr);
         }
         var value = vm.pop(type_addr);
-        value.discard(vm.dotnet_funcs);
+        value.discard(vm.dotnet_funcs, vm.handle_tracker);
         _ = vm.mem.discardFrom(id_addr);
         if (id_addr.eql(.zero)) break;
         id_addr = previous_id_addr;
@@ -181,7 +210,7 @@ fn discardValues(vm: *Vm, first_type_addr: Memory.Addr) void {
         // if (value_addr.eql(vm.mem.top())) return;
         std.debug.assert(!value_addr.eql(vm.mem.top()));
         var value, const after_value = vm.readAnyValue(value_type, value_addr);
-        value.discard(vm.dotnet_funcs);
+        value.discard(vm.dotnet_funcs, vm.handle_tracker);
         type_addr = after_value;
     }
 }
@@ -566,7 +595,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             } });
             const is_true = blk: {
                 var value = vm.pop(expr_addr);
-                defer value.discard(vm.dotnet_funcs);
+                defer value.discard(vm.dotnet_funcs, vm.handle_tracker);
                 break :blk switch (value) {
                     .integer => |int_value| int_value != 0,
                     else => |t| return vm.setError(.{ .if_type = .{
@@ -617,7 +646,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             } });
             var src = vm.pop(value_addr);
             // NOTE: is this discard correct?
-            defer src.discard(vm.dotnet_funcs);
+            defer src.discard(vm.dotnet_funcs, vm.handle_tracker);
             try vm.set(&ref, &src);
             return .{ .statement_end = after_expr };
         },
@@ -801,7 +830,7 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
         },
         .object_field => |*field| {
             const gc_handle, _ = vm.readValue(dotnet.GcHandleV2, field.handle_addr);
-            const obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
+            const obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
             const class = vm.dotnet_funcs.object_get_class(obj);
             const mono_field, const marshal_value = try vm.resolveFieldForSet(class, field.extent, value, .{ .want_static = false });
             vm.dotnet_funcs.field_set_value(obj, mono_field, marshal_value.getPtrConst());
@@ -990,13 +1019,13 @@ fn evalExprSuffix(
                 .object => {
                     const gc_handle, const end = vm.readValue(dotnet.GcHandleV2, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
-                    const obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
+                    const obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
 
                     const class = vm.dotnet_funcs.object_get_class(obj);
                     const name = try vm.managedId(id_extent);
                     // monolog.debug("class_get_field class=0x{x} name='{s}'", .{ @intFromPtr(class), name.slice() });
                     if (vm.dotnet_funcs.class_get_field_from_name(class, name.slice())) |field| {
-                        defer gchandleFree(vm.dotnet_funcs, gc_handle);
+                        defer gchandleFree(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
                         _ = vm.mem.discardFrom(expr_addr);
                         try vm.pushMonoField(class, field, obj, id_extent);
                     } else {
@@ -1039,8 +1068,8 @@ fn evalExprSuffix(
                 },
                 .class_method => |m| return try vm.callMethod(suffix_op_token.end, m.class, null, m.id_start),
                 .object_method => |m| {
-                    const obj = gchandleTarget(vm.dotnet_funcs, m.gc_handle);
-                    defer gchandleFree(vm.dotnet_funcs, m.gc_handle);
+                    const obj = gchandleTarget(vm.dotnet_funcs, m.gc_handle, vm.handle_tracker);
+                    defer gchandleFree(vm.dotnet_funcs, m.gc_handle, vm.handle_tracker);
                     return try vm.callMethod(
                         suffix_op_token.end,
                         vm.dotnet_funcs.object_get_class(obj),
@@ -1186,7 +1215,7 @@ fn callMethod(
                 break :blk @ptrCast(@constCast(str));
             },
             .managed_string => |handle| {
-                const str = gchandleTarget(vm.dotnet_funcs, handle);
+                const str = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
                 break :blk @constCast(str);
             },
             else => |a| {
@@ -1397,8 +1426,8 @@ fn pushMarshalValue(vm: *Vm, class: *const dotnet.Class, value: *const MarshalVa
                     }
                 }
 
-                const handle = gchandleNew(vm.dotnet_funcs, object);
-                errdefer gchandleFree(vm.dotnet_funcs, handle);
+                const handle = gchandleNew(vm.dotnet_funcs, object, vm.handle_tracker);
+                errdefer gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
                 (try vm.push(Type)).* = .object;
                 (try vm.push(dotnet.GcHandleV2)).* = handle;
             } else {
@@ -1489,14 +1518,14 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
         },
         .string => {
             // 0 means we don't require pinning
-            const handle = gchandleNew(vm.dotnet_funcs, object);
-            errdefer gchandleFree(vm.dotnet_funcs, handle);
+            const handle = gchandleNew(vm.dotnet_funcs, object, vm.handle_tracker);
+            errdefer gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
         .class, .valuetype, .object => {
-            const handle = gchandleNew(vm.dotnet_funcs, object);
-            errdefer gchandleFree(vm.dotnet_funcs, handle);
+            const handle = gchandleNew(vm.dotnet_funcs, object, vm.handle_tracker);
+            errdefer gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
             (try vm.push(Type)).* = .object;
             (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
@@ -1529,8 +1558,8 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
             const src_gc_handle = vm.mem.toPointer(dotnet.GcHandleV2, value_addr).*;
-            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle);
-            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj);
+            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle, vm.handle_tracker);
+            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj, vm.handle_tracker);
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(dotnet.GcHandleV2)).* = new_gc_handle;
         },
@@ -1577,8 +1606,8 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
             const src_gc_handle = vm.mem.toPointer(dotnet.GcHandleV2, value_addr).*;
-            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle);
-            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj);
+            const obj = gchandleTarget(vm.dotnet_funcs, src_gc_handle, vm.handle_tracker);
+            const new_gc_handle = gchandleNew(vm.dotnet_funcs, obj, vm.handle_tracker);
             (try vm.push(Type)).* = .object;
             (try vm.push(dotnet.GcHandleV2)).* = new_gc_handle;
         },
@@ -1926,20 +1955,20 @@ fn evalBuiltin(
                 .object => |gc_handle| gc_handle,
                 else => unreachable,
             };
-            const object = gchandleTarget(vm.dotnet_funcs, gc_handle);
+            const object = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
             (try vm.push(Type)).* = .class;
             (try vm.push(*const dotnet.Class)).* = vm.dotnet_funcs.object_get_class(object);
         },
         .@"@Discard" => {
             var value = vm.pop(args_addr);
-            value.discard(vm.dotnet_funcs);
+            value.discard(vm.dotnet_funcs, vm.handle_tracker);
         },
         .@"@ScheduleTests" => {
             vm.tests_scheduled = true;
         },
         .@"@ToString" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.dotnet_funcs);
+            defer value.discard(vm.dotnet_funcs, vm.handle_tracker);
             switch (value) {
                 .integer => |value_i64| {
                     var buf: [32]u8 = undefined;
@@ -1955,7 +1984,7 @@ fn evalBuiltin(
         },
         .@"@IsNull" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.dotnet_funcs);
+            defer value.discard(vm.dotnet_funcs, vm.handle_tracker);
             const is_null: i64 = switch (value) {
                 .null_assembly => 1,
                 .assembly => 0,
@@ -1976,7 +2005,7 @@ fn evalBuiltin(
         },
         .@"@NotNull" => {
             var value = vm.pop(args_addr);
-            defer value.discard(vm.dotnet_funcs);
+            defer value.discard(vm.dotnet_funcs, vm.handle_tracker);
             const not_null: i64 = switch (value) {
                 .null_assembly => 0,
                 .assembly => 1,
@@ -2010,8 +2039,8 @@ fn pushNewManagedString(vm: *Vm, text_pos: usize, slice: []const u8) error{Vm}!v
         .pos = text_pos,
         .string = "mono_string_new_len failed",
     } });
-    const handle = gchandleNew(vm.dotnet_funcs, @ptrCast(managed_str));
-    errdefer gchandleFree(vm.dotnet_funcs, handle);
+    const handle = gchandleNew(vm.dotnet_funcs, @ptrCast(managed_str), vm.handle_tracker);
+    errdefer gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
     (try vm.push(Type)).* = .managed_string;
     (try vm.push(dotnet.GcHandleV2)).* = handle;
 }
@@ -2103,7 +2132,7 @@ fn logValues(
                 .float => |f| try writer.print("{d}", .{f}),
                 .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
                 .managed_string => |gc_handle| {
-                    const str_obj = gchandleTarget(vm.dotnet_funcs, gc_handle);
+                    const str_obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
                     const str: *const dotnet.String = @ptrCast(str_obj);
                     const len = vm.dotnet_funcs.string_length(str);
                     if (len > 0) {
@@ -2118,7 +2147,7 @@ fn logValues(
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
                 .null_object => try writer.print("<null-object>", .{}),
-                .object => |gc_handle| try writeObject(vm.dotnet_funcs, writer, gc_handle),
+                .object => |gc_handle| try writeObject(vm.dotnet_funcs, writer, gc_handle, vm.handle_tracker),
                 .object_method => |method| {
                     const method_token = lex(vm.text, method.id_start);
                     std.debug.assert(method_token.tag == .identifier);
@@ -2133,8 +2162,9 @@ fn writeObject(
     dotnet_funcs: *const dotnet.Funcs,
     writer: *std.Io.Writer,
     gc_handle: dotnet.GcHandleV2,
+    maybe_tracker: ?*HandleTracker,
 ) error{WriteFailed}!void {
-    const obj = gchandleTarget(dotnet_funcs, gc_handle);
+    const obj = gchandleTarget(dotnet_funcs, gc_handle, maybe_tracker);
     const class = dotnet_funcs.object_get_class(obj);
     const class_name = dotnet_funcs.class_get_name(class);
     try writer.print("{s}{{ ", .{class_name});
@@ -2389,12 +2419,12 @@ const Value = union(enum) {
         gc_handle: dotnet.GcHandleV2,
         id_start: usize,
     },
-    pub fn discard(value: *Value, dotnet_funcs: *const dotnet.Funcs) void {
+    pub fn discard(value: *Value, dotnet_funcs: *const dotnet.Funcs, maybe_tracker: ?*HandleTracker) void {
         switch (value.*) {
             .integer => {},
             .float => {},
             .string_literal => {},
-            .managed_string => |handle| gchandleFree(dotnet_funcs, handle),
+            .managed_string => |handle| gchandleFree(dotnet_funcs, handle, maybe_tracker),
             .script_function => {},
             .null_assembly => {},
             .assembly => {},
@@ -2402,8 +2432,8 @@ const Value = union(enum) {
             .class => {},
             .class_method => {},
             .null_object => {},
-            .object => |handle| gchandleFree(dotnet_funcs, handle),
-            .object_method => |method| gchandleFree(dotnet_funcs, method.gc_handle),
+            .object => |handle| gchandleFree(dotnet_funcs, handle, maybe_tracker),
+            .object_method => |method| gchandleFree(dotnet_funcs, method.gc_handle, maybe_tracker),
         }
         value.* = undefined;
     }
@@ -3057,7 +3087,11 @@ fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callcon
     // std.log.info("  assembly[{}] name='{s}'", .{ ctx.index, std.mem.span(str) });
 }
 
-fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) dotnet.GcHandleV2 {
+fn gchandleNew(
+    dotnet_funcs: *const dotnet.Funcs,
+    object: *const dotnet.Object,
+    maybe_tracker: ?*HandleTracker,
+) dotnet.GcHandleV2 {
     const handle: dotnet.GcHandleV2 = switch (dotnet_funcs.kind) {
         .mono => |*mono| mono.gchandle_new_v2(object, 0),
         .il2cpp => |*il2cpp| il2cpp.gchandle_new(object, 0).toV2(),
@@ -3081,11 +3115,17 @@ fn gchandleNew(dotnet_funcs: *const dotnet.Funcs, object: *const dotnet.Object) 
         //     std.log.info("  --> target object has moved to {*}", .{target.?});
         // }
     }
+    if (maybe_tracker) |tracker| tracker.track(handle);
     return handle;
 }
-fn gchandleFree(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) void {
+fn gchandleFree(
+    dotnet_funcs: *const dotnet.Funcs,
+    handle: dotnet.GcHandleV2,
+    maybe_tracker: ?*HandleTracker,
+) void {
     gchandlelog.info("free {}", .{handle});
     std.debug.assert(handle != .null);
+    if (maybe_tracker) |tracker| tracker.untrack(handle);
     {
         const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
             .mono => |*mono| mono.gchandle_get_target_v2(handle),
@@ -3099,7 +3139,12 @@ fn gchandleFree(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) vo
         .il2cpp => |*il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
     }
 }
-fn gchandleTarget(dotnet_funcs: *const dotnet.Funcs, handle: dotnet.GcHandleV2) *const dotnet.Object {
+fn gchandleTarget(
+    dotnet_funcs: *const dotnet.Funcs,
+    handle: dotnet.GcHandleV2,
+    maybe_tracker: ?*HandleTracker,
+) *const dotnet.Object {
+    if (maybe_tracker) |tracker| tracker.assertLive(handle);
     const obj: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
         .mono => |*mono| mono.gchandle_get_target_v2(handle),
         .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
@@ -4091,10 +4136,15 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
+    var tracker_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer tracker_arena.deinit();
+    var handle_tracker: HandleTracker = .{ .allocator = tracker_arena.allocator() };
+    defer handle_tracker.deinit();
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
+        .handle_tracker = &handle_tracker,
     };
     defer vm.deinit();
 
@@ -4314,10 +4364,14 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     var buffer: [4096 * 2]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
+    var tracker_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer tracker_arena.deinit();
+    var handle_tracker: HandleTracker = .{ .allocator = tracker_arena.allocator() };
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
+        .handle_tracker = &handle_tracker,
     };
     var block_resume: BlockResume = .{};
     while (true) {
@@ -4337,6 +4391,7 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     vm.logStack();
     vm.verifyStack();
     vm.deinit();
+    handle_tracker.deinit();
 }
 
 fn haveMutinyTest(dotnet_funcs: *const dotnet.Funcs) bool {
@@ -4779,7 +4834,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\set decimal.hi = 1
         \\@Assert(decimal.hi == 1)
     );
-
 }
 
 const monolog = std.log.scoped(.mono);

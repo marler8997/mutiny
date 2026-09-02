@@ -74,7 +74,10 @@ pub fn main() !void {
         },
     }
 
-    const module = loadLibrary(dll);
+    const module = dynlib.load(dll) catch |err| switch (err) {
+        error.NotFound => errExit("'{s}' or one of its dependencies was not found", .{dll}),
+        error.Unexpected => @panic("unexpected error, see log"),
+    };
 
     const dotnet_funcs: dotnet.Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
@@ -239,47 +242,12 @@ fn dumpClass(dotnet_funcs: *const dotnet.Funcs, writer: *std.Io.Writer, class: *
     }
 }
 
-fn loadLibrary(path: [:0]u8) win32.HINSTANCE {
-    if (win32.LoadLibraryA(path)) |h| {
-        std.log.info("LoadLibrary: SetDllDirectory not required", .{});
-        return h;
-    }
-    switch (win32.GetLastError()) {
-        .ERROR_MOD_NOT_FOUND => {},
-        else => |e| errExit(
-            "LoadLibrary '{s}' failed (before SetDllDirectory), error={f}",
-            .{ path, e },
-        ),
-    }
-    const dir = std.fs.path.dirname(path) orelse errExit(
-        "LoadLibrary '{s}' failed with module not found",
-        .{path},
-    );
-    const set_dll_result = blk: {
-        const save = path[dir.len];
-        path[dir.len] = 0;
-        defer path[dir.len] = save;
-        break :blk win32.SetDllDirectoryA(path);
-    };
-    if (set_dll_result == 0) errExit(
-        "LoadLibrary '{s}' failed with module not found and SetDllDirectory failed, error={f}",
-        .{ path, win32.GetLastError() },
-    );
-    if (win32.LoadLibraryA(path)) |h| {
-        std.log.info("LoadLibrary: after SetDllDirectory", .{});
-        return h;
-    }
-    errExit(
-        "LoadLibrary '{s}' failed (after SetDllDirectory), error={f}",
-        .{ path, win32.GetLastError() },
-    );
-}
 
 const Il2cppInitFuncs = struct {
     register_log_callback: *const fn (*const fn ([*:0]const u8) callconv(.c) void) void,
     set_data_dir: *const fn (path: [*:0]const u8) callconv(.c) void,
     init: *const fn (name: [*:0]const u8) callconv(.c) void,
-    pub fn getFuncs(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!Il2cppInitFuncs {
+    pub fn getFuncs(proc_ref: *[:0]const u8, mod: dynlib.Module) error{ProcNotFound}!Il2cppInitFuncs {
         return .{
             .register_log_callback = try il2cpp_funcs.il2cppGet(mod, .register_log_callback, proc_ref),
             .set_data_dir = try il2cpp_funcs.il2cppGet(mod, .set_data_dir, proc_ref),
@@ -293,7 +261,7 @@ const Il2cppInitFuncs = struct {
 const MonoInitFuncs = struct {
     jit_init: *const fn (name: [*:0]const u8) callconv(.c) ?*const dotnet.Domain,
     set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
-    pub fn init(proc_ref: *[:0]const u8, mod: win32.HINSTANCE) error{ProcNotFound}!MonoInitFuncs {
+    pub fn init(proc_ref: *[:0]const u8, mod: dynlib.Module) error{ProcNotFound}!MonoInitFuncs {
         return .{
             .jit_init = try mono_funcs.monoGet(mod, .jit_init, proc_ref),
             .set_assemblies_path = try mono_funcs.monoGet(mod, .set_assemblies_path, proc_ref),
@@ -307,7 +275,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 const std = @import("std");
-const win32 = @import("win32").everything;
+const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
 const mono_funcs = @import("dotnetload.zig").template(MonoInitFuncs);
 const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppInitFuncs);

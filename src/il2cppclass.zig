@@ -343,13 +343,17 @@ pub const SyntheticMethod = struct {
 // the methods probe dereferences a pointer read out of the class, which is a guess until the
 // offset is pinned down, so check the page is actually there first
 fn readable(addr: usize, len: usize) bool {
-    var info: win32.MEMORY_BASIC_INFORMATION = undefined;
-    if (0 == win32.VirtualQuery(@ptrFromInt(addr), &info, @sizeOf(@TypeOf(info)))) return false;
-    if (info.State != win32.MEM_COMMIT) return false;
-    if (info.Protect.PAGE_NOACCESS == 1) return false;
-    if (info.Protect.PAGE_GUARD == 1) return false;
-    const region_end = @intFromPtr(info.BaseAddress) + info.RegionSize;
-    return addr + len <= region_end;
+    if (builtin.os.tag == .windows) {
+        var info: win32.MEMORY_BASIC_INFORMATION = undefined;
+        if (0 == win32.VirtualQuery(@ptrFromInt(addr), &info, @sizeOf(@TypeOf(info)))) return false;
+        if (info.State != win32.MEM_COMMIT) return false;
+        if (info.Protect.PAGE_NOACCESS == 1) return false;
+        if (info.Protect.PAGE_GUARD == 1) return false;
+        const region_end = @intFromPtr(info.BaseAddress) + info.RegionSize;
+        return addr + len <= region_end;
+    } else {
+        @panic("todo");
+    }
 }
 fn readPtr(class: *const dotnet.Class, slot: usize) usize {
     const base: [*]const u8 = @ptrCast(class);
@@ -405,6 +409,7 @@ fn probeMethodArray(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *
     }
 }
 
+const builtin = @import("builtin");
 const std = @import("std");
 const dotnet = @import("dotnet.zig");
 const win32 = @import("win32").everything;

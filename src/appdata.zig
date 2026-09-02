@@ -6,6 +6,7 @@ const global = struct {
 };
 
 pub fn get() ?[:0]const u16 {
+    if (builtin.os.tag != .windows) @panic("todo");
     switch (global.localappdata) {
         .unresolved => {
             @branchHint(.unlikely);
@@ -109,5 +110,6 @@ fn toUpper(c: u16) u16 {
     return if (c < 128) std.ascii.toUpper(@intCast(c)) else c;
 }
 
+const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;

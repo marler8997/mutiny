@@ -2024,10 +2024,7 @@ fn log(
 ) error{WriteFailed}!void {
     if (maybe_open_log_error) |*open_log_error| {
         try logfile.writeLogPrefix(writer);
-        if (@import("builtin").os.tag == .windows)
-            try writer.print("open log file failed, error={f}\n", .{open_log_error})
-        else
-            try writer.print("open log file failed with {s}\n", .{@errorName(open_log_error)});
+        try writer.print("{f}\n", .{open_log_error});
     }
 
     try logfile.writeLogPrefix(writer);

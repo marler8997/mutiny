@@ -1,21 +1,25 @@
 pub fn template(comptime Funcs: anytype) type {
     return struct {
         pub fn get(
-            module: win32.HINSTANCE,
+            module: dynlib.Module,
             comptime field: std.meta.FieldEnum(Funcs),
             func_name: [:0]const u8,
             proc_ref: *[:0]const u8,
         ) error{ProcNotFound}!@FieldType(Funcs, @tagName(field)) {
             proc_ref.* = func_name;
-            return @ptrCast(win32.GetProcAddress(module, func_name) orelse switch (win32.GetLastError()) {
-                .ERROR_PROC_NOT_FOUND => return error.ProcNotFound,
-                else => |e| std.debug.panic("GetProcAddress '{s}' on dotnet DLL failed, error={f}", .{ func_name, e }),
-            });
+            const proc = dynlib.getProc(module, func_name) catch |err| switch (err) {
+                error.ProcNotFound => return error.ProcNotFound,
+                error.Unexpected => std.debug.panic(
+                    "GetProc '{s}' on dotnet DLL failed with {s}",
+                    .{ func_name, @errorName(err) },
+                ),
+            };
+            return @ptrCast(@alignCast(proc));
         }
 
         pub fn sharedGet(
             kind: Kind,
-            module: win32.HINSTANCE,
+            module: dynlib.Module,
             comptime field: std.meta.FieldEnum(Funcs),
             proc_ref: *[:0]const u8,
         ) error{ProcNotFound}!@FieldType(Funcs, @tagName(field)) {
@@ -26,7 +30,7 @@ pub fn template(comptime Funcs: anytype) type {
         }
 
         pub fn monoGet(
-            module: win32.HINSTANCE,
+            module: dynlib.Module,
             comptime field: std.meta.FieldEnum(Funcs),
             proc_ref: *[:0]const u8,
         ) error{ProcNotFound}!@FieldType(Funcs, @tagName(field)) {
@@ -34,7 +38,7 @@ pub fn template(comptime Funcs: anytype) type {
         }
 
         pub fn il2cppGet(
-            module: win32.HINSTANCE,
+            module: dynlib.Module,
             comptime field: std.meta.FieldEnum(Funcs),
             proc_ref: *[:0]const u8,
         ) error{ProcNotFound}!@FieldType(Funcs, @tagName(field)) {
@@ -44,6 +48,6 @@ pub fn template(comptime Funcs: anytype) type {
 }
 
 const std = @import("std");
-const win32 = @import("win32").everything;
+const dynlib = @import("dynlib.zig");
 const dotnetkind = @import("dotnetkind.zig");
 const Kind = dotnetkind.Kind;

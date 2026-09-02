@@ -120,7 +120,7 @@ pub const Funcs = struct {
 
     class_from_type: *const fn (*const Type) callconv(.c) ?*const Class,
 
-    pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: win32.HINSTANCE) error{ProcNotFound}!Funcs {
+    pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: dynlib.Module) error{ProcNotFound}!Funcs {
         return .{
             .get_root_domain = try funcs.monoGet(mod, .get_root_domain, proc_ref),
             .domain_get = try funcs.sharedGet(kind, mod, .domain_get, proc_ref),
@@ -290,7 +290,7 @@ pub const TypeKind = enum(c_int) {
     _,
 };
 
-const win32 = @import("win32").everything;
+const dynlib = @import("dynlib.zig");
 const dotnetkind = @import("dotnetkind.zig");
 
 const funcs = @import("dotnetload.zig").template(Funcs);

@@ -23,6 +23,7 @@ pub const global = struct {
         var cached: ?Name = null;
     };
     pub fn getName() Name {
+        if (builtin.os.tag != .windows) @panic("todo");
         name.mutex.lock();
         defer name.mutex.unlock();
         if (name.cached == null) {
@@ -56,6 +57,7 @@ pub const NameError = struct {
 };
 
 fn openLog() struct { std.fs.File, ?OpenLogError } {
+    if (builtin.os.tag != .windows) @panic("todo");
     const localappdata = appdata.get() orelse return .{
         std.fs.File.stderr(),
         .missing_localappdata,
@@ -125,13 +127,20 @@ pub const OpenLogError = union(enum) {
                 "LOCALAPPDATA environment variable ({} chars) and or exe name ({} chars) is too long",
                 .{ e.localappdata_len, e.name_len },
             ),
-            .open_error => |e| try writer.print("open log file failed, error={f}", .{e}),
-            .mkdir_error => |e| try writer.print("mkdir for log file, error={f}", .{e}),
+            .open_error => |e| if (builtin.os.tag == .windows)
+                try writer.print("open log file failed, error={f}", .{e})
+            else
+                try writer.print("open log file failed with {t}", .{e}),
+            .mkdir_error => |e| if (builtin.os.tag == .windows)
+                try writer.print("mkdir for log file, error={f}", .{e})
+            else
+                try writer.print("mkdir for log file failed with {t}", .{e}),
         }
     }
 };
 
 pub fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
+    if (builtin.os.tag != .windows) @panic("todo");
     // const name: []const u16 = blk: {
     //     const p = getImagePathName() orelse break :blk win32.L("?");
     //     break :blk getBasename(p);

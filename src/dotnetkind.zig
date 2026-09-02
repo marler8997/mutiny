@@ -8,5 +8,13 @@ pub const Kind = enum {
         };
     }
 };
-pub const dll_name_mono = "mono-2.0-bdwgc.dll";
-pub const dll_name_il2cpp = "GameAssembly.dll";
+pub const dll_name_mono = switch (builtin.os.tag) {
+    .windows => "mono-2.0-bdwgc.dll",
+    else => "libmono-2.0-bdwgc.so",
+};
+pub const dll_name_il2cpp = switch (builtin.os.tag) {
+    .windows => "GameAssembly.dll",
+    else => "GameAssembly.so",
+};
+
+const builtin = @import("builtin");

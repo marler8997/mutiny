@@ -1,4 +1,5 @@
 const std = @import("std");
+const UpdateDll = @import("UpdateDll.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -26,16 +27,14 @@ pub fn build(b: *std.Build) void {
     );
     b.step("managed-dll", "").dependOn(&install_mutiny_managed_dll.step);
 
-    const mutiny_test_dll = blk: {
-        const compile = b.addSystemCommand(&.{
-            "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
-            "/target:library",
-            "/nologo",
-        });
-        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MutinyTest.dll");
-        compile.addFileArg(b.path("managed/MutinyTest.cs"));
-        break :blk out_dll;
-    };
+    const test_dll = UpdateDll.create(b, .{
+        .source_path = "managed/MutinyTest.cs",
+        .out_path = "managed/MutinyTest.dll",
+    });
+    b.step(
+        "update-test-dll",
+        "rebuild managed/MutinyTest.dll if MutinyTest.cs changed",
+    ).dependOn(&test_dll.step);
 
     const mutiny_native_dll = b.addLibrary(.{
         .name = "Mutiny",
@@ -186,7 +185,7 @@ pub fn build(b: *std.Build) void {
         dotnet_test_exe.root_module.addImport("win32", win32_mod);
     }
     dotnet_test_exe.root_module.addAnonymousImport("mutiny_test_dll", .{
-        .root_source_file = mutiny_test_dll,
+        .root_source_file = test_dll.path(),
     });
     const install_dotnet_test = b.addInstallArtifact(dotnet_test_exe, .{});
     b.step("install-dotnet-test", "").dependOn(&install_dotnet_test.step);

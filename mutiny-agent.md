@@ -180,6 +180,7 @@ memory — see the rules below on argument types.
 | `@Assembly(s)` | **string literal** | not a variable — `@Assembly(name)` fails |
 | `@TryAssembly(s)` | **string literal** | same; returns nothing instead of erroring if absent |
 | `@Class(a.B)` | an **assembly field** | must be written `assembly.ClassName`, nothing else |
+| `@TryClass(a.B)` | an **assembly field** | same; returns nothing instead of erroring if the class is absent |
 | `@ClassOf(o)` | an object | the class of a live object |
 | `@LogClass(c)` | a class | prints its fields and methods |
 | `@Log(...)` | any number of anything | concatenates them |

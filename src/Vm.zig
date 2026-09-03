@@ -80,6 +80,8 @@ const Type = enum {
     /// A .NET assembly that is NOT null
     assembly,
     assembly_field,
+    null_class,
+    /// A .NET class that is NOT null
     class,
     class_method,
     /// A null object that pushes a reference to its type on the stack
@@ -98,6 +100,7 @@ const Type = enum {
             .null_assembly => "a null assembly",
             .assembly => "an assembly",
             .assembly_field => "an assembly field",
+            .null_class => "a null class",
             .class => "a class",
             .class_method => "a class method",
             .null_object => "a null object",
@@ -118,6 +121,7 @@ const Type = enum {
             .null_assembly => false,
             .assembly => false, // not sure if this should work or not
             .assembly_field => false, // not sure if this should work or not
+            .null_class => false,
             .class => true,
             .class_method => true,
             .null_object => true,
@@ -990,6 +994,14 @@ fn evalExprSuffix(
                     std.debug.assert(lex(vm.text, id_start).tag == .identifier);
                     return id_extent.end;
                 },
+                .null_class => {
+                    const id_start, const end = vm.readValue(usize, value_addr);
+                    std.debug.assert(end.eql(vm.mem.top()));
+                    return vm.setError(.{ .null_field_access = .{
+                        .field_extent = id_extent,
+                        .kind = .{ .class = id_start },
+                    } });
+                },
                 .class => {
                     const class, const end = vm.readValue(*const dotnet.Class, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
@@ -1013,7 +1025,7 @@ fn evalExprSuffix(
                     std.debug.assert(end.eql(vm.mem.top()));
                     return vm.setError(.{ .null_field_access = .{
                         .field_extent = id_extent,
-                        .kind = .{ .class = class },
+                        .kind = .{ .object = class },
                     } });
                 },
                 .object => {
@@ -1584,6 +1596,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             // _ = some_addr;
             return vm.setError(.{ .not_implemented = "pushValueFromAddr assembly_field" });
         },
+        .null_class => {
+            (try vm.push(Type)).* = .null_class;
+            const id_start_ptr = vm.mem.toPointer(usize, value_addr);
+            (try vm.push(usize)).* = id_start_ptr.*;
+        },
         .class => {
             (try vm.push(Type)).* = .class;
             const class_ptr = vm.mem.toPointer(*const dotnet.Class, value_addr);
@@ -1950,6 +1967,27 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .class;
             (try vm.push(*const dotnet.Class)).* = class;
         },
+        .@"@TryClass" => {
+            const field = switch (vm.pop(args_addr)) {
+                .assembly_field => |f| f,
+                else => unreachable,
+            };
+            var namespace: ManagedId = .empty();
+            var name: ManagedId = .empty();
+            if (lexClass(vm.text, &namespace, &name, field.id_start)) |too_big_end| return vm.setError(.{
+                .id_too_big = .{ .start = field.id_start, .end = too_big_end },
+            });
+            const image = vm.dotnet_funcs.assembly_get_image(field.assembly) orelse @panic(
+                "mono_assembly_get_image returned null",
+            );
+            if (vm.dotnet_funcs.class_from_name(image, namespace.slice(), name.slice())) |class| {
+                (try vm.push(Type)).* = .class;
+                (try vm.push(*const dotnet.Class)).* = class;
+            } else {
+                (try vm.push(Type)).* = .null_class;
+                (try vm.push(usize)).* = field.id_start;
+            }
+        },
         .@"@ClassOf" => {
             const gc_handle = switch (vm.pop(args_addr)) {
                 .object => |gc_handle| gc_handle,
@@ -1988,6 +2026,8 @@ fn evalBuiltin(
             const is_null: i64 = switch (value) {
                 .null_assembly => 1,
                 .assembly => 0,
+                .null_class => 1,
+                .class => 0,
                 .null_object => 1,
                 .object => 0,
                 else => return vm.setError(.{
@@ -2009,6 +2049,8 @@ fn evalBuiltin(
             const not_null: i64 = switch (value) {
                 .null_assembly => 0,
                 .assembly => 1,
+                .null_class => 0,
+                .class => 1,
                 .null_object => 0,
                 .object => 1,
                 else => return vm.setError(.{
@@ -2144,6 +2186,15 @@ fn logValues(
                 .null_assembly => |e| try writer.print("<null-assembly {s}>", .{vm.text[e.start..e.end]}),
                 .assembly => try writer.print("<assembly>", .{}),
                 .assembly_field => try writer.print("<assembly-field>", .{}),
+                .null_class => |id_start| {
+                    var namespace: ManagedId = .empty();
+                    var name: ManagedId = .empty();
+                    if (lexClass(vm.text, &namespace, &name, id_start)) |end| {
+                        try writer.print("<null-class {s}>", .{vm.text[id_start..end]});
+                    } else {
+                        try writer.print("<null-class {s}.{s}>", .{ namespace.slice(), name.slice() });
+                    }
+                },
                 .class => try writer.print("<class>", .{}),
                 .class_method => try writer.print("<class-method>", .{}),
                 .null_object => try writer.print("<null-object>", .{}),
@@ -2348,6 +2399,10 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
                 .id_start = id_start,
             } }, end };
         },
+        .null_class => {
+            const id_start, const end = vm.readValue(usize, addr);
+            return .{ .{ .null_class = id_start }, end };
+        },
         .class => {
             const class, const end = vm.readValue(*const dotnet.Class, addr);
             return .{ .{ .class = class }, end };
@@ -2408,6 +2463,7 @@ const Value = union(enum) {
         assembly: *const dotnet.Assembly,
         id_start: usize,
     },
+    null_class: usize,
     class: *const dotnet.Class,
     class_method: struct {
         class: *const dotnet.Class,
@@ -2429,6 +2485,7 @@ const Value = union(enum) {
             .null_assembly => {},
             .assembly => {},
             .assembly_field => {},
+            .null_class => {},
             .class => {},
             .class_method => {},
             .null_object => {},
@@ -2448,6 +2505,7 @@ const Value = union(enum) {
             .null_assembly => .null_assembly,
             .assembly => .assembly,
             .assembly_field => .assembly_field,
+            .null_class => .null_class,
             .class => .class,
             .class_method => .class_method,
             .null_object => .null_object,
@@ -3168,6 +3226,7 @@ const Builtin = enum {
     @"@Assembly",
     @"@TryAssembly",
     @"@Class",
+    @"@TryClass",
     @"@ClassOf",
     @"@Discard",
     @"@ScheduleTests",
@@ -3184,6 +3243,7 @@ const Builtin = enum {
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@TryAssembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
+            .@"@TryClass" => &.{.{ .concrete = .assembly_field }},
             .@"@ClassOf" => &.{.{ .concrete = .object }},
             .@"@Discard" => &.{.anything},
             .@"@ScheduleTests" => &.{},
@@ -3202,6 +3262,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assembly", .@"@Assembly" },
     .{ "@TryAssembly", .@"@TryAssembly" },
     .{ "@Class", .@"@Class" },
+    .{ "@TryClass", .@"@TryClass" },
     .{ "@ClassOf", .@"@ClassOf" },
     .{ "@Discard", .@"@Discard" },
     .{ "@ScheduleTests", .@"@ScheduleTests" },
@@ -3771,7 +3832,8 @@ pub const Error = union(enum) {
         field_extent: Extent,
         kind: union(enum) {
             assembly: usize,
-            class: *const dotnet.Class,
+            class: usize,
+            object: *const dotnet.Class,
         },
     },
     new_failed: struct {
@@ -4195,6 +4257,10 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         "1: id '" ++ ("a" ** (ManagedId.max + 1)) ++ "' is too big (1024 bytes but max is 1023)",
     );
     try testBadCode(dotnet_funcs, "@Class(@Assembly(\"mscorlib\").DoesNot.Exist)", "1: this assembly does not have a class named 'Exist' in namespace 'DoesNot'");
+    try testBadCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\@Discard(@TryClass(mscorlib.System.DoesNotExist).foo)
+    , "2: field 'foo' accessed on NULL object");
     try testBadCode(dotnet_funcs, "999999999999999999999", "1: integer literal '999999999999999999999' doesn't fit in an i64");
     // try testBadCode(dotnet_funcs, "-999999999999999999999", "1: integer literal '-999999999999999999999' doesn't fit in an i64");
     // const max_fields = 256;
@@ -4575,6 +4641,15 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(@NotNull(String.Empty))
     );
     try testCode(dotnet_funcs, "@Assert(@IsNull(@TryAssembly(\"doesnotexist\")))");
+    try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\@Assert(@IsNull(@TryClass(mscorlib.System.DoesNotExist)))
+        \\@Assert(0 == @NotNull(@TryClass(mscorlib.System.DoesNotExist)))
+        \\var Int32 = @TryClass(mscorlib.System.Int32)
+        \\@Assert(@NotNull(Int32))
+        \\@Assert(0 == @IsNull(Int32))
+        \\@Assert(Int32.MaxValue == 2147483647)
+    );
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)

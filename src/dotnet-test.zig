@@ -143,7 +143,7 @@ pub fn main() !void {
     // what we expect after attaching our thread to it
     std.debug.assert(dotnet_funcs.domain_get() == root_domain);
 
-    Vm.runTests(&dotnet_funcs) catch |err| {
+    Vm.runTests(&dotnet_funcs, findUnityVersion(arena, dll)) catch |err| {
         std.log.err("tests failed with {s}:", .{@errorName(err)});
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpStackTrace(trace.*);
@@ -222,6 +222,25 @@ fn loadTestAssembly(init_funcs: MonoInitFuncs) void {
     std.log.info("loaded embedded MutinyTest.dll ({} bytes)", .{mutiny_test_dll.len});
 }
 
+// UnityPlayer.dll carries the engine version, and it sits at the game root - the same dir as
+// GameAssembly.dll for il2cpp, a couple up from the mono runtime - so walk up from the runtime
+// dll until it turns up. mutinydll reads the same file from the loaded module in-process.
+fn findUnityVersion(arena: std.mem.Allocator, dll: []const u8) UnityVersion {
+    var dir: ?[]const u8 = std.fs.path.dirname(dll);
+    while (dir) |d| : (dir = std.fs.path.dirname(d)) {
+        const candidate = std.fs.path.join(arena, &.{ d, "UnityPlayer.dll" }) catch |e| errExit("{t}", .{e});
+        std.fs.cwd().access(candidate, .{}) catch continue;
+        const path_w = std.unicode.utf8ToUtf16LeAllocZ(arena, candidate) catch |e| errExit("{t}", .{e});
+        const version = UnityVersion.fromFile(path_w) catch |err| errExit(
+            "reading the unity version from '{s}' failed with {t}",
+            .{ candidate, err },
+        );
+        std.log.info("unity version: {f} (from {s})", .{ version, candidate });
+        return version;
+    }
+    errExit("could not find UnityPlayer.dll near '{s}' to read the unity version", .{dll});
+}
+
 fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.log.err(fmt, args);
     std.process.exit(0xff);
@@ -230,6 +249,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 const std = @import("std");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
+const UnityVersion = @import("UnityVersion.zig");
 const mono_funcs = @import("dotnetload.zig").template(MonoInitFuncs);
 const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppInitFuncs);
 const Vm = @import("Vm.zig");

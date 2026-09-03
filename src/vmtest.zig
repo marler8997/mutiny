@@ -1,14 +1,14 @@
 
-fn installIl2cppFixture(funcs: *const dotnet.Funcs) !void {
-    const layouts = try il2cppclass.discover(funcs);
+fn installIl2cppFixture(funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
+    const layouts = try il2cppclass.discover(funcs, unity_version);
     const il2cpp = &funcs.kind.il2cpp;
     var assembly_count: usize = 0;
     const assemblies = il2cpp.domain_get_assemblies(funcs.domain_get().?, &assembly_count);
     try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts.class, layouts.method, assemblies[0..assembly_count]);
 }
 
-pub fn run(dotnet_funcs: *const dotnet.Funcs) !void {
-    if (dotnet_funcs.kind == .il2cpp) try installIl2cppFixture(dotnet_funcs);
+pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
+    if (dotnet_funcs.kind == .il2cpp) try installIl2cppFixture(dotnet_funcs, unity_version);
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
@@ -91,3 +91,4 @@ const Vm = @import("Vm.zig");
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
+const UnityVersion = @import("UnityVersion.zig");

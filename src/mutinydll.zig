@@ -1,4 +1,3 @@
-
 const global = struct {
     var hinstance: win32.HINSTANCE = undefined;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
@@ -292,59 +291,15 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
     std.log.info("window 0x{x} created", .{@intFromPtr(hwnd)});
 
-    unity_version: {
+    const maybe_unity_version: ?UnityVersion = blk: {
         const module = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse {
             std.log.info("unity version: unknown (UnityPlayer.dll is not loaded)", .{});
-            break :unity_version;
+            break :blk null;
         };
-        var path_buf: [win32.MAX_PATH:0]u16 = undefined;
-        const path_len = win32.GetModuleFileNameW(module, &path_buf, path_buf.len);
-        if (path_len == 0) {
-            std.log.err("GetModuleFileName(UnityPlayer.dll) failed, error={f}", .{win32.GetLastError()});
-            break :unity_version;
-        }
-        path_buf[path_len] = 0;
-        const path: [:0]const u16 = path_buf[0..path_len :0];
-
-        const size = win32.GetFileVersionInfoSizeW(path, null);
-        if (size == 0) {
-            std.log.err("GetFileVersionInfoSize '{f}' failed, error={f}", .{ fmtW(path), win32.GetLastError() });
-            break :unity_version;
-        }
-        var info_buf: [4096]u8 = undefined;
-        if (size > info_buf.len) {
-            std.log.err("version info for '{f}' is {} bytes, too big for our {} byte buffer", .{
-                fmtW(path),
-                size,
-                info_buf.len,
-            });
-            break :unity_version;
-        }
-        if (0 == win32.GetFileVersionInfoW(path, 0, size, &info_buf)) {
-            std.log.err("GetFileVersionInfo '{f}' failed, error={f}", .{ fmtW(path), win32.GetLastError() });
-            break :unity_version;
-        }
-        var fixed: ?*anyopaque = null;
-        var fixed_len: u32 = 0;
-        if (0 == win32.VerQueryValueW(&info_buf, win32.L("\\"), &fixed, &fixed_len)) {
-            std.log.err("VerQueryValue '{f}' has no fixed version info", .{fmtW(path)});
-            break :unity_version;
-        }
-        if (fixed_len < @sizeOf(win32.VS_FIXEDFILEINFO)) {
-            std.log.err("VerQueryValue gave {} bytes, expected at least {}", .{
-                fixed_len,
-                @sizeOf(win32.VS_FIXEDFILEINFO),
-            });
-            break :unity_version;
-        }
-        const info: *const win32.VS_FIXEDFILEINFO = @ptrCast(@alignCast(fixed.?));
-        std.log.info("unity version: {}.{}.{}.{}", .{
-            info.dwFileVersionMS >> 16,
-            info.dwFileVersionMS & 0xffff,
-            info.dwFileVersionLS >> 16,
-            info.dwFileVersionLS & 0xffff,
-        });
-    }
+        const version = UnityVersion.fromLoadedModule(module) catch break :blk null;
+        std.log.info("unity version: {f}", .{version});
+        break :blk version;
+    };
 
     var mods_path_buf: [appdata.max_path]u16 = undefined;
     const mods_path = switch (appdata.format(
@@ -433,8 +388,12 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     const il2cpp_layouts: il2cppclass.Layouts = switch (dotnet_funcs.kind) {
         .mono => undefined,
         .il2cpp => blk: {
+            const unity_version = maybe_unity_version orelse {
+                std.log.err("cannot verify il2cpp layout without the unity version", .{});
+                return 0xffffffff;
+            };
             const start = getNow();
-            const layouts = il2cppclass.discover(&dotnet_funcs) catch |err| {
+            const layouts = il2cppclass.discover(&dotnet_funcs, unity_version) catch |err| {
                 std.log.err("il2cpp layout could not be verified ({t})", .{err});
                 return 0xffffffff;
             };
@@ -490,14 +449,16 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
 
         if (tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
-            Vm.runTests(&dotnet_funcs) catch |err| {
+            if (maybe_unity_version) |unity_version| Vm.runTests(&dotnet_funcs, unity_version) catch |err| {
                 std.log.err("tests failed with {s}:", .{@errorName(err)});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
                 } else {
                     std.log.err("    no error trace", .{});
                 }
-            };
+            } else {
+                std.log.err("canot run tests, no unity version", .{});
+            }
         }
 
         // var sleep_time_ms: u64 = 5000;
@@ -1085,7 +1046,6 @@ fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool)
     return sleep_time_ms;
 }
 
-
 fn runBuiltin(
     dotnet_funcs: *const dotnet.Funcs,
     builtin_script: Builtin,
@@ -1469,3 +1429,4 @@ const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
+const UnityVersion = @import("UnityVersion.zig");

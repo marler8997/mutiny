@@ -4179,8 +4179,8 @@ const ErrorFmt = struct {
     }
 };
 
-pub fn runTests(dotnet_funcs: *const dotnet.Funcs) !void {
-    try vmtest.run(dotnet_funcs);
+pub fn runTests(dotnet_funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
+    try vmtest.run(dotnet_funcs, unity_version);
     try badCodeTests(dotnet_funcs);
     try goodCodeTests(dotnet_funcs);
 }
@@ -4899,3 +4899,4 @@ const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");
 const Memory = @import("Memory.zig");
 const vmtest = @import("vmtest.zig");
+const UnityVersion = @import("UnityVersion.zig");

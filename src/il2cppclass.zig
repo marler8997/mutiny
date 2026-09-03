@@ -17,11 +17,22 @@ pub const Layout = struct {
     field_count: usize,
     methods: usize,
     method_count: usize,
+    // vtable_count has no public accessor to probe against, so it is inferred: the u16 count
+    // block in Il2CppClass is method_count, property_count, field_count, event_count,
+    // nested_type_count, vtable_count in every Unity version in libil2cpp (2017.1 through
+    // 6000.x, checked), so it is method_count + 10. discover cross-checks that the independently
+    // probed field_count lands at method_count + 4, confirming the block's stride at runtime too.
+    vtable_count: usize,
     pub fn fieldsOf(l: Layout, class: *const dotnet.Class) []const FieldInfo {
         const base: [*]const u8 = @ptrCast(class);
         const p: *align(1) const [*]const FieldInfo = @ptrCast(base + l.fields);
         const n: *align(1) const u16 = @ptrCast(base + l.field_count);
         return p.*[0..n.*];
+    }
+    pub fn vtableCountOf(l: Layout, class: *const dotnet.Class) u16 {
+        const base: [*]const u8 = @ptrCast(class);
+        const p: *align(1) const u16 = @ptrCast(base + l.vtable_count);
+        return p.*;
     }
 };
 // Walks the class's fields through the discovered offsets and requires the result to match
@@ -79,7 +90,14 @@ pub const DiscoverError = error{
     MethodLayoutNotResolved,
     ClassLayoutInvalid,
     UnsupportedInvokerAbi,
+    UnsupportedUnityVersion,
 };
+
+// The oldest Unity version whose Il2CppClass u16 count-block layout we have verified against
+// the libil2cpp sources. The vtable_count inference below is trusted from here on. The version
+// is threaded rather than assumed so that when a future Unity reorders that block, this becomes
+// a version ladder with a new case instead of silent corruption.
+const layout_verified_from: UnityVersion = .{ .major = 2017, .minor = 1, .build = 0, .revision = 0 };
 
 // Before 2021.2, InvokerMethod took 4 args and returned the boxed object instead of writing
 // through a 5th `ret` pointer, and `parameters` was ParameterInfo* rather than Il2CppType**.
@@ -89,7 +107,15 @@ pub const DiscoverError = error{
 const supported_invoker_method_offset = 16;
 pub fn discover(
     funcs: *const dotnet.Funcs,
+    unity_version: UnityVersion,
 ) DiscoverError!Layouts {
+    if (!unity_version.atLeast(layout_verified_from.major, layout_verified_from.minor)) {
+        std.log.err("il2cpp class layout is unverified before Unity {f}, but this game is {f}", .{
+            layout_verified_from,
+            unity_version,
+        });
+        return error.UnsupportedUnityVersion;
+    }
     const il2cpp = &funcs.kind.il2cpp;
     const domain = funcs.domain_get().?;
     var candidates: Candidates = .init();
@@ -122,6 +148,15 @@ pub fn discover(
         report("method_count", &candidates.method_count, @sizeOf(u16));
         return error.ClassLayoutNotResolved;
     };
+    // the vtable_count inference rides on the u16 count block's order; the probe pins
+    // method_count and field_count independently, so their spacing confirms it at runtime
+    if (class_layout.field_count != class_layout.method_count + 4) {
+        std.log.err("il2cpp field_count (0x{x}) is not method_count (0x{x}) + 4", .{
+            class_layout.field_count,
+            class_layout.method_count,
+        });
+        return error.ClassLayoutInvalid;
+    }
     const method_layout = method_candidates.resolve() orelse {
         report("name", &method_candidates.name, @sizeOf(usize));
         report("klass", &method_candidates.klass, @sizeOf(usize));
@@ -197,11 +232,13 @@ const Candidates = struct {
         return .{};
     }
     pub fn resolve(c: *const Candidates) ?Layout {
+        const method_count = only(&c.method_count, @sizeOf(u16)) orelse return null;
         return .{
             .fields = only(&c.fields, @sizeOf(usize)) orelse return null,
             .field_count = only(&c.field_count, @sizeOf(u16)) orelse return null,
             .methods = only(&c.methods, @sizeOf(usize)) orelse return null,
-            .method_count = only(&c.method_count, @sizeOf(u16)) orelse return null,
+            .method_count = method_count,
+            .vtable_count = method_count + 10,
         };
     }
 };
@@ -413,3 +450,4 @@ const builtin = @import("builtin");
 const std = @import("std");
 const dotnet = @import("dotnet.zig");
 const win32 = @import("win32").everything;
+const UnityVersion = @import("UnityVersion.zig");

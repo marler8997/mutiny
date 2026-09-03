@@ -1,3 +1,5 @@
+pub const enable_mutiny_test_class = true;
+
 pub fn main() !void {
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     // no need to deinit
@@ -154,7 +156,6 @@ pub fn main() !void {
     };
     std.log.info("dotnet-test: success", .{});
 }
-
 
 const Il2cppInitFuncs = struct {
     register_log_callback: *const fn (*const fn ([*:0]const u8) callconv(.c) void) void,

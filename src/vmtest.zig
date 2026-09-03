@@ -1,14 +1,23 @@
-
 fn installIl2cppFixture(funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
     const layouts = try il2cppclass.discover(funcs, unity_version);
     const il2cpp = &funcs.kind.il2cpp;
     var assembly_count: usize = 0;
     const assemblies = il2cpp.domain_get_assemblies(funcs.domain_get().?, &assembly_count);
-    try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts.class, layouts.method, assemblies[0..assembly_count]);
+    try il2cppclass.selfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
+    if (Vm.enable_mutiny_test_class)
+        try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts, unity_version, assemblies[0..assembly_count]);
 }
 
-pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
-    if (dotnet_funcs.kind == .il2cpp) try installIl2cppFixture(dotnet_funcs, unity_version);
+pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {
+    if (dotnet_funcs.kind == .il2cpp) {
+        // il2cpp needs the version to gate the synthetic-class layout; mono never uses it, so a
+        // mono game with an unreadable UnityPlayer.dll can still run these tests.
+        const version = unity_version orelse {
+            std.log.err("cannot run il2cpp tests without the unity version", .{});
+            return error.MissingUnityVersion;
+        };
+        try installIl2cppFixture(dotnet_funcs, version);
+    }
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
@@ -37,58 +46,43 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void
         \\@Assert(@NotNull(object_type))
         \\@Assert(@IsNull(object_type.get_BaseType()))
     );
-    const echo_body =
-        \\@Assert(Echo.I32(0 - 32) == 0 - 32)
-        \\@Assert(Echo.I64(9007199254740993) == 9007199254740993)
-        \\@Assert(Echo.F32(1.5) == 1.5)
-        \\@Assert(Echo.F64(3.25) == 3.25)
-        \\@Assert(Echo.Bool(1) == 1)
-        \\@Assert(Echo.I8(0 - 128) == 0 - 128)
-        \\@Assert(Echo.U8(255) == 255)
-        \\@Assert(Echo.I16(32767) == 32767)
-        \\@Assert(Echo.U16(65535) == 65535)
-        \\@Assert(Echo.U32(4294967295) == 4294967295)
-        \\@Assert(Echo.F32(2) == 2)
-        \\@Assert(Echo.F32(0 - 3) == 0 - 3)
-        \\@Assert(Echo.F32(16777216) == 16777216)
-        \\@Assert(Echo.F64(9007199254740992) == 9007199254740992)
-        \\@Assert(Echo.F32(1.1) != 1.1)
-    ;
-    try Vm.testCode(dotnet_funcs, switch (dotnet_funcs.kind) {
-        .mono => mono_prelude ++ echo_body,
-        .il2cpp => il2cpp_prelude ++ echo_body,
-    });
-    const constants_body =
-        \\@Assert(Constants.I64Max() == 9223372036854775807)
-        \\@Assert(Echo.F64(Constants.F64Huge()) == Constants.F64Huge())
-        \\@Assert(Echo.F32(Constants.F32Huge()) == Constants.F32Huge())
-        \\@Assert(@IsNull(Instances.NullString()))
-        \\@Assert(@IsNull(Instances.NullObject()))
-    ;
-    try Vm.testCode(dotnet_funcs, switch (dotnet_funcs.kind) {
-        .mono => mono_prelude ++ constants_body,
-        .il2cpp => il2cpp_prelude ++ constants_body,
-    });
+    // The one class shared with il2cpp - real Test from MutinyTest.dll on mono, a synthetic copy on
+    // il2cpp - so one script text runs on both. @TestClass only exists in a test build.
+    if (Vm.enable_mutiny_test_class) {
+        try Vm.testCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Assert(Test.EchoI32(0 - 32) == 0 - 32)
+            \\@Assert(Test.EchoI64(9007199254740993) == 9007199254740993)
+            \\@Assert(Test.EchoF32(1.5) == 1.5)
+            \\@Assert(Test.EchoF64(3.25) == 3.25)
+            \\@Assert(Test.EchoBool(1) == 1)
+            \\@Assert(Test.EchoI8(0 - 128) == 0 - 128)
+            \\@Assert(Test.EchoU8(255) == 255)
+            \\@Assert(Test.EchoI16(32767) == 32767)
+            \\@Assert(Test.EchoU16(65535) == 65535)
+            \\@Assert(Test.EchoU32(4294967295) == 4294967295)
+            \\@Assert(Test.EchoF32(2) == 2)
+            \\@Assert(Test.EchoF32(0 - 3) == 0 - 3)
+            \\@Assert(Test.EchoF32(16777216) == 16777216)
+            \\@Assert(Test.EchoF64(9007199254740992) == 9007199254740992)
+            \\@Assert(Test.EchoF32(1.1) != 1.1)
+        );
+        try Vm.testCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Assert(Test.I64Max() == 9223372036854775807)
+            \\@Assert(Test.EchoF64(Test.F64Huge()) == Test.F64Huge())
+            \\@Assert(Test.EchoF32(Test.F32Huge()) == Test.F32Huge())
+            \\@Assert(@IsNull(Test.NullString()))
+            \\@Assert(@IsNull(Test.NullObject()))
+        );
+    }
 }
 
-const mono_prelude =
-    \\var mutiny_test = @Assembly("MutinyTest")
-    \\var Echo = @Class(mutiny_test.MutinyTest.Echo)
-    \\var Constants = @Class(mutiny_test.MutinyTest.Constants)
-    \\var Instances = @Class(mutiny_test.MutinyTest.Instances)
-    \\
-;
-const il2cpp_prelude =
-    \\var mscorlib = @Assembly("mscorlib")
-    \\var Echo = @Class(mscorlib.System.Int32)
-    \\var Constants = @Class(mscorlib.System.Int32)
-    \\var Instances = @Class(mscorlib.System.Int32)
-    \\
-;
-
 const std = @import("std");
-const Vm = @import("Vm.zig");
+
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
+
 const UnityVersion = @import("UnityVersion.zig");
+const Vm = @import("Vm.zig");

@@ -1,3 +1,5 @@
+pub const enable_mutiny_test_class = false;
+
 const global = struct {
     var hinstance: win32.HINSTANCE = undefined;
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
@@ -449,16 +451,14 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
 
         if (tests_scheduled) {
             std.log.info("@ScheduleTests requested! running...", .{});
-            if (maybe_unity_version) |unity_version| Vm.runTests(&dotnet_funcs, unity_version) catch |err| {
+            Vm.runTests(&dotnet_funcs, maybe_unity_version) catch |err| {
                 std.log.err("tests failed with {s}:", .{@errorName(err)});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
                 } else {
                     std.log.err("    no error trace", .{});
                 }
-            } else {
-                std.log.err("canot run tests, no unity version", .{});
-            }
+            };
         }
 
         // var sleep_time_ms: u64 = 5000;

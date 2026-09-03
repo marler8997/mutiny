@@ -24,6 +24,12 @@ pub fn fromLoadedModule(module: dynlib.Module) ReadError!UnityVersion {
             std.log.err("GetModuleFileName(UnityPlayer.dll) failed, error={f}", .{win32.GetLastError()});
             return error.NoVersionInfo;
         }
+        // GetModuleFileNameW returns nSize on truncation (and may not null-terminate), which would
+        // leave us reading a mangled path; fail at the real cause instead.
+        if (path_len >= path_buf.len) {
+            std.log.err("UnityPlayer.dll path is longer than {} chars", .{path_buf.len});
+            return error.NoVersionInfo;
+        }
         path_buf[path_len] = 0;
         return fromFile(path_buf[0..path_len :0]);
     } else @panic("todo: unity version off-windows");

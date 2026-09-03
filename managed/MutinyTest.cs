@@ -1,20 +1,30 @@
+// NOTE: this class is mirrored by il2cpptestfixture
+public class Test
+{
+    public static bool EchoBool(bool v) { return v; }
+    public static sbyte EchoI8(sbyte v) { return v; }
+    public static byte EchoU8(byte v) { return v; }
+    public static short EchoI16(short v) { return v; }
+    public static ushort EchoU16(ushort v) { return v; }
+    public static int EchoI32(int v) { return v; }
+    public static uint EchoU32(uint v) { return v; }
+    public static long EchoI64(long v) { return v; }
+    public static ulong EchoU64(ulong v) { return v; }
+    public static float EchoF32(float v) { return v; }
+    public static double EchoF64(double v) { return v; }
+
+    public static ulong U64Max() { return ulong.MaxValue; }
+    public static long I64Max() { return long.MaxValue; }
+    public static long I64Min() { return long.MinValue; }
+    public static float F32Huge() { return 3.4e38f; }
+    public static double F64Huge() { return 1e300; }
+
+    public static string NullString() { return null; }
+    public static object NullObject() { return null; }
+}
+
 namespace MutinyTest
 {
-    public class Echo
-    {
-        public static bool Bool(bool v) { return v; }
-        public static sbyte I8(sbyte v) { return v; }
-        public static byte U8(byte v) { return v; }
-        public static short I16(short v) { return v; }
-        public static ushort U16(ushort v) { return v; }
-        public static int I32(int v) { return v; }
-        public static uint U32(uint v) { return v; }
-        public static long I64(long v) { return v; }
-        public static ulong U64(ulong v) { return v; }
-        public static float F32(float v) { return v; }
-        public static double F64(double v) { return v; }
-    }
-
     public class Statics
     {
         public static bool BoolField = true;
@@ -53,8 +63,6 @@ namespace MutinyTest
 
         public static Instances New() { return new Instances(); }
         public static Instances NullInstance() { return null; }
-        public static string NullString() { return null; }
-        public static object NullObject() { return null; }
     }
 
     public class Base
@@ -66,14 +74,5 @@ namespace MutinyTest
     public class Derived : Base
     {
         public static Derived New() { return new Derived(); }
-    }
-
-    public class Constants
-    {
-        public static ulong U64Max() { return ulong.MaxValue; }
-        public static long I64Max() { return long.MaxValue; }
-        public static long I64Min() { return long.MinValue; }
-        public static float F32Huge() { return 3.4e38f; }
-        public static double F64Huge() { return 1e300; }
     }
 }

@@ -372,9 +372,74 @@ pub const SyntheticMethod = struct {
         if (args.parameters) |p| self.write(usize, l.parameters(), @intFromPtr(p));
         return @ptrCast(&self.storage);
     }
+    // A synthetic class and its methods reference each other, so the class pointer isn't known
+    // when the method is first written. Patch klass in once the class exists.
+    pub fn setKlass(self: *SyntheticMethod, l: MethodLayout, klass: *const dotnet.Class) void {
+        self.write(usize, l.klass, @intFromPtr(klass));
+    }
     fn write(self: *SyntheticMethod, comptime T: type, offset: usize, value: T) void {
         const p: *align(1) T = @ptrCast(&self.storage[offset]);
         p.* = value;
+    }
+};
+
+// VirtualInvokeData is two pointers { methodPtr, MethodInfo* } in every libil2cpp version, so the
+// inline vtable strides one per entry.
+const vtable_entry_size = 2 * @sizeOf(usize);
+
+// Il2CppClass header size: where the inline vtable[] begins, so how many bytes to copy per class.
+// Not probeable (it is the struct's own size), so it is a version-gated constant. Byte-identical at
+// 0x138 from Unity 2022.3 through 6000.0 (checked against libil2cpp - the one member that grew,
+// initializationExceptionGCHandle, is absorbed by padding before cctor_thread), matching the
+// hand-walked header (fields 0x80, static_fields 0xb8, field_count 0x124). The gate is a floor:
+// versions below 2022.3 are unverified. selfTest also validates it per-process against the base's
+// vtable, so a wrong value can't pass silently.
+const class_fixed_size = 0x138;
+const class_fixed_size_verified_from: UnityVersion = .{ .major = 2022, .minor = 3, .build = 0, .revision = 0 };
+pub fn classFixedSize(unity_version: UnityVersion) error{UnsupportedUnityVersion}!usize {
+    if (!unity_version.atLeast(class_fixed_size_verified_from.major, class_fixed_size_verified_from.minor)) {
+        std.log.err("il2cpp class header size is unverified before Unity {f}, but this game is {f}", .{
+            class_fixed_size_verified_from,
+            unity_version,
+        });
+        return error.UnsupportedUnityVersion;
+    }
+    return class_fixed_size;
+}
+
+// A class we own, so a synthetic method can be found off it without mutating a real class (which
+// is what appendMethods does). It copies an initialized base class's whole allocation and
+// overrides the method table, so instance_size, gc_desc, init flags and the vtable are inherited
+// correct-by-construction. typeMetadataHandle is left as the base's: copying an already-initialized
+// class means Class::Init never re-runs to read it; a MonoBehaviour Unity inspects will need it
+// NULLed, a later stage. The copy also keeps the base's name and type identity, so class_get_type
+// on it resolves back to the base and logs will name it after the base.
+pub const SyntheticClass = struct {
+    // the runtime keeps pointers into this (obj->klass), so it outlives every instance; never freed
+    storage: []align(@alignOf(usize)) u8,
+    pub fn build(
+        allocator: std.mem.Allocator, // one allocation, ok to use std.heap.page_allocator
+        l: Layout,
+        fixed_size: usize,
+        base: *const dotnet.Class,
+        methods: []const *const dotnet.Method, // pointers into this must outlive the class
+    ) error{ OutOfMemory, TooManyMethods, BaseNotReadable }!SyntheticClass {
+        const method_count = std.math.cast(u16, methods.len) orelse return error.TooManyMethods;
+        const total = fixed_size + @as(usize, l.vtableCountOf(base)) * vtable_entry_size;
+        // vtable_count is the one inferred offset; a wrong read here could make total ~1MB, so
+        // bound the copy source to the base's actual pages rather than reading off the heap.
+        if (!readable(@intFromPtr(base), total)) return error.BaseNotReadable;
+        const storage = try allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(usize)), total);
+        @memcpy(storage, @as([*]const u8, @ptrCast(base))[0..total]);
+
+        const methods_field: *align(1) [*]const *const dotnet.Method = @ptrCast(storage.ptr + l.methods);
+        const method_count_field: *align(1) u16 = @ptrCast(storage.ptr + l.method_count);
+        methods_field.* = methods.ptr;
+        method_count_field.* = method_count;
+        return .{ .storage = storage };
+    }
+    pub fn class(self: SyntheticClass) *const dotnet.Class {
+        return @ptrCast(self.storage.ptr);
     }
 };
 // the methods probe dereferences a pointer read out of the class, which is a guess until the
@@ -444,6 +509,160 @@ fn probeMethodArray(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *
     for (&c.method_count, 0..) |*alive, slot| {
         if (alive.*) alive.* = readU16(class, slot) == total;
     }
+}
+
+fn findClass(
+    funcs: *const dotnet.Funcs,
+    assemblies: []const *const dotnet.Assembly,
+    namespace: [*:0]const u8,
+    name: [*:0]const u8,
+) ?*const dotnet.Class {
+    for (assemblies) |assembly| {
+        const image = funcs.kind.il2cpp.assembly_get_image(assembly);
+        if (funcs.class_from_name(image, namespace, name)) |class| return class;
+    }
+    return null;
+}
+
+// Kept alive for the life of the process: the class points at the method array and the method
+// points back at the class. selftest_class is set only after a run fully validates, so a failed run
+// leaves it null and the next retries (leaking the previous copy's page, which is fine here).
+const selftest_method_name = "MutinySentinel";
+const selftest_sentinel: i32 = 0x5eed;
+var selftest_method: SyntheticMethod = undefined;
+var selftest_methods: [1]*const dotnet.Method = undefined;
+var selftest_class: ?SyntheticClass = null;
+
+fn selftestPointer() callconv(.c) void {
+    // reached only through invoker_method, never directly; loud rather than UB if that's ever false
+    @panic("selftest methodPointer called directly");
+}
+fn selftestInvoke(
+    _: MethodPointer,
+    _: *const dotnet.Method,
+    _: ?*anyopaque, // obj
+    _: ?[*]?*anyopaque,
+    out: ?*anyopaque,
+) callconv(.c) void {
+    const p: *align(1) i32 = @ptrCast(out.?);
+    p.* = selftest_sentinel;
+}
+
+pub const SelfTestError = error{
+    UnsupportedUnityVersion,
+    MissingClass,
+    FixedSizeInvalid,
+    BasePolluted,
+    OutOfMemory,
+    TooManyMethods,
+    BaseNotReadable,
+    MethodNotFound,
+    FoundWrongMethod,
+    InvokeThrew,
+    InvokeReturnedNull,
+    WrongSentinel,
+    BaseModified,
+    BaseCorrupted,
+};
+
+// Validates class_fixed_size on this process, since a wrong header size is the one layout error the
+// round-trip below can't see (method lookup and invoke never touch the inline vtable). The first
+// VirtualInvokeData sits at fixed_size, its `method` one pointer in; for System.Object every vtable
+// slot is one of its own virtual methods, so slot 0's method must appear in class_get_methods.
+fn vtableStartsAt(funcs: *const dotnet.Funcs, base: *const dotnet.Class, fixed_size: usize) bool {
+    if (!readable(@intFromPtr(base), fixed_size + vtable_entry_size)) return false;
+    const bytes: [*]const u8 = @ptrCast(base);
+    const slot0_method: *align(1) const usize = @ptrCast(bytes + fixed_size + @sizeOf(usize));
+    const target = slot0_method.*;
+    if (target == 0) return false;
+    var it: ?*anyopaque = null;
+    while (funcs.class_get_methods(base, &it)) |m| {
+        if (@intFromPtr(m) == target) return true;
+    }
+    return false;
+}
+
+// Round-trips a synthetic class through real runtime code as an independent check of the Layout:
+// build one over System.Object, find its method by name off it, invoke it, check the sentinel
+// il2cpp boxes back, then confirm the base is untouched. class_get_method_from_name walks our
+// overridden method table and Invoke reads our method's fields, so a wrong Layout makes real
+// runtime code misbehave here. The value-type return turns a wrong invoker contract into a wrong
+// number rather than something that merely didn't crash.
+pub fn selfTest(
+    funcs: *const dotnet.Funcs,
+    assemblies: []const *const dotnet.Assembly,
+    layouts: Layouts,
+    unity_version: UnityVersion,
+) SelfTestError!void {
+    if (selftest_class != null) return; // already validated this process
+
+    const fixed_size = try classFixedSize(unity_version);
+    const base = findClass(funcs, assemblies, "System", "Object") orelse {
+        std.log.err("il2cpp synthetic class: no System.Object to copy", .{});
+        return error.MissingClass;
+    };
+    const int32 = findClass(funcs, assemblies, "System", "Int32") orelse {
+        std.log.err("il2cpp synthetic class: no System.Int32 for the return type", .{});
+        return error.MissingClass;
+    };
+
+    // System.Object may only be lazily set up after il2cpp_init. runtime_class_init runs its cctor,
+    // which forces Class::Init transitively, so the copy inherits initialized == 1; otherwise it
+    // inherits 0 and a later Class::Init on the synthetic class faults reading metadata that
+    // describes the base, not it.
+    funcs.kind.il2cpp.runtime_class_init(base);
+
+    if (!vtableStartsAt(funcs, base, fixed_size)) {
+        std.log.err("il2cpp class header size 0x{x} did not validate against {s}'s vtable", .{
+            fixed_size,
+            funcs.class_get_name(base),
+        });
+        return error.FixedSizeInvalid;
+    }
+
+    // non-interference baseline: the base must not already carry our method
+    if (funcs.class_get_method_from_name(base, selftest_method_name, 0) != null) return error.BasePolluted;
+
+    // flags default to PUBLIC instance (0x0006), see SyntheticMethod.init
+    selftest_methods[0] = selftest_method.init(layouts.method, .{
+        .name = selftest_method_name,
+        .return_type = funcs.class_get_type(int32),
+        .method_pointer = &selftestPointer,
+        .invoker = &selftestInvoke,
+        .parameters_count = 0,
+    });
+    var synth = try SyntheticClass.build(std.heap.page_allocator, layouts.class, fixed_size, base, &selftest_methods);
+    const klass = synth.class();
+    selftest_method.setKlass(layouts.method, klass);
+
+    const found = funcs.class_get_method_from_name(klass, selftest_method_name, 0) orelse {
+        std.log.err("il2cpp synthetic class: could not find {s} off the new class", .{selftest_method_name});
+        return error.MethodNotFound;
+    };
+    if (found != selftest_methods[0]) return error.FoundWrongMethod;
+
+    var exc: ?*const dotnet.Object = null;
+    const boxed = funcs.runtime_invoke(found, null, null, &exc);
+    if (exc != null) return error.InvokeThrew;
+    const unboxed: *align(1) const i32 = @ptrCast(funcs.object_unbox(boxed orelse return error.InvokeReturnedNull));
+    if (unboxed.* != selftest_sentinel) {
+        std.log.err("il2cpp synthetic class: invoke returned 0x{x}, expected 0x{x}", .{ unboxed.*, selftest_sentinel });
+        return error.WrongSentinel;
+    }
+    // non-interference: the base we copied still lacks our method and its fields still validate
+    if (funcs.class_get_method_from_name(base, selftest_method_name, 0) != null) return error.BaseModified;
+    if (!validate(funcs, base, layouts.class)) return error.BaseCorrupted;
+
+    selftest_class = synth; // validated; keep the copy alive for the process (never freed, see above)
+    std.log.info("il2cpp synthetic class: copied System.Object, found and invoked {s}() -> 0x{x}, base untouched", .{
+        selftest_method_name,
+        @as(u32, @bitCast(unboxed.*)),
+    });
+
+    // object_new is deliberately not exercised here: it faults inside headless dotnet-test for
+    // reasons not yet diagnosed - not simply "no GC", since the runtime's own boxing of our return
+    // value above uses the GC and works. Instantiation belongs to the in-game path, where Unity's
+    // AddComponent does it anyway, not to this fixture.
 }
 
 const builtin = @import("builtin");

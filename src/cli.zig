@@ -25,9 +25,9 @@ pub fn main() !u8 {
     };
 
     // Process-targeted commands are "mutiny PID VERB ..." so the PID - the tedious part - stays
-    // at the front and the verb can be swapped by editing the tail. A leading all-digits token is
-    // a PID (the next token is its verb); anything else is a global command. PIDs are numeric and
-    // commands are alphabetic, so the two can't collide.
+    // at the front and the verb can be swapped by editing the tail. A token that parses as a u32
+    // is a PID (the next token is its verb); anything else is a global command. Commands are
+    // alphabetic, so the two can't collide.
     if (std.fmt.parseInt(u32, command, 10)) |pid| {
         const verb = args.next() orelse errExit(
             "expected a command after pid {} (attach, detach, run-script)",

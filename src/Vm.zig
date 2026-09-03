@@ -2066,6 +2066,18 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = not_null;
         },
+        .@"@TestClass" => if (enable_mutiny_test_class) {
+            const class = switch (vm.dotnet_funcs.kind) {
+                .mono => blk: {
+                    const assembly = vm.findAssemblyByName("MutinyTest") orelse @panic("MutinyTest assembly is missing even though enable_mutiny_test_class is true");
+                    const image = vm.dotnet_funcs.assembly_get_image(assembly) orelse @panic("MutinyTest image is null");
+                    break :blk vm.dotnet_funcs.class_from_name(image, "", "Test") orelse @panic("Test class not found in MutinyTest");
+                },
+                .il2cpp => il2cpptestfixture.testClass(),
+            };
+            (try vm.push(Type)).* = .class;
+            (try vm.push(*const dotnet.Class)).* = class;
+        } else unreachable,
     }
 }
 
@@ -3083,7 +3095,9 @@ fn executeBinaryOp(
 }
 
 fn findAssembly(vm: *Vm, extent: Extent) error{Vm}!?*const dotnet.Assembly {
-    const needle = vm.text[extent.start + 1 .. extent.end - 1];
+    return vm.findAssemblyByName(vm.text[extent.start + 1 .. extent.end - 1]);
+}
+fn findAssemblyByName(vm: *Vm, needle: []const u8) ?*const dotnet.Assembly {
     switch (vm.dotnet_funcs.kind) {
         .mono => |*mono| {
             var context: FindAssemblyMono = .{
@@ -3212,6 +3226,13 @@ fn gchandleTarget(
     return obj.?;
 }
 
+pub const enable_mutiny_test_class = if (@import("builtin").is_test)
+    true
+else if (@hasDecl(@import("root"), "enable_mutiny_test_class"))
+    @import("root").enable_mutiny_test_class
+else
+    @compileError("root must declare `pub const enable_mutiny_test_class: bool`");
+
 const BuiltinParamType = union(enum) {
     anything,
     concrete: Type,
@@ -3233,6 +3254,7 @@ const Builtin = enum {
     @"@ToString",
     @"@IsNull",
     @"@NotNull",
+    @"@TestClass",
     pub fn params(builtin: Builtin) ?[]const BuiltinParamType {
         return switch (builtin) {
             .@"@Assert" => &.{.{ .concrete = .integer }},
@@ -3250,6 +3272,7 @@ const Builtin = enum {
             .@"@ToString" => &.{.anything},
             .@"@IsNull" => &.{.anything},
             .@"@NotNull" => &.{.anything},
+            .@"@TestClass" => &.{},
         };
     }
 };
@@ -3269,7 +3292,9 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@ToString", .@"@ToString" },
     .{ "@IsNull", .@"@IsNull" },
     .{ "@NotNull", .@"@NotNull" },
-});
+} ++ if (enable_mutiny_test_class) .{
+    .{ "@TestClass", Builtin.@"@TestClass" },
+} else .{});
 
 const BinaryOpPriority = enum {
     comparison,
@@ -4179,7 +4204,7 @@ const ErrorFmt = struct {
     }
 };
 
-pub fn runTests(dotnet_funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
+pub fn runTests(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {
     try vmtest.run(dotnet_funcs, unity_version);
     try badCodeTests(dotnet_funcs);
     try goodCodeTests(dotnet_funcs);
@@ -4356,11 +4381,15 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "@IsNull(0, 0)", "1: expected 1 args but got 2");
     try testBadCode(dotnet_funcs, "@IsNull(0)", "1: expected argument 0 to be an object but got an integer");
     try testBadCode(dotnet_funcs, "@NotNull(0)", "1: expected argument 0 to be an object but got an integer");
-    if (haveMutinyTest(dotnet_funcs)) try testBadCode(dotnet_funcs,
+    if (dotnet_funcs.kind == .mono) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\@Discard(Statics.NullArray.foo)
     , "3: field 'foo' accessed on NULL object");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.NullObject().foo)
+    , "2: field 'foo' accessed on NULL object");
     try testBadCode(dotnet_funcs,
         \\@TryAssembly("does not exist").foo
     , "1: field 'foo' accessed on NULL object");
@@ -4451,12 +4480,12 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     handle_tracker.deinit();
 }
 
-fn haveMutinyTest(dotnet_funcs: *const dotnet.Funcs) bool {
+fn haveMutinyTestDll(dotnet_funcs: *const dotnet.Funcs) bool {
     return dotnet_funcs.kind == .mono;
 }
 
 fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
-    const have_mutiny_test = haveMutinyTest(dotnet_funcs);
+    const have_mutiny_test_dll = haveMutinyTestDll(dotnet_funcs);
 
     try testCode(dotnet_funcs, "fn foo(){}");
     try testCode(dotnet_funcs, "@Nothing()");
@@ -4675,9 +4704,9 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(ts._ticks == 123)
         \\@Assert(declared_after == 0)
     );
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
+        \\var Test = @Class(t.Test)
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\@Assert(Statics.I32Field == 0 - 32)
         \\@Assert(Statics.F32Field == 1.5)
@@ -4698,11 +4727,13 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Statics.F32Field != Statics.F64Field)
         \\@Assert(Statics.F32Field > 1)
         \\@Assert(Statics.F32Field < 2)
-        \\@Assert(Echo.F32(Statics.F32Field) == Statics.F32Field)
-        \\@Assert(Echo.F64(Statics.F64Field) == Statics.F64Field)
+        \\@Assert(Test.EchoF32(Statics.F32Field) == Statics.F32Field)
+        \\@Assert(Test.EchoF64(Statics.F64Field) == Statics.F64Field)
     );
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
+        \\var Test = @Class(t.Test)
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 7
         \\@Assert(Statics.I32Field == 7)
@@ -4726,25 +4757,29 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Statics.U16Field == 65535)
         \\set Statics.U32Field = 4294967295
         \\@Assert(Statics.U32Field == 4294967295)
-        \\var Echo = @Class(t.MutinyTest.Echo)
         \\set Statics.F32Field = 1.5
-        \\@Assert(Echo.F32(Statics.F32Field) == 1.5)
+        \\@Assert(Test.EchoF32(Statics.F32Field) == 1.5)
         \\@Assert(Statics.ConstI32 == 42)
         \\@Assert(Statics.ConstF32 == 2.5)
     );
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Instances = @Class(t.MutinyTest.Instances)
         \\var n = Instances.NullInstance()
         \\@Assert(@IsNull(n))
-        \\var s = Instances.NullString()
-        \\@Assert(@IsNull(s))
-        \\var o = Instances.NullObject()
-        \\@Assert(@IsNull(o))
         \\var real = Instances.New()
         \\@Assert(@NotNull(real))
     );
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    if (enable_mutiny_test_class) try testCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\var s = Test.NullString()
+        \\@Assert(@IsNull(s))
+        \\var o = Test.NullObject()
+        \\@Assert(@IsNull(o))
+    );
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\var arr = Statics.I32Array
@@ -4755,87 +4790,87 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(strs.get_Length() == 2)
         \\@Assert(@IsNull(Statics.NullArray))
     );
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\var arr = Statics.I32Array
         \\@Discard(arr[0])
     , "array index not implemented");
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Derived = @Class(t.MutinyTest.Derived)
         \\var d = Derived.New()
         \\@Assert(d.BaseField == 8)
         \\@Assert(d.BaseMethod() == 7)
     );
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.ConstI32 = 1
     , "3: cannot assign to 'ConstI32' because it is a const, which has no storage to write to");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.ConstF32 = 1.5
     , "3: cannot assign to 'ConstF32' because it is a const, which has no storage to write to");
-    if (have_mutiny_test) try testCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 5
         \\@Assert(Statics.I32Field == 5)
         \\@Assert(Statics.ConstI32 == 42)
     );
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Instances = @Class(t.MutinyTest.Instances)
         \\set Instances.I32Field = 1
     , "3: cannot access non-static field 'I32Field' on class, need an object");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.NotAField = 1
     , "3: class 'Statics' has no field 'NotAField'");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
+    // TODO: should we use "@TestClass()" so we can test these with il2cpp?
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\set Statics.I32Field = 4294967295
     , "3: integer overflow, value 4294967295 to 32-bit signed integer");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.F32(16777217))
-    , "3: cannot convert 16777217 to r4 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.F64(9007199254740993))
-    , "3: cannot convert 9007199254740993 to r8 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\var Constants = @Class(t.MutinyTest.Constants)
-        \\@Discard(Echo.F32(Constants.F64Huge()))
-    , "4: cannot convert 1e300 to r4 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.I16(70000))
-    , "3: cannot convert 70000 to i2 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.I8(128))
-    , "3: cannot convert 128 to i1 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.U8(0 - 1))
-    , "3: cannot convert -1 to u1 without losing precision");
-    if (have_mutiny_test) try testBadCode(dotnet_funcs,
-        \\var t = @Assembly("MutinyTest")
-        \\var Echo = @Class(t.MutinyTest.Echo)
-        \\@Discard(Echo.Bool(2))
-    , "3: cannot convert 2 to boolean without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoF32(16777217))
+    , "2: cannot convert 16777217 to r4 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoF64(9007199254740993))
+    , "2: cannot convert 9007199254740993 to r8 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoF32(Test.F64Huge()))
+    , "2: cannot convert 1e300 to r4 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoI16(70000))
+    , "2: cannot convert 70000 to i2 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoI8(128))
+    , "2: cannot convert 128 to i1 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoU8(0 - 1))
+    , "2: cannot convert -1 to u1 without losing precision");
+    if (enable_mutiny_test_class) try testBadCode(dotnet_funcs,
+        \\var Test = @TestClass()
+        \\@Discard(Test.EchoBool(2))
+    , "2: cannot convert 2 to boolean without losing precision");
 
     // TODO: gated to mono because il2cpp strips unused mscorlib code per game, so Math/Single/
     //       Double may not exist in an arbitrary GameAssembly.dll. Replace these mscorlib
@@ -4897,6 +4932,7 @@ const gchandlelog = std.log.scoped(.mono_gchandle);
 const std = @import("std");
 const logfile = @import("logfile.zig");
 const dotnet = @import("dotnet.zig");
+const il2cpptestfixture = @import("il2cpptestfixture.zig");
 const Memory = @import("Memory.zig");
 const vmtest = @import("vmtest.zig");
 const UnityVersion = @import("UnityVersion.zig");

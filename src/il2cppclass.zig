@@ -487,6 +487,11 @@ const vtable_entry_size = 2 * @sizeOf(usize);
 // versions below 2022.3 are unverified. selfTest also validates it per-process against the base's
 // vtable, so a wrong value can't pass silently.
 const class_fixed_size = 0x138;
+// buildSubclass places the typeHierarchy array at storage.ptr + total (total = fixed_size +
+// vtable_count*16); it is only pointer-aligned if the header size is a multiple of 8.
+comptime {
+    std.debug.assert(class_fixed_size % @alignOf(usize) == 0);
+}
 const class_fixed_size_verified_from: UnityVersion = .{ .major = 2022, .minor = 3, .build = 0, .revision = 0 };
 pub fn classFixedSize(unity_version: UnityVersion) error{UnsupportedUnityVersion}!usize {
     if (!unity_version.atLeast(class_fixed_size_verified_from.major, class_fixed_size_verified_from.minor)) {
@@ -517,23 +522,73 @@ pub const SyntheticClass = struct {
         methods: []const *const dotnet.Method, // pointers into this must outlive the class
     ) error{ OutOfMemory, TooManyMethods, BaseNotReadable }!SyntheticClass {
         const method_count = std.math.cast(u16, methods.len) orelse return error.TooManyMethods;
-        const total = fixed_size + @as(usize, l.vtableCountOf(base)) * vtable_entry_size;
-        // vtable_count is the one inferred offset; a wrong read here could make total ~1MB, so
-        // bound the copy source to the base's actual pages rather than reading off the heap.
-        if (!readable(@intFromPtr(base), total)) return error.BaseNotReadable;
+        const total = try baseCopySize(l, fixed_size, base);
         const storage = try allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(usize)), total);
-        @memcpy(storage, @as([*]const u8, @ptrCast(base))[0..total]);
+        copyBase(storage, l, base, total, methods, method_count);
+        return .{ .storage = storage };
+    }
+    // Sets parent and writes a fresh typeHierarchy (base's plus self) at depth base + 1, which is what
+    // Class::IsAssignableFrom reads to accept the copy as a subclass of base.
+    pub fn buildSubclass(
+        allocator: std.mem.Allocator, // one allocation, ok to use std.heap.page_allocator
+        l: Layout,
+        fixed_size: usize,
+        base: *const dotnet.Class, // both the class to copy and the parent
+        methods: []const *const dotnet.Method,
+    ) error{ OutOfMemory, TooManyMethods, BaseNotReadable, BaseNotInitialized, TypeHierarchyTooDeep }!SyntheticClass {
+        const method_count = std.math.cast(u16, methods.len) orelse return error.TooManyMethods;
+        const base_bytes: [*]const u8 = @ptrCast(base);
+        const base_depth: u8 = base_bytes[l.type_hierarchy_depth];
+        if (base_depth == 0) return error.BaseNotInitialized;
+        const new_depth = std.math.add(u8, base_depth, 1) catch return error.TypeHierarchyTooDeep;
+        const base_hierarchy_slot: *align(1) const usize = @ptrCast(base_bytes + l.type_hierarchy);
+        const base_hierarchy: [*]align(1) const usize = @ptrFromInt(base_hierarchy_slot.*);
+        // SetupTypeHierarchy writes depth before the array pointer, so a non-zero depth alone does not
+        // prove the array is there; require it, or a base mid-Init hands us a null pointer to memcpy.
+        if (!readable(base_hierarchy_slot.*, @as(usize, base_depth) * @sizeOf(usize))) return error.BaseNotInitialized;
 
-        const methods_field: *align(1) [*]const *const dotnet.Method = @ptrCast(storage.ptr + l.methods);
-        const method_count_field: *align(1) u16 = @ptrCast(storage.ptr + l.method_count);
-        methods_field.* = methods.ptr;
-        method_count_field.* = method_count;
+        // total is a multiple of 8 (fixed_size and each vtable entry are), so the typeHierarchy array
+        // placed at the tail of the same allocation is pointer-aligned.
+        const total = try baseCopySize(l, fixed_size, base);
+        const storage = try allocator.alignedAlloc(u8, .fromByteUnits(@alignOf(usize)), total + @as(usize, new_depth) * @sizeOf(usize));
+        copyBase(storage, l, base, total, methods, method_count);
+
+        const hierarchy: [*]usize = @ptrCast(@alignCast(storage.ptr + total));
+        @memcpy(hierarchy[0..base_depth], base_hierarchy[0..base_depth]);
+        hierarchy[base_depth] = @intFromPtr(storage.ptr); // self is the final entry
+
+        const parent_field: *align(1) usize = @ptrCast(storage.ptr + l.parent);
+        const hierarchy_field: *align(1) usize = @ptrCast(storage.ptr + l.type_hierarchy);
+        parent_field.* = @intFromPtr(base);
+        hierarchy_field.* = @intFromPtr(hierarchy);
+        storage[l.type_hierarchy_depth] = new_depth;
         return .{ .storage = storage };
     }
     pub fn class(self: SyntheticClass) *const dotnet.Class {
         return @ptrCast(self.storage.ptr);
     }
 };
+// vtable_count is an inferred offset, so a wrong read could make the copy ~1MB; bound it to base's
+// committed pages rather than trusting the computed size.
+fn baseCopySize(l: Layout, fixed_size: usize, base: *const dotnet.Class) error{BaseNotReadable}!usize {
+    const total = fixed_size + @as(usize, l.vtableCountOf(base)) * vtable_entry_size;
+    if (!readable(@intFromPtr(base), total)) return error.BaseNotReadable;
+    return total;
+}
+fn copyBase(
+    storage: []u8,
+    l: Layout,
+    base: *const dotnet.Class,
+    total: usize,
+    methods: []const *const dotnet.Method,
+    method_count: u16,
+) void {
+    @memcpy(storage[0..total], @as([*]const u8, @ptrCast(base))[0..total]);
+    const methods_field: *align(1) [*]const *const dotnet.Method = @ptrCast(storage.ptr + l.methods);
+    const method_count_field: *align(1) u16 = @ptrCast(storage.ptr + l.method_count);
+    methods_field.* = methods.ptr;
+    method_count_field.* = method_count;
+}
 // the methods probe dereferences a pointer read out of the class, which is a guess until the
 // offset is pinned down, so check the page is actually there first
 fn readable(addr: usize, len: usize) bool {
@@ -659,14 +714,23 @@ fn findClass(
     return null;
 }
 
-// Kept alive for the life of the process: the class points at the method array and the method
-// points back at the class. selftest_class is set only after a run fully validates, so a failed run
-// leaves it null and the next retries (leaking the previous copy's page, which is fine here).
+// The runtime holds pointers into a synthetic class (obj->klass, its typeHierarchy entries), so it
+// must outlive the mutiny thread that built it. The arena is page-backed and never deinit'd, so its
+// allocations live for the process; each `*_class` flag keeps its slot to one build and lets a
+// re-attaching thread recover the class rather than build a second one the GC would then see twice.
 const selftest_method_name = "MutinySentinel";
 const selftest_sentinel: i32 = 0x5eed;
-var selftest_method: SyntheticMethod = undefined;
-var selftest_methods: [1]*const dotnet.Method = undefined;
-var selftest_class: ?SyntheticClass = null;
+const global = struct {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
+    var selftest_method: SyntheticMethod = undefined;
+    var selftest_methods: [1]*const dotnet.Method = undefined;
+    var selftest_class: ?SyntheticClass = null;
+
+    var subclass_method: SyntheticMethod = undefined;
+    var subclass_methods: [1]*const dotnet.Method = undefined;
+    var subclass_class: ?SyntheticClass = null;
+};
 
 fn selftestPointer() callconv(.c) void {
     // reached only through invoker_method, never directly; loud rather than UB if that's ever false
@@ -699,6 +763,14 @@ pub const SelfTestError = error{
     WrongSentinel,
     BaseModified,
     BaseCorrupted,
+    BaseNotInitialized,
+    TypeHierarchyTooDeep,
+    SubclassNotAssignable,
+    SubclassAssignableBackwards,
+    SubclassMethodNotFound,
+    SubclassFoundWrongMethod,
+    InheritedMethodNotFound,
+    InheritedMethodWrong,
 };
 
 // Validates class_fixed_size on this process, since a wrong header size is the one layout error the
@@ -730,7 +802,7 @@ pub fn selfTest(
     layouts: Layouts,
     unity_version: UnityVersion,
 ) SelfTestError!void {
-    if (selftest_class != null) return; // already validated this process
+    if (global.selftest_class != null) return; // already validated this process
 
     const fixed_size = try classFixedSize(unity_version);
     const base = findClass(funcs, assemblies, "System", "Object") orelse {
@@ -771,22 +843,22 @@ pub fn selfTest(
     if (funcs.class_get_method_from_name(base, selftest_method_name, 0) != null) return error.BasePolluted;
 
     // flags default to PUBLIC instance (0x0006), see SyntheticMethod.init
-    selftest_methods[0] = selftest_method.init(layouts.method, .{
+    global.selftest_methods[0] = global.selftest_method.init(layouts.method, .{
         .name = selftest_method_name,
         .return_type = funcs.class_get_type(int32),
         .method_pointer = &selftestPointer,
         .invoker = &selftestInvoke,
         .parameters_count = 0,
     });
-    var synth = try SyntheticClass.build(std.heap.page_allocator, layouts.class, fixed_size, base, &selftest_methods);
+    var synth = try SyntheticClass.build(global.arena.allocator(), layouts.class, fixed_size, base, &global.selftest_methods);
     const klass = synth.class();
-    selftest_method.setKlass(layouts.method, klass);
+    global.selftest_method.setKlass(layouts.method, klass);
 
     const found = funcs.class_get_method_from_name(klass, selftest_method_name, 0) orelse {
         std.log.err("il2cpp synthetic class: could not find {s} off the new class", .{selftest_method_name});
         return error.MethodNotFound;
     };
-    if (found != selftest_methods[0]) return error.FoundWrongMethod;
+    if (found != global.selftest_methods[0]) return error.FoundWrongMethod;
 
     var exc: ?*const dotnet.Object = null;
     const boxed = funcs.runtime_invoke(found, null, null, &exc);
@@ -800,7 +872,7 @@ pub fn selfTest(
     if (funcs.class_get_method_from_name(base, selftest_method_name, 0) != null) return error.BaseModified;
     if (!validate(funcs, base, layouts.class)) return error.BaseCorrupted;
 
-    selftest_class = synth; // validated; keep the copy alive for the process (never freed, see above)
+    global.selftest_class = synth;
     std.log.info("il2cpp synthetic class: copied System.Object, found and invoked {s}() -> 0x{x}, base untouched", .{
         selftest_method_name,
         @as(u32, @bitCast(unboxed.*)),
@@ -810,6 +882,92 @@ pub fn selfTest(
     // reasons not yet diagnosed - not simply "no GC", since the runtime's own boxing of our return
     // value above uses the GC and works. Instantiation belongs to the in-game path, where Unity's
     // AddComponent does it anyway, not to this fixture.
+}
+
+const subclass_update_name = "Update";
+
+fn subclassUpdatePointer() callconv(.c) void {
+    @panic("subclass Update methodPointer called directly");
+}
+fn subclassUpdateInvoke(
+    _: MethodPointer,
+    _: *const dotnet.Method,
+    _: ?*anyopaque, // obj
+    _: ?[*]?*anyopaque,
+    _: ?*anyopaque, // void return, nothing to write
+) callconv(.c) void {}
+
+// Derives a subclass of UnityEngine.MonoBehaviour and checks the runtime agrees via the public
+// IsAssignableFrom, exercising the discovered typeHierarchy offsets through real il2cpp code.
+pub fn subclassSelfTest(
+    funcs: *const dotnet.Funcs,
+    assemblies: []const *const dotnet.Assembly,
+    layouts: Layouts,
+    unity_version: UnityVersion,
+) SelfTestError!void {
+    if (global.subclass_class != null) return; // already validated this process
+
+    const fixed_size = try classFixedSize(unity_version);
+    const mb = findClass(funcs, assemblies, "UnityEngine", "MonoBehaviour") orelse {
+        std.log.err("il2cpp synthetic subclass: no UnityEngine.MonoBehaviour to derive from", .{});
+        return error.MissingClass;
+    };
+    const void_class = findClass(funcs, assemblies, "System", "Void") orelse {
+        std.log.err("il2cpp synthetic subclass: no System.Void for the Update return type", .{});
+        return error.MissingClass;
+    };
+    // buildSubclass extends MonoBehaviour's typeHierarchy, which only Class::Init populates;
+    // class_get_method_from_name forces that Init without running a static constructor.
+    forceClassInit(funcs, mb);
+
+    // a MonoBehaviour method to prove the subclass finds inherited methods through its parent;
+    // skip constructors and anything shadowed by our own Update
+    const inherited = blk: {
+        var it: ?*anyopaque = null;
+        while (funcs.class_get_methods(mb, &it)) |m| {
+            const name = std.mem.span(funcs.method_get_name(m));
+            if (std.mem.eql(u8, name, ".ctor")) continue;
+            if (std.mem.eql(u8, name, ".cctor")) continue;
+            if (std.mem.eql(u8, name, subclass_update_name)) continue;
+            break :blk m;
+        }
+        std.log.err("il2cpp synthetic subclass: MonoBehaviour exposed no method to inherit", .{});
+        return error.MissingClass;
+    };
+    const inherited_name = funcs.method_get_name(inherited);
+    const inherited_params: c_int = @intCast(funcs.kind.il2cpp.method_get_param_count(inherited));
+
+    global.subclass_methods[0] = global.subclass_method.init(layouts.method, .{
+        .name = subclass_update_name,
+        .return_type = funcs.class_get_type(void_class),
+        .method_pointer = &subclassUpdatePointer,
+        .invoker = &subclassUpdateInvoke,
+        .parameters_count = 0,
+    });
+    var sub = try SyntheticClass.buildSubclass(
+        global.arena.allocator(),
+        layouts.class,
+        fixed_size,
+        mb,
+        &global.subclass_methods,
+    );
+    const sub_class = sub.class();
+    global.subclass_method.setKlass(layouts.method, sub_class);
+
+    // real IsAssignableFrom reads the typeHierarchy we wrote: ours is-a MonoBehaviour, but not the
+    // reverse, since ours is a distinct subclass rather than MonoBehaviour itself.
+    if (!funcs.class_is_assignable_from(mb, sub_class)) return error.SubclassNotAssignable;
+    if (funcs.class_is_assignable_from(sub_class, mb)) return error.SubclassAssignableBackwards;
+
+    const update = funcs.class_get_method_from_name(sub_class, subclass_update_name, 0) orelse return error.SubclassMethodNotFound;
+    if (update != global.subclass_methods[0]) return error.SubclassFoundWrongMethod;
+    const found_inherited = funcs.class_get_method_from_name(sub_class, inherited_name, inherited_params) orelse return error.InheritedMethodNotFound;
+    if (found_inherited != inherited) return error.InheritedMethodWrong;
+
+    global.subclass_class = sub;
+    std.log.info("il2cpp synthetic subclass: MonoBehaviour subclass is assignable, Update resolves, {s} inherited", .{
+        std.mem.span(inherited_name),
+    });
 }
 
 const builtin = @import("builtin");

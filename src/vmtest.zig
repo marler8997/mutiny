@@ -4,6 +4,7 @@ fn installIl2cppFixture(funcs: *const dotnet.Funcs, unity_version: UnityVersion)
     var assembly_count: usize = 0;
     const assemblies = il2cpp.domain_get_assemblies(funcs.domain_get().?, &assembly_count);
     try il2cppclass.selfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
+    try il2cppclass.subclassSelfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
     if (Vm.enable_mutiny_test_class)
         try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts, unity_version, assemblies[0..assembly_count]);
 }

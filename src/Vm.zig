@@ -4117,9 +4117,6 @@ const ErrorFmt = struct {
     }
 };
 
-// temporary while we still support testing via monomock, might remove it
-pub var is_monomock: bool = false;
-
 pub fn runTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try vmtest.run(dotnet_funcs);
     try badCodeTests(dotnet_funcs);
@@ -4293,16 +4290,11 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "@IsNull(0, 0)", "1: expected 1 args but got 2");
     try testBadCode(dotnet_funcs, "@IsNull(0)", "1: expected argument 0 to be an object but got an integer");
     try testBadCode(dotnet_funcs, "@NotNull(0)", "1: expected argument 0 to be an object but got an integer");
-    try testBadCode(dotnet_funcs,
-        \\var mocktest = @TryAssembly("mocktest")
-        \\if (@NotNull(mocktest)) {
-        \\    var null_obj = @Class(mocktest.MockTest).static_field_null
-        \\}
-        \\if (@IsNull(mocktest)) {
-        \\    var null_obj = mocktest
-        \\}
-        \\@Discard(null_obj.foo)
-    , "8: field 'foo' accessed on NULL object");
+    if (haveMutinyTest(dotnet_funcs)) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\@Discard(Statics.NullArray.foo)
+    , "3: field 'foo' accessed on NULL object");
     try testBadCode(dotnet_funcs,
         \\@TryAssembly("does not exist").foo
     , "1: field 'foo' accessed on NULL object");
@@ -4318,7 +4310,6 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var s = String.Empty
         \\set s.Empty = 0
     , "4: cannot access static field 'Empty' on an object, need a class");
-    if (is_monomock) return;
     // il2cpp doesn't have Decimal.Parse
     if (dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
@@ -4550,12 +4541,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@LogClass(Int32)
     );
-    if (is_monomock) try testCode(dotnet_funcs,
-        \\var mscorlib = @Assembly("mscorlib")
-        \\var DateTime = @Class(mscorlib.System.DateTime)
-        \\@Discard(DateTime.get_Now()._dateData)
-    );
-    if (is_monomock) return;
     try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
@@ -4589,19 +4574,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var String = @Class(mscorlib.System.String)
         \\@Assert(@NotNull(String.Empty))
     );
-    try testCode(dotnet_funcs,
-        \\@Assert(@IsNull(@TryAssembly("doesnotexist")))
-        \\var mocktest = @TryAssembly("mocktest")
-        \\if (@IsNull(mocktest)) { @Exit() }
-        \\var MockTest = @Class(mocktest.MockTest)
-        \\@Assert(@NotNull(MockTest.static_field_string))
-        \\@Assert(0 == @IsNull(MockTest.static_field_string))
-        \\@Assert(@IsNull(MockTest.static_field_null))
-        \\@Assert(0 == @NotNull(MockTest.static_field_null))
-        \\var foo = MockTest.static_field_null
-        \\@Assert(@IsNull(foo))
-        \\@Assert(0 == @NotNull(foo))
-    );
+    try testCode(dotnet_funcs, "@Assert(@IsNull(@TryAssembly(\"doesnotexist\")))");
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)

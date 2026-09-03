@@ -9,7 +9,6 @@ fn installIl2cppFixture(funcs: *const dotnet.Funcs) !void {
 
 pub fn run(dotnet_funcs: *const dotnet.Funcs) !void {
     if (dotnet_funcs.kind == .il2cpp) try installIl2cppFixture(dotnet_funcs);
-    if (Vm.is_monomock) return;
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)

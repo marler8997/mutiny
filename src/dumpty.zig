@@ -17,8 +17,6 @@ pub fn main() !void {
             if (!std.mem.startsWith(u8, arg, "-")) {
                 all_args[non_option_count] = arg;
                 non_option_count += 1;
-            } else if (std.mem.eql(u8, arg, "--mock")) {
-                Vm.is_monomock = true;
             } else if (std.mem.eql(u8, arg, "--assembly-path")) {
                 arg_index += 1;
                 if (arg_index == all_args.len) errExit("--assembly-path requires an arg", .{});

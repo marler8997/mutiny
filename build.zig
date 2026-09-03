@@ -198,27 +198,6 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const mock = b.addLibrary(.{
-            .name = "mono-2.0-bdwgc",
-            .linkage = .dynamic,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/monomock.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        if (target.result.os.tag == .windows) {
-            mock.root_module.addImport("win32", win32_mod);
-        }
-        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
-        dotnet_test.step.dependOn(&install_dotnet_test.step);
-        dotnet_test.addArg("--mock");
-        dotnet_test.addArtifactArg(mock);
-        b.step("test-mock", "").dependOn(&dotnet_test.step);
-        test_step.dependOn(&dotnet_test.step);
-    }
-
-    {
         const peak = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PEAK";
         const dotnet_test = b.addRunArtifact(dotnet_test_exe);
         dotnet_test.step.dependOn(&install_dotnet_test.step);

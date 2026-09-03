@@ -229,6 +229,7 @@ pub fn build(b: *std.Build) void {
             "test-peak",
             "run dotnet-test against PEAK's mono runtime",
         ).dependOn(&dotnet_test.step);
+        test_step.dependOn(&dotnet_test.step);
     }
     {
         const schedule1 = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Schedule I";
@@ -241,6 +242,7 @@ pub fn build(b: *std.Build) void {
             "test-schedule1",
             "run dotnet-test against Schedule I's il2cpp runtime",
         ).dependOn(&dotnet_test.step);
+        test_step.dependOn(&dotnet_test.step);
     }
 
     {

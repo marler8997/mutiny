@@ -20,8 +20,8 @@ works.
 ## The loop you will follow
 
 1. `mutiny scan` - lists every process with a mono or il2cpp runtime. Find the game's PID.
-2. `mutiny attach <PID>` - gets Mutiny running in the process. Only needed once per unique PID.
-3. `mutiny run-script <PID> @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
+2. `mutiny <PID> attach` - gets Mutiny running in the process. Only needed once per unique PID.
+3. `mutiny <PID> run-script @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
    lives on disk.
 4. Work out which classes and methods you need (see "Finding the right code").
 5. Write a script file, then run it and read the output.
@@ -42,7 +42,7 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 Which directory to use is decided by *lifetime*, not content - both hold the same language:
 
 - **A question** ("what's the player's health?") goes in `scripts\`. Run it with
-  `mutiny run-script <PID> <name>`; its output comes back on stdout.
+  `mutiny <PID> run-script <name>`; its output comes back on stdout.
 - **An effect that must persist** ("keep me at full health") goes in `mods\`. It starts running by
   itself as soon as you write the file, and re-runs from the top every time you change the text.
 
@@ -50,7 +50,7 @@ Writing a file into `mods\` starts it immediately.
 
 ## Finding the right code
 
-`mutiny run-script <PID> @decomp` gives you tab-separated lines:
+`mutiny <PID> run-script @decomp` gives you tab-separated lines:
 
 ```
 runtime   mono

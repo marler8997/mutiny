@@ -1,14 +1,13 @@
 const usage =
-    \\Usage: mutiny COMMAND [ARGS...]
+    \\Usage:
+    \\  mutiny scan                  every process with a mono/il2cpp runtime, and whether Mutiny is in it.
+    \\  mutiny start EXE [ARGS...]   launch a game with Mutiny.dll injected before it runs.
     \\
-    \\Commands:
-    \\  scan                       every process with a mono/il2cpp runtime, and whether Mutiny is in it.
-    \\  attach PID                 get Mutiny running inside an already-running game.
-    \\  start EXE [ARGS...]        launch a game with Mutiny.dll injected before it runs.
-    \\  run-script PID NAME        run scripts\NAME in an injected game and print its output
-    \\                             an @-prefixed NAME is a builtin, e.g. @assemblies.
-    \\  detach PID                 stop Mutiny.dll's thread, dll remains injected and attach
-    \\                             restarts the thread.
+    \\  mutiny PID attach            get Mutiny running inside an already-running game.
+    \\  mutiny PID detach            stop Mutiny.dll's thread, dll remains injected and attach
+    \\                               restarts the thread.
+    \\  mutiny PID run-script NAME   run scripts\NAME in an injected game and print its output
+    \\                               an @-prefixed NAME is a builtin, e.g. @assemblies.
     \\
 ;
 
@@ -24,12 +23,25 @@ pub fn main() !u8 {
         try std.fs.File.stderr().writeAll(usage);
         return 0xff;
     };
+
+    // Process-targeted commands are "mutiny PID VERB ..." so the PID - the tedious part - stays
+    // at the front and the verb can be swapped by editing the tail. A leading all-digits token is
+    // a PID (the next token is its verb); anything else is a global command. PIDs are numeric and
+    // commands are alphabetic, so the two can't collide.
+    if (std.fmt.parseInt(u32, command, 10)) |pid| {
+        const verb = args.next() orelse errExit(
+            "expected a command after pid {} (attach, detach, run-script)",
+            .{pid},
+        );
+        if (std.mem.eql(u8, verb, "attach")) return cmdAttach(arena, &args, pid);
+        if (std.mem.eql(u8, verb, "detach")) return cmdDetach(&args, pid);
+        if (std.mem.eql(u8, verb, "run-script")) return cmdRunScript(arena, &args, pid);
+        errExit("unknown command '{s}' for pid {} (attach, detach, run-script)", .{ verb, pid });
+    } else |_| {}
+
     if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
-    if (std.mem.eql(u8, command, "attach")) return cmdAttach(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
-    if (std.mem.eql(u8, command, "run-script")) return cmdRunScript(arena, &args);
-    if (std.mem.eql(u8, command, "detach")) return cmdDetach(&args);
-    errExit("unknown command '{s}'", .{command});
+    errExit("unknown command '{s}' (expected scan, start, or a PID)", .{command});
 }
 
 fn cmdScan(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
@@ -37,23 +49,13 @@ fn cmdScan(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     return try cliscan.go(arena);
 }
 
-fn cmdAttach(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
+fn cmdAttach(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32) !u8 {
     var maybe_dll: ?[]const u8 = null;
-    const pid_string = blk: {
-        while (true) {
-            const arg = args.next() orelse errExit("attach requires a PID (run 'mutiny scan' to see what's running)", .{});
-            if (!std.mem.startsWith(u8, arg, "-")) {
-                break :blk arg;
-            } else if (std.mem.eql(u8, arg, "--dll")) {
-                maybe_dll = args.next() orelse errExit("--dll require an argument", .{});
-            } else errExit("unknown cli option '{s}'", .{arg});
-        }
-    };
-    const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit(
-        "invalid pid '{s}'",
-        .{pid_string},
-    );
-    noMoreArgs(args, "attach");
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--dll")) {
+            maybe_dll = args.next() orelse errExit("--dll requires an argument", .{});
+        } else errExit("unknown cli option '{s}'", .{arg});
+    }
     const dll = maybe_dll orelse try findDll(arena);
     try injector.attach(arena, dll, pid);
     return 0;
@@ -107,15 +109,7 @@ fn exists(path: []const u8) !bool {
     };
 }
 
-fn cmdDetach(args: *std.process.ArgIterator) !u8 {
-    const pid_string = args.next() orelse errExit(
-        "detach requires a PID (run 'mutiny scan' to see what's running)",
-        .{},
-    );
-    const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit(
-        "invalid pid '{s}'",
-        .{pid_string},
-    );
+fn cmdDetach(args: *std.process.ArgIterator, pid: u32) !u8 {
     noMoreArgs(args, "detach");
 
     const hwnd = mutinyipc.findWindow(pid) orelse errExit(
@@ -149,15 +143,7 @@ fn cmdDetach(args: *std.process.ArgIterator) !u8 {
 }
 const detach_timeout_ms = 10000;
 
-fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
-    const pid_string = args.next() orelse errExit(
-        "run-script requires a PID (run 'mutiny scan' to see what's running)",
-        .{},
-    );
-    const pid = std.fmt.parseInt(u32, pid_string, 10) catch errExit(
-        "invalid pid '{s}'",
-        .{pid_string},
-    );
+fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32) !u8 {
     const script = args.next() orelse errExit("run-script requires a script name", .{});
     if (std.mem.indexOfAny(u8, script, "\\/:") != null) errExit(
         "'{s}' looks like a path, pass just the name of a file in the scripts directory",

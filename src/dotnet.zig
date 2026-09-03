@@ -93,6 +93,7 @@ pub const Funcs = struct {
     class_get_methods: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Method,
     class_get_method_from_name: *const fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method,
     class_get_field_from_name: *const fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField,
+    class_is_assignable_from: *const fn (klass: *const Class, oklass: *const Class) callconv(.c) bool,
 
     field_get_flags: *const fn (*const ClassField) callconv(.c) ClassFieldFlags,
     field_get_name: *const fn (*const ClassField) callconv(.c) [*:0]const u8,
@@ -140,6 +141,7 @@ pub const Funcs = struct {
             .class_get_methods = try funcs.sharedGet(kind, mod, .class_get_methods, proc_ref),
             .class_get_method_from_name = try funcs.sharedGet(kind, mod, .class_get_method_from_name, proc_ref),
             .class_get_field_from_name = try funcs.sharedGet(kind, mod, .class_get_field_from_name, proc_ref),
+            .class_is_assignable_from = try funcs.sharedGet(kind, mod, .class_is_assignable_from, proc_ref),
             .field_get_flags = try funcs.sharedGet(kind, mod, .field_get_flags, proc_ref),
             .field_get_name = try funcs.sharedGet(kind, mod, .field_get_name, proc_ref),
             .field_get_type = try funcs.sharedGet(kind, mod, .field_get_type, proc_ref),

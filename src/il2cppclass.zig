@@ -4,6 +4,7 @@
 const scan_len = 0x180;
 const ptr_slots = scan_len / @sizeOf(usize);
 const u16_slots = scan_len / @sizeOf(u16);
+const u8_slots = scan_len;
 // no bitfields, so this one is safe to mirror directly
 const FieldInfo = extern struct {
     name: [*:0]const u8,
@@ -17,6 +18,14 @@ pub const Layout = struct {
     field_count: usize,
     methods: usize,
     method_count: usize,
+    // klass->parent, probed against class_get_parent. Class::GetMethodFromName's inherited lookup
+    // walks it, so a synthetic subclass must set it to the base it derives from.
+    parent: usize,
+    // klass->typeHierarchy (Il2CppClass**, [depth-1] == self) and klass->typeHierarchyDepth (u8).
+    // Class::IsAssignableFrom decides subclassing off these two, not parent, so a synthetic
+    // MonoBehaviour must carry its own hierarchy = base's ++ [self] with depth = base + 1.
+    type_hierarchy: usize,
+    type_hierarchy_depth: usize,
     // vtable_count has no public accessor to probe against, so it is inferred: the u16 count
     // block in Il2CppClass is method_count, property_count, field_count, event_count,
     // nested_type_count, vtable_count in every Unity version in libil2cpp (2017.1 through
@@ -50,7 +59,12 @@ fn validate(funcs: *const dotnet.Funcs, class: *const dotnet.Class, l: Layout) b
             std.mem.span(funcs.field_get_name(expect)),
         )) return false;
     }
-    return funcs.class_get_fields(class, &iterator) == null;
+    if (funcs.class_get_fields(class, &iterator) != null) return false;
+    // parent must match the public accessor too (both null for roots like System.Object). The
+    // hierarchy fields are not checked here: this sweep runs over un-initialized classes, whose
+    // typeHierarchy is still null (discoverHierarchy validates those on initialized classes).
+    const parent_slot: *align(1) const ?*const dotnet.Class = @ptrCast(@as([*]const u8, @ptrCast(class)) + l.parent);
+    return parent_slot.* == funcs.class_get_parent(class);
 }
 
 // A synthetic class cannot be found by name: ClassFromName resolves through a metadata type
@@ -141,19 +155,20 @@ pub fn discover(
             if (candidates.resolve() != null and method_candidates.resolve() != null) break :probe;
         }
     }
-    const class_layout = candidates.resolve() orelse {
+    const class_offsets = candidates.resolve() orelse {
         report("fields", &candidates.fields, @sizeOf(usize));
         report("field_count", &candidates.field_count, @sizeOf(u16));
         report("methods", &candidates.methods, @sizeOf(usize));
         report("method_count", &candidates.method_count, @sizeOf(u16));
+        report("parent", &candidates.parent, @sizeOf(usize));
         return error.ClassLayoutNotResolved;
     };
     // the vtable_count inference rides on the u16 count block's order; the probe pins
     // method_count and field_count independently, so their spacing confirms it at runtime
-    if (class_layout.field_count != class_layout.method_count + 4) {
+    if (class_offsets.field_count != class_offsets.method_count + 4) {
         std.log.err("il2cpp field_count (0x{x}) is not method_count (0x{x}) + 4", .{
-            class_layout.field_count,
-            class_layout.method_count,
+            class_offsets.field_count,
+            class_offsets.method_count,
         });
         return error.ClassLayoutInvalid;
     }
@@ -171,6 +186,17 @@ pub fn discover(
         });
         return error.UnsupportedInvokerAbi;
     }
+    const hierarchy_offsets = try discoverHierarchy(funcs, assemblies[0..assembly_count]);
+    const class_layout: Layout = .{
+        .fields = class_offsets.fields,
+        .field_count = class_offsets.field_count,
+        .methods = class_offsets.methods,
+        .method_count = class_offsets.method_count,
+        .parent = class_offsets.parent,
+        .type_hierarchy = hierarchy_offsets.type_hierarchy,
+        .type_hierarchy_depth = hierarchy_offsets.type_hierarchy_depth,
+        .vtable_count = class_offsets.vtable_count,
+    };
     // Only the classes the probe already visited: they are the ones whose metadata is set up,
     // so revisiting them is free, and validating further would pay the setup cost we just
     // avoided. This checks what probing cannot -- that the mirrored FieldInfo stride is right,
@@ -190,12 +216,51 @@ pub fn discover(
             if (validated == visited) break :check;
         }
     }
-    std.log.info("il2cpp layout: probed {} classes and {} methods, validated {} classes", .{
+    std.log.info("il2cpp layout: probed {} classes and {} methods, validated {} classes (parent 0x{x}, typeHierarchy 0x{x}, depth 0x{x})", .{
         candidates.classes_probed,
         method_candidates.methods_probed,
         validated,
+        class_layout.parent,
+        class_layout.type_hierarchy,
+        class_layout.type_hierarchy_depth,
     });
     return .{ .class = class_layout, .method = method_layout };
+}
+// Distinct hierarchy depths so the one-byte depth offset resolves to a single slot; the pointer
+// offset needs only one initialized class (its self-terminated array is a unique signature).
+const hierarchy_probe_classes = [_]struct { ns: [*:0]const u8, name: [*:0]const u8 }{
+    .{ .ns = "System", .name = "Object" }, // depth 1
+    .{ .ns = "System", .name = "String" }, // depth 2: Object <- String
+    .{ .ns = "System", .name = "Int32" }, // depth 3: Object <- ValueType <- Int32
+    .{ .ns = "System", .name = "ArgumentException" }, // depth 4
+};
+// Class::Init runs SetupTypeHierarchy; class_get_method_from_name forces it without running the
+// managed static constructor (runtime_class_init does only the cctor, so it leaves typeHierarchy
+// null). The lookup result is discarded -- initializing the class is the whole point.
+fn forceClassInit(funcs: *const dotnet.Funcs, class: *const dotnet.Class) void {
+    _ = funcs.class_get_method_from_name(class, "", 0);
+}
+// typeHierarchy/typeHierarchyDepth are filled by Class::Init (SetupTypeHierarchy), which the main
+// sweep never triggers, so probe them over framework classes initialized on purpose: forcing their
+// setup is safe, unlike running arbitrary game static constructors.
+fn discoverHierarchy(
+    funcs: *const dotnet.Funcs,
+    assemblies: []const *const dotnet.Assembly,
+) DiscoverError!HierarchyOffsets {
+    var candidates: HierarchyCandidates = .{};
+    var probed: usize = 0;
+    for (hierarchy_probe_classes) |spec| {
+        const class = findClass(funcs, assemblies, spec.ns, spec.name) orelse continue;
+        forceClassInit(funcs, class);
+        probeHierarchy(funcs, class, &candidates);
+        probed += 1;
+    }
+    return candidates.resolve() orelse {
+        std.log.err("il2cpp type hierarchy layout unresolved after {} classes", .{probed});
+        report("type_hierarchy", &candidates.type_hierarchy, @sizeOf(usize));
+        report("type_hierarchy_depth", &candidates.type_hierarchy_depth, 1);
+        return error.ClassLayoutNotResolved;
+    };
 }
 fn count(flags: []const bool) usize {
     var total: usize = 0;
@@ -222,23 +287,50 @@ fn report(name: []const u8, flags: []const bool, scale: usize) void {
         if (f) std.log.err("    candidate 0x{x}", .{i * scale});
     }
 }
+// The offsets the un-initialized sweep can pin. typeHierarchy/typeHierarchyDepth are not here: they
+// are populated only by Class::Init, which the sweep deliberately never forces, so they get their
+// own phase (discoverHierarchy) over a few classes initialized on purpose.
+const ClassOffsets = struct {
+    fields: usize,
+    field_count: usize,
+    methods: usize,
+    method_count: usize,
+    parent: usize,
+    vtable_count: usize,
+};
 const Candidates = struct {
     fields: [ptr_slots]bool = @splat(true),
     field_count: [u16_slots]bool = @splat(true),
     methods: [ptr_slots]bool = @splat(true),
     method_count: [u16_slots]bool = @splat(true),
+    parent: [ptr_slots]bool = @splat(true),
     classes_probed: u32 = 0,
     pub fn init() Candidates {
         return .{};
     }
-    pub fn resolve(c: *const Candidates) ?Layout {
+    pub fn resolve(c: *const Candidates) ?ClassOffsets {
         const method_count = only(&c.method_count, @sizeOf(u16)) orelse return null;
         return .{
             .fields = only(&c.fields, @sizeOf(usize)) orelse return null,
             .field_count = only(&c.field_count, @sizeOf(u16)) orelse return null,
             .methods = only(&c.methods, @sizeOf(usize)) orelse return null,
             .method_count = method_count,
+            .parent = only(&c.parent, @sizeOf(usize)) orelse return null,
             .vtable_count = method_count + 10,
+        };
+    }
+};
+const HierarchyOffsets = struct {
+    type_hierarchy: usize,
+    type_hierarchy_depth: usize,
+};
+const HierarchyCandidates = struct {
+    type_hierarchy: [ptr_slots]bool = @splat(true),
+    type_hierarchy_depth: [u8_slots]bool = @splat(true),
+    pub fn resolve(c: *const HierarchyCandidates) ?HierarchyOffsets {
+        return .{
+            .type_hierarchy = only(&c.type_hierarchy, @sizeOf(usize)) orelse return null,
+            .type_hierarchy_depth = only(&c.type_hierarchy_depth, 1) orelse return null,
         };
     }
 };
@@ -467,6 +559,10 @@ fn readU16(class: *const dotnet.Class, slot: usize) u16 {
     const p: *align(1) const u16 = @ptrCast(base + slot * @sizeOf(u16));
     return p.*;
 }
+fn readU8(class: *const dotnet.Class, slot: usize) u8 {
+    const base: [*]const u8 = @ptrCast(class);
+    return base[slot];
+}
 // Narrows `fields` and `field_count` using one class. Read-only: no static constructor is
 // run and no guessed pointer is dereferenced, so this is safe to sweep over every class in a
 // game. Classes with differing field counts are what separate field_count from the
@@ -476,6 +572,7 @@ fn probeFields(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candi
     // smaller than scan_len and the sweep would read past its allocation.
     if (!readable(@intFromPtr(class), scan_len)) return;
     probeMethodArray(funcs, class, c);
+    probeParent(funcs, class, c);
 
     var iterator: ?*anyopaque = null;
     const first_field = funcs.class_get_fields(class, &iterator) orelse return;
@@ -488,6 +585,44 @@ fn probeFields(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candi
         if (alive.*) alive.* = readU16(class, slot) == field_total;
     }
     c.classes_probed += 1;
+}
+// Narrows `parent` using one class. class_get_parent returns klass->parent directly, so the slot
+// holds it with no extra dereference. Read-only: compares a header slot to a known pointer, never
+// dereferences a guessed one. Classes with differing parents are what separate `parent` from the
+// neighbouring castClass/element_class slots, which alias self on an ordinary class.
+fn probeParent(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candidates) void {
+    const parent = funcs.class_get_parent(class) orelse return; // null for System.Object and interfaces
+    for (&c.parent, 0..) |*alive, slot| {
+        if (alive.*) alive.* = readPtr(class, slot) == @intFromPtr(parent);
+    }
+}
+// depth including self: 1 for a root like System.Object, 4 for MonoBehaviour. Derived from the
+// public parent walk, so it needs no offset of its own to compute the expected value to probe for.
+fn computeDepth(funcs: *const dotnet.Funcs, class: *const dotnet.Class) u8 {
+    var depth: usize = 1;
+    var cur = funcs.class_get_parent(class);
+    while (cur) |parent| : (cur = funcs.class_get_parent(parent)) depth += 1;
+    return @intCast(depth); // real hierarchies are a handful deep; a wild value panics loudly
+}
+// Narrows `type_hierarchy` and `type_hierarchy_depth` using one class. The depth is probed against
+// the computed value; the hierarchy pointer against its self-referential signature (the array's
+// last live entry is the class itself), which no other header pointer satisfies. Read-only apart
+// from dereferencing the hierarchy candidate, which is bounds-checked first.
+fn probeHierarchy(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *HierarchyCandidates) void {
+    const depth = computeDepth(funcs, class);
+    for (&c.type_hierarchy_depth, 0..) |*alive, slot| {
+        if (alive.*) alive.* = readU8(class, slot) == depth;
+    }
+    for (&c.type_hierarchy, 0..) |*alive, slot| {
+        if (!alive.*) continue;
+        const array = readPtr(class, slot);
+        if (!readable(array, @as(usize, depth) * @sizeOf(usize))) {
+            alive.* = false;
+            continue;
+        }
+        const entry: [*]align(1) const usize = @ptrFromInt(array);
+        alive.* = entry[depth - 1] == @intFromPtr(class);
+    }
 }
 // klass->methods is `const MethodInfo**`, an array of pointers, so unlike `fields` the slot
 // holds the array rather than the first entry and needs one more dereference.
@@ -551,6 +686,7 @@ fn selftestInvoke(
 pub const SelfTestError = error{
     UnsupportedUnityVersion,
     MissingClass,
+    AssignableFromWrong,
     FixedSizeInvalid,
     BasePolluted,
     OutOfMemory,
@@ -605,6 +741,17 @@ pub fn selfTest(
         std.log.err("il2cpp synthetic class: no System.Int32 for the return type", .{});
         return error.MissingClass;
     };
+
+    // class_is_assignable_from is the oracle the synthetic-subclass work leans on (it reads the
+    // typeHierarchy this file discovers), so sanity-check the binding against a known relationship:
+    // Int32 is-a Object, not the reverse. IsAssignableFrom runs Class::Init itself, no init needed.
+    if (!funcs.class_is_assignable_from(base, int32) or
+        funcs.class_is_assignable_from(int32, base) or
+        !funcs.class_is_assignable_from(base, base))
+    {
+        std.log.err("il2cpp class_is_assignable_from gave a wrong answer on System.Object/System.Int32", .{});
+        return error.AssignableFromWrong;
+    }
 
     // System.Object may only be lazily set up after il2cpp_init. runtime_class_init runs its cctor,
     // which forces Class::Init transitively, so the copy inherits initialized == 1; otherwise it

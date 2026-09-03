@@ -413,6 +413,8 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     var last_update_mods_error: ?UpdateModsError = null;
 
     main_loop: while (true) {
+        mainthread.update();
+
         {
             var msg: win32.MSG = undefined;
             while (0 != win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE)) {
@@ -1423,6 +1425,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
 const appdata = @import("appdata.zig");
+const mainthread = @import("mainthread.zig");
 const Mutex = @import("Mutex.zig");
 const mutinyipc = @import("mutinyipc.zig");
 const Vm = @import("Vm.zig");

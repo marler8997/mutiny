@@ -4520,12 +4520,13 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\
     );
     // il2cpp doesn't have Console.Beep
+    // il2cpp keeps System.Console but strips Beep and WriteLine in our test games; mono-only
+    // until we can probe method existence
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
         \\Console.Beep()
     );
-    // il2cpp doesn't have Console.WriteLine with no args
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Console = @Class(mscorlib.System.Console)
@@ -4650,6 +4651,8 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(0 == @IsNull(Int32))
         \\@Assert(Int32.MaxValue == 2147483647)
     );
+    // il2cpp keeps System.DateTime but strips get_Now in our test games; mono-only until we
+    // can probe method existence
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
@@ -4838,9 +4841,10 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     //       Double may not exist in an arbitrary GameAssembly.dll. Replace these mscorlib
     //       fixtures with our own managed test library so we get every type and method the tests
     //       need, on both runtimes, instead of hunting for something a game happens to keep.
-    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
-        \\var Math = @Class(mscorlib.System.Math)
+        \\var Math = @TryClass(mscorlib.System.Math)
+        \\if (@IsNull(Math)) { @Exit() }
         \\@Log("Sqrt(4) = ", Math.Sqrt(4))
         \\@Log("Sqrt(2) = ", Math.Sqrt(2))
         \\@Assert(Math.Sqrt(4) == 2)
@@ -4851,6 +4855,8 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(Math.Sqrt(2) != 1)
         \\@Assert(Math.Sqrt(Math.Sqrt(16)) == 2)
     );
+    // il2cpp keeps System.Single/System.Double but strips IsNaN in our test games; mono-only
+    // until we can probe method existence
     if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Math = @Class(mscorlib.System.Math)
@@ -4872,7 +4878,8 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\}
         \\@Assert(x == 0)
     );
-    // il2cpp doesn't have Decimal.Parse
+    // il2cpp keeps System.Decimal but strips Parse in our test games; mono-only until we can
+    // probe method existence
     if (dotnet_funcs.kind != .il2cpp) try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Decimal = @Class(mscorlib.System.Decimal)

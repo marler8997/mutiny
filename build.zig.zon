@@ -12,6 +12,15 @@
             .url = "git+https://github.com/marler8997/zin#d3e230690f09debdb99dffe4586ad19f9dfb4716",
             .hash = "zin-0.0.0-W7QDx6kKAwCVg-wWMO4FdpvZMH66NJpc9wFDdxp5c8E2",
         },
+        // Zydis (x86-64 decoder) for the il2cpp detour
+        .zydis = .{
+            .url = "git+https://github.com/zyantific/zydis#a95bb71013436547f689fc0b380f48edf663066e",
+            .hash = "N-V-__8AAFgeMgGxaOteV74jAgUNQHbQdiIPS_zI-tgU0JTa",
+        },
+        .zycore = .{
+            .url = "git+https://github.com/zyantific/zycore-c#c1fa01cea7fd457dcec468104d477c8b0ca675f7",
+            .hash = "N-V-__8AAKTLBwDJqBaCpfJE7euS8iny9atzzOG_8eyyObPP",
+        },
     },
     .paths = .{""},
 }

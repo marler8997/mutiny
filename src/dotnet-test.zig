@@ -131,6 +131,12 @@ pub fn main() !void {
 
             std.log.info("il2cpp_init...", .{});
             init_funcs.init("dotnet-test");
+            const from_il2cpp_type = detour.findFunction(
+                module,
+                "il2cpp_class_from_il2cpp_type",
+            ) catch |e| errExit("locate Class::FromIl2CppType: {s}", .{@errorName(e)});
+
+            std.log.info("detour: Class::FromIl2CppType resolved to 0x{x}", .{from_il2cpp_type});
             break :blk dotnet_funcs.get_root_domain() orelse errExit(
                 "mono_get_root_domain returned NULL",
                 .{},
@@ -248,6 +254,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 const std = @import("std");
+const detour = @import("detour.zig");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
 const UnityVersion = @import("UnityVersion.zig");

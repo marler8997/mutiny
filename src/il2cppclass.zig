@@ -67,34 +67,6 @@ fn validate(funcs: *const dotnet.Funcs, class: *const dotnet.Class, l: Layout) b
     return parent_slot.* == funcs.class_get_parent(class);
 }
 
-// A synthetic class cannot be found by name: ClassFromName resolves through a metadata type
-// handle that indexes the metadata cache's type table, which we cannot extend. So methods are
-// appended to a class that is already resolvable.
-pub fn appendMethods(
-    l: Layout,
-    // performs a single allocation, ok to use std.heap.page_allocator
-    allocator: std.mem.Allocator,
-    class: *const dotnet.Class,
-    new_methods: []const *const dotnet.Method,
-) error{ OutOfMemory, TooManyMethods }!void {
-    const base: [*]u8 = @ptrCast(@constCast(class));
-    const methods: *align(1) [*]const *const dotnet.Method = @ptrCast(base + l.methods);
-    const method_count: *align(1) u16 = @ptrCast(base + l.method_count);
-
-    const existing = method_count.*;
-    // becomes the class's method array, so it is never freed
-    const grown = try allocator.alloc(*const dotnet.Method, existing + new_methods.len);
-    @memcpy(grown[0..existing], methods.*[0..existing]);
-    @memcpy(grown[existing..], new_methods);
-
-    // Class::GetMethods recomputes its end bound from these fields on every step, so a walk
-    // running concurrently compares a pointer into the old array against a bound derived from
-    // the new one and can run off the end. There is no store order that fixes that; callers
-    // must not append while another thread may be enumerating this class's methods.
-    methods.* = grown.ptr;
-    method_count.* = std.math.cast(u16, grown.len) orelse return error.TooManyMethods;
-}
-
 pub const Layouts = struct {
     class: Layout,
     method: MethodLayout,
@@ -504,13 +476,13 @@ pub fn classFixedSize(unity_version: UnityVersion) error{UnsupportedUnityVersion
     return class_fixed_size;
 }
 
-// A class we own, so a synthetic method can be found off it without mutating a real class (which
-// is what appendMethods does). It copies an initialized base class's whole allocation and
-// overrides the method table, so instance_size, gc_desc, init flags and the vtable are inherited
-// correct-by-construction. typeMetadataHandle is left as the base's: copying an already-initialized
-// class means Class::Init never re-runs to read it; a MonoBehaviour Unity inspects will need it
-// NULLed, a later stage. The copy also keeps the base's name and type identity, so class_get_type
-// on it resolves back to the base and logs will name it after the base.
+// A class we own, so a synthetic method can be found off it without mutating a real class. It copies
+// an initialized base class's whole allocation and overrides the method table, so instance_size,
+// gc_desc, init flags and the vtable are inherited correct-by-construction. typeMetadataHandle is left
+// as the base's, which is safe because copying an already-initialized class means Class::Init never
+// re-runs to read it. The copy keeps the base's name and type identity, so class_get_type resolves back
+// to the base -- a synthetic subclass gets its own identity from the FromIl2CppType hook + sentinel,
+// not from the copy.
 pub const SyntheticClass = struct {
     // the runtime keeps pointers into this (obj->klass), so it outlives every instance; never freed
     storage: []align(@alignOf(usize)) u8,

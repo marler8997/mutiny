@@ -1,9 +1,3 @@
-const builtin = @import("builtin");
-const std = @import("std");
-const zin = @import("zin");
-const win32 = zin.platform.win32;
-const appdata = @import("appdata.zig");
-
 pub const zin_config: zin.Config = .{
     .StaticWindowId = StaticWindowId,
 };
@@ -223,3 +217,11 @@ fn getIcons(dpi_x: u32, dpi_y: u32) Icons {
     }
     return .{ .small = .none, .large = .none };
 }
+
+const builtin = @import("builtin");
+const std = @import("std");
+const mutiny = @import("mutiny");
+const appdata = mutiny.appdata;
+
+const zin = @import("zin");
+const win32 = zin.platform.win32;

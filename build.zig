@@ -182,15 +182,16 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "Mutiny",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/gui.zig"),
+                .root_source_file = b.path("gui/gui.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
+                    .{ .name = "mutiny", .module = mutiny_mod.sanitized },
                     .{ .name = "zin", .module = zin_mod },
                     .{ .name = "win32", .module = win32_mod },
                 },
             }),
-            .win32_manifest = b.path("src/win32dpiaware.manifest"),
+            .win32_manifest = b.path("gui/win32dpiaware.manifest"),
         });
         const install = b.addInstallArtifact(exe, .{
             .dest_dir = .{ .override = .{ .custom = "appdata" } },
@@ -198,7 +199,7 @@ pub fn build(b: *std.Build) void {
         b.step("install-gui", "").dependOn(&install.step);
         b.getInstallStep().dependOn(&install.step);
         exe.addWin32ResourceFile(.{
-            .file = b.path("src/mutiny.rc"),
+            .file = b.path("gui/mutiny.rc"),
         });
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);

@@ -173,9 +173,9 @@ fn testDetour(funcs: *const dotnet.Funcs, module: dynlib.Module, domain: *const 
         @ptrCast(dynlib.getProc(module, "il2cpp_class_from_il2cpp_type") catch unreachable);
     const before = from_type(object_type);
 
-    const installed = detour.install(target, @intFromPtr(&fromIl2CppTypeHook)) catch |e|
+    const installed = detour.install(target, @intFromPtr(&il2cppclass.fromIl2CppTypeHook)) catch |e|
         errExit("detour install: {s}", .{@errorName(e)});
-    fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
+    il2cppclass.global.fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
 
     const after = from_type(object_type);
     if (after != before or after != object)
@@ -196,12 +196,6 @@ fn findClassByName(
         if (funcs.class_from_name(image, namespace, name)) |class| return class;
     }
     return null;
-}
-
-const FromIl2CppType = *const fn (*const dotnet.Type, bool) callconv(.c) ?*const dotnet.Class;
-var fromIl2CppTypeOrig: FromIl2CppType = undefined;
-fn fromIl2CppTypeHook(t: *const dotnet.Type, throw_on_error: bool) callconv(.c) ?*const dotnet.Class {
-    return fromIl2CppTypeOrig(t, throw_on_error);
 }
 
 const Il2cppInitFuncs = struct {
@@ -298,6 +292,7 @@ const std = @import("std");
 const detour = @import("detour.zig");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
+const il2cppclass = @import("il2cppclass.zig");
 const mono_funcs = @import("dotnetload.zig").template(MonoInitFuncs);
 const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppInitFuncs);
 

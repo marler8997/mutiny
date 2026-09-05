@@ -692,7 +692,7 @@ fn findClass(
 // re-attaching thread recover the class rather than build a second one the GC would then see twice.
 const selftest_method_name = "MutinySentinel";
 const selftest_sentinel: i32 = 0x5eed;
-const global = struct {
+pub const global = struct {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 
     var selftest_method: SyntheticMethod = undefined;
@@ -702,6 +702,19 @@ const global = struct {
     var subclass_method: SyntheticMethod = undefined;
     var subclass_methods: [1]*const dotnet.Method = undefined;
     var subclass_class: ?SyntheticClass = null;
+
+    pub var fromIl2CppTypeOrig: FromIl2CppType = undefined;
+    var injected: ValuePerEnum(InjectedClassId, ?*const dotnet.Class) = .{
+        .test_class = null,
+    };
+    fn getInjectedRef(class_id: InjectedClassId) *?*const dotnet.Class {
+        return switch (class_id) {
+            inline else => |ct| &@field(injected, @tagName(ct)),
+        };
+    }
+    fn getInjected(class_id: InjectedClassId) ?*const dotnet.Class {
+        return getInjectedRef(class_id).*;
+    }
 };
 
 fn selftestPointer() callconv(.c) void {
@@ -743,6 +756,8 @@ pub const SelfTestError = error{
     SubclassFoundWrongMethod,
     InheritedMethodNotFound,
     InheritedMethodWrong,
+    IdentityBaselineNotBase,
+    IdentityNotHooked,
 };
 
 // Validates class_fixed_size on this process, since a wrong header size is the one layout error the
@@ -869,6 +884,46 @@ fn subclassUpdateInvoke(
     _: ?*anyopaque, // void return, nothing to write
 ) callconv(.c) void {}
 
+// The detour installs fromIl2CppTypeHook over the internal Class::FromIl2CppType. An injected class
+// has no slot in the baked metadata table, so class_from_type(class_get_type(ours)) resolves to the
+// base. We instead write a negative sentinel into our byval_arg.data (the Il2CppType class_get_type
+// returns) and map it here; the hook returns ours when it sees data < 0, and passes everything else
+// through. This is the identity AddComponent(Il2CppType.Of<ours>) needs, the same way Il2CppInterop
+// does it.
+// Mutiny injects one synthetic MonoBehaviour; its identity is this sentinel, written into
+// byval_arg.data and mapped back by the hook. A second injected type adds its own sentinel and arm.
+
+const InjectedClassId = enum(isize) {
+    test_class = -1,
+    pub fn fromType(t: *const dotnet.Type) ?InjectedClassId {
+        const data: *const isize = @ptrCast(@alignCast(t)); // Il2CppType.data is the first field
+        return std.enums.fromInt(InjectedClassId, data.*);
+    }
+};
+
+pub const FromIl2CppType = *const fn (*const dotnet.Type, bool) callconv(.c) ?*const dotnet.Class;
+
+pub fn fromIl2CppTypeHook(t: *const dotnet.Type, throw_on_error: bool) callconv(.c) ?*const dotnet.Class {
+    return if (InjectedClassId.fromType(t)) |class_id|
+        global.getInjected(class_id)
+    else
+        global.fromIl2CppTypeOrig(t, throw_on_error);
+}
+
+// this_arg.data wants the same write for the real AddComponent icall, but it has no public accessor;
+// byval_arg is what class_get_type / Il2CppType.Of return and all the identity check needs.
+fn registerInjected(
+    id: InjectedClassId,
+    class: *const dotnet.Class,
+    funcs: *const dotnet.Funcs,
+) void {
+    const ref = global.getInjectedRef(id);
+    std.debug.assert(ref.* == null);
+    ref.* = class;
+    const byval: *isize = @ptrCast(@alignCast(@constCast(funcs.class_get_type(class))));
+    byval.* = @bitCast(@intFromEnum(id));
+}
+
 // Derives a subclass of UnityEngine.MonoBehaviour and checks the runtime agrees via the public
 // IsAssignableFrom, exercising the discovered typeHierarchy offsets through real il2cpp code.
 pub fn subclassSelfTest(
@@ -936,14 +991,24 @@ pub fn subclassSelfTest(
     const found_inherited = funcs.class_get_method_from_name(sub_class, inherited_name, inherited_params) orelse return error.InheritedMethodNotFound;
     if (found_inherited != inherited) return error.InheritedMethodWrong;
 
+    // Identity through the installed hook: byval_arg still holds MonoBehaviour's copied typeHandle, so
+    // class_from_type resolves to the base; after the sentinel write it resolves to ours.
+    const sub_type = funcs.class_get_type(sub_class);
+    if (funcs.class_from_type(sub_type) != mb) return error.IdentityBaselineNotBase;
+    registerInjected(.test_class, sub_class, funcs);
+    if (funcs.class_from_type(sub_type) != sub_class) return error.IdentityNotHooked;
+
     global.subclass_class = sub;
-    std.log.info("il2cpp synthetic subclass: MonoBehaviour subclass is assignable, Update resolves, {s} inherited", .{
+    std.log.info("il2cpp synthetic subclass: assignable, Update resolves, {s} inherited", .{
         std.mem.span(inherited_name),
     });
 }
 
 const builtin = @import("builtin");
 const std = @import("std");
-const dotnet = @import("dotnet.zig");
 const win32 = @import("win32").everything;
+
+const dotnet = @import("dotnet.zig");
+
 const UnityVersion = @import("UnityVersion.zig");
+const ValuePerEnum = @import("valueperenum.zig").ValuePerEnum;

@@ -1,4 +1,6 @@
+pub const BoundedArray = @import("bounded_array.zig").BoundedArray;
 pub const Mutex = @import("Mutex.zig");
+pub const Pool = @import("pool.zig").Pool;
 pub const UnityVersion = @import("UnityVersion.zig");
 pub const Vm = @import("Vm.zig");
 

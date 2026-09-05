@@ -1,8 +1,8 @@
 # Driving Mutiny
 
-You are being asked to modify a running Unity game using **Mutiny**, a scriptable DLL injector. A player will ask for something like "make me invincible", "infinite stamina", or "no fall damage". Your job is to find the right classes in the game, write a Mutiny script, run it, and report what happened.
+You are being asked to modify a running Unity game using **Mutiny**, a scriptable DLL that is injected into the game process. You may be asked for something like "make me invincible", "give me infinite stamina", or "remove fall damage". Your job is to introspect on the game assemblies, types, methods and fields in the game to write Mutiny mods and scripts to accomplish the task.
 
-**The game is a real program someone is playing. Crashing it loses their progress.** Most of this file is about not doing that. Read "Rules that prevent crashes" before writing any script.
+The number one rule is, DON'T CRASH THE GAME! The game is a real program someone is playing. Crashing it loses their progress. Read "Rules that prevent crashes" before writing any script.
 
 ## Running the CLI
 
@@ -22,7 +22,6 @@ works.
 1. `mutiny scan` - lists every process with a mono or il2cpp runtime. Find the game's PID.
 2. `mutiny <PID> attach` - gets Mutiny running in the process. Only needed once per unique PID.
 3. `mutiny <PID> run-script @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
-   lives on disk.
 4. Work out which classes and methods you need (see "Finding the right code").
 5. Write a script file, then run it and read the output.
 
@@ -208,19 +207,14 @@ These are not style advice. Each one is a way to take the game down.
    this is a safe thing to hit and correct. `Heal(100)` and `Heal(87.5)` on a `Heal(float)` both
    work.
 
-3. **Scripts run on Mutiny's own thread, not Unity's main thread.** Most Unity engine APIs must be
-   called from the main thread and will fault elsewhere. Prefer plain field reads/writes and
-   game-logic methods; avoid anything that creates GameObjects, touches rendering, loads scenes,
-   or calls into `UnityEngine.*`.
-
-4. **Null-check before dereferencing.** A player object may not exist yet at the moment your
+3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
    script runs. Use `@IsNull` / `@NotNull` and `yield` in a loop until it appears, as in the
    example below.
 
-5. **Prefer reading before writing.** Read a value and `@Log` it first to confirm you have the
+4. **Prefer reading before writing.** Read a value and `@Log` it first to confirm you have the
    right object and the units you expect, then write.
 
-6. **Set a value, don't accumulate one.** Read the current value, compute the difference, and
+5. **Set a value, don't accumulate one.** Read the current value, compute the difference, and
    apply that - a mod re-runs whenever its file changes, and repeated addition compounds.
 
 ## Tell the player about these

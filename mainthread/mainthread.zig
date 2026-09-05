@@ -1,26 +1,58 @@
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// TODO: one or more of these should be removed once we move
-//       all relevant functionality out of mutinydll into this module
 pub const appdata = mutiny.appdata;
-pub const detour = mutiny.detour;
-pub const dotnet = mutiny.dotnet;
-pub const dynlib = mutiny.dynlib;
-pub const il2cppclass = mutiny.il2cppclass;
 pub const logfile = mutiny.logfile;
 pub const mutinyipc = mutiny.mutinyipc;
 
+pub const BoundedArray = mutiny.BoundedArray;
+pub const ModNameSlice = @import("ModNameSlice.zig");
 pub const Mutex = mutiny.Mutex;
-pub const UnityVersion = mutiny.UnityVersion;
-pub const Vm = mutiny.Vm;
+pub const Pool = mutiny.Pool;
+
+pub const mutinyThreadQueueModUpdate = mods.mutinyThreadQueueUpdate;
+pub const mutinyThreadQueueModRemove = mods.mutinyThreadQueueRemove;
+pub const mutinyThreadQueueScript = scripts.mutinyThreadQueue;
+pub const ScriptRequest = scripts.Request;
 
 const global = struct {
+    var shared: struct {
+        mutex: Mutex = .{},
+        // uncomment if/when we need to send messages back to the mutiny thread
+        // mutiny_hwnd: ?win32.HWND = null,
+        init_state: InitState = .idle,
+    } = .{};
     var state: State = .{ .initial = .{} };
     var wnd_msg: u32 = undefined;
+    var hwnd: win32.HWND = undefined;
     var subclass: struct {
         mutex: std.Thread.Mutex = .{},
         wndproc: win32.WNDPROC = undefined,
     } = .{};
+
+    var post_retry_enabled: std.atomic.Value(bool) = .init(false);
+    var run_mods_error: ?RunModsError = null;
+    var dotnet_funcs_store: dotnet.Funcs = undefined;
+    var dotnet_funcs: ?*dotnet.Funcs = null;
+    var wnd_proc_state: enum { allowed, inside_run } = .allowed;
+    var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
+
+const InitState = union(enum) {
+    idle,
+    initializing,
+    complete,
+};
+
+// pub fn setHwnd(hwnd: win32.HWND) void {
+//     global.shared.mutex.lock();
+//     defer global.shared.mutex.unlock();
+//     std.debug.assert(global.shared.mutiny_hwnd == null);
+//     global.shared.mutiny_hwnd = hwnd;
+// }
+// pub fn unsetHwnd(hwnd: win32.HWND) void {
+//     global.shared.mutex.lock();
+//     defer global.shared.mutex.unlock();
+//     std.debug.assert(global.shared.mutiny_hwnd == hwnd);
+//     global.shared.mutiny_hwnd = null;
+// }
 
 const State = union(enum) {
     initial: struct {
@@ -31,14 +63,9 @@ const State = union(enum) {
         candidate_count: ?u32 = null,
     },
     subclass: struct {
-        hwnd: win32.HWND,
-        tid: u32,
         set_wndproc_error: ?win32.WIN32_ERROR = null,
     },
-    installed: struct {
-        hwnd: win32.HWND,
-        tid: u32,
-    },
+    ready,
 };
 
 fn coalescedLog(
@@ -49,18 +76,13 @@ fn coalescedLog(
     comptime fmt: []const u8,
     args: anytype,
 ) void {
-    if (eql(T, &new_value, store)) return;
+    if (std.meta.eql(new_value, store.*)) return;
     switch (kind) {
         .err => std.log.err(fmt, args),
         .info => std.log.info(fmt, args),
     }
     store.* = new_value;
-    std.debug.assert(eql(T, &new_value, store));
-}
-
-fn eql(comptime T: type, a: *const T, b: *const T) bool {
-    if (T == ?win32.WIN32_ERROR or T == ?u32) return a.* == b.*;
-    @compileError("todo: implement eql for " ++ @typeName(T));
+    std.debug.assert(std.meta.eql(new_value, store.*));
 }
 
 const PostActionArgs = if (builtin.os.tag == .windows) struct {
@@ -68,34 +90,99 @@ const PostActionArgs = if (builtin.os.tag == .windows) struct {
     lparam: win32.LPARAM,
 } else struct {};
 
-pub const PostAction = union(enum) {
+pub const PostResult = union(enum) {
+    posted,
+    not_ready,
+    post_error: PostError,
+};
+
+pub fn mutinyThreadOnTick(last_post_result: *PostResult) void {
+    switch (last_post_result.*) {
+        .posted => {},
+        .not_ready, .post_error => {
+            mutinyThreadPostRun(last_post_result);
+            return;
+        },
+    }
+    if (global.post_retry_enabled.load(.monotonic)) {
+        mutinyThreadPostRun(last_post_result);
+    }
+}
+pub fn mutinyThreadPostRun(last_post_result: *PostResult) void {
+    const new_result: PostResult = blk: switch (global.state) {
+        .initial, .find_window, .subclass => .not_ready,
+        .ready => {
+            const target: Target = .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } };
+            var err: PostError = undefined;
+            target.post(.run, &err) catch break :blk .{ .post_error = err };
+            break :blk .posted;
+        },
+    };
+
+    // sanity check
+    switch (new_result) {
+        .posted, .not_ready => {},
+        .post_error => |err| std.debug.assert(err.eql(err)),
+    }
+
+    switch (last_post_result.*) {
+        .posted => switch (new_result) {
+            .posted => {},
+            .not_ready => std.log.info("can't post run to main thread, not ready yet", .{}),
+            .post_error => |err| std.log.err("post run failed, error={f}", .{err}),
+        },
+        .not_ready => switch (new_result) {
+            .posted => std.log.info("main thread now ready, run posted", .{}),
+            .not_ready => {}, // already logged
+            .post_error => |err| std.log.err("post run failed, error={f}", .{err}),
+        },
+        .post_error => |last_error| switch (new_result) {
+            .posted => std.log.info("main thread post recovered from error", .{}),
+            .not_ready => std.log.info("post error gone, but main thread still not ready", .{}),
+            .post_error => |err| if (!last_error.eql(err)) std.log.err("new post run error: {f}", .{err}),
+        },
+    }
+    last_post_result.* = new_result;
+}
+
+const PostAction = union(enum) {
+    run,
     subclass_self_test,
     pub fn deserialize(args: PostActionArgs) ?PostAction {
         if (builtin.os.tag == .windows) {
             return switch (args.wparam) {
-                1 => return .subclass_self_test,
+                1 => return .run,
+                2 => return .subclass_self_test,
                 else => null,
             };
         } else @panic("todo");
     }
     pub fn serialize(action: PostAction) PostActionArgs {
         if (builtin.os.tag == .windows) return switch (action) {
-            .subclass_self_test => .{ .wparam = 1, .lparam = undefined },
+            .run => .{ .wparam = 1, .lparam = undefined },
+            .subclass_self_test => .{ .wparam = 2, .lparam = undefined },
         } else @panic("todo");
     }
 };
 
 pub const PostError = struct {
     data: if (builtin.os.tag == .windows) win32.WIN32_ERROR else void,
-    pub fn format(e: PostError, writer: *std.Io.Writer) error{WriteFailed}!void {
+    pub fn eql(err: PostError, other: PostError) bool {
         if (builtin.os.tag == .windows) {
-            try writer.print("{f}", .{e.data});
+            return err.data == other.data;
+        } else {
+            @compileError("todo");
+        }
+    }
+    pub fn format(err: PostError, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (builtin.os.tag == .windows) {
+            try writer.print("{f}", .{err.data});
         } else {
             @compileError("todo");
         }
     }
 };
-pub const Target = struct {
+const Target = struct {
     data: if (builtin.os.tag == .windows) struct {
         hwnd: win32.HWND,
         msg: u32,
@@ -113,18 +200,13 @@ pub const Target = struct {
         }
     }
 };
-pub fn getTarget() ?Target {
-    return switch (global.state) {
-        .initial,
-        .find_window,
-        .subclass,
-        => null,
-        .installed => |*state| .{ .data = .{ .hwnd = state.hwnd, .msg = global.wnd_msg } },
-    };
+
+pub fn mutinyThreadDetach() bool {
+    std.log.err("TODO: implement mainthread.mutinyThreadDetach", .{});
+    return false;
 }
 
-// should be called by the mutiny thread
-pub fn update() enum { not_newly_installed, newly_installed } {
+pub fn mutinyThreadInitUpdate() enum { keep_calling, done } {
     state: switch (global.state) {
         .initial => |*state| {
             global.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
@@ -135,10 +217,10 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     &state.register_error,
                     err,
                     .err,
-                    "RegiserWindowMessage failed, error={f}",
+                    "RegisterWindowMessage failed, error={f}",
                     .{err},
                 );
-                return .not_newly_installed;
+                return .keep_calling;
             }
             global.state = .{ .find_window = .{} };
             continue :state global.state;
@@ -155,7 +237,7 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     "EnumWindows failed, error={f}",
                     .{err},
                 );
-                return .not_newly_installed;
+                return .keep_calling;
             }
 
             if (ctx.candidate_count != 1) {
@@ -167,11 +249,12 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     "{} main unity window candidates",
                     .{ctx.candidate_count},
                 );
-                return .not_newly_installed;
+                return .keep_calling;
             }
             const window = &ctx.first_candidate.?;
             std.log.info("found unity window 0x{x} on thread {}", .{ @intFromPtr(window.hwnd), window.tid });
-            global.state = .{ .subclass = .{ .hwnd = window.hwnd, .tid = window.tid } };
+            global.hwnd = window.hwnd;
+            global.state = .{ .subclass = .{} };
             continue :state global.state;
         },
         .subclass => |*state| {
@@ -180,7 +263,7 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                 defer global.subclass.mutex.unlock();
                 win32.SetLastError(.NO_ERROR);
                 const old_wndproc = win32.setWindowLongPtrW(
-                    state.hwnd,
+                    global.hwnd,
                     @intFromEnum(win32.GWLP_WNDPROC),
                     @intFromPtr(&subclassProc),
                 );
@@ -204,29 +287,17 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     },
                     else => {},
                 }
-                return .not_newly_installed;
+                return .keep_calling;
             }
-            std.log.info("mainthread: subclassed window 0x{x} on thread {} (original wndproc 0x{x})", .{
-                @intFromPtr(state.hwnd),
-                state.tid,
+            std.log.info("mainthread: subclassed window 0x{x} (original wndproc 0x{x})", .{
+                @intFromPtr(global.hwnd),
                 old_wndproc,
             });
-            const hwnd = state.hwnd;
-            const tid = state.tid;
-            global.state = .{ .installed = .{ .hwnd = hwnd, .tid = tid } };
-            return .newly_installed;
+            global.state = .ready;
+            continue :state global.state;
         },
-        .installed => {},
+        .ready => return .done,
     }
-    return .not_newly_installed;
-}
-
-fn BoundedArray(comptime T: type, buffer_capacity: usize) type {
-    return struct {
-        const Self = @This();
-        buffer: [buffer_capacity]T = undefined,
-        len: usize = 0,
-    };
 }
 
 fn ThreadSet(comptime capacity: usize) type {
@@ -324,12 +395,27 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
 }
 
 fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
+    switch (global.wnd_proc_state) {
+        .allowed => {},
+        .inside_run => {
+            std.log.err(
+                "wndproc called while inside run! msg={} wparam={} lparam={}",
+                .{ msg, wparam, lparam },
+            );
+            std.debug.assert(false);
+        },
+    }
+
     if (msg == global.wnd_msg) {
         const action = PostAction.deserialize(.{ .wparam = wparam, .lparam = lparam }) orelse {
             std.log.err("unknown wparam 0x{x} lparam 0x{x}", .{ wparam, lparam });
             return 0;
         };
         switch (action) {
+            .run => global.post_retry_enabled.store(switch (run()) {
+                .success => false,
+                .fail => true,
+            }, .monotonic),
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
             },
@@ -344,7 +430,230 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
     return win32.CallWindowProcW(wndproc, hwnd, msg, wparam, lparam);
 }
 
+const DotNetLib = struct {
+    kind: dotnet.Kind,
+    module: dynlib.Module,
+};
+
+fn initMono() ?win32.HINSTANCE {
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_mono))) |mono_mod|
+        return mono_mod;
+    switch (win32.GetLastError()) {
+        .ERROR_MOD_NOT_FOUND => {
+            std.log.info("{s}: not found yet...", .{dotnet.dll_name_mono});
+            return null;
+        },
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_mono, e }),
+    }
+}
+fn initIl2cpp() ?win32.HINSTANCE {
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_il2cpp))) |mod|
+        return mod;
+    switch (win32.GetLastError()) {
+        .ERROR_MOD_NOT_FOUND => {
+            std.log.info("{s}: not found yet...", .{dotnet.dll_name_il2cpp});
+            return null;
+        },
+        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_il2cpp, e }),
+    }
+}
+
+const RunModsError = union(enum) {
+    no_dotnet_lib,
+    no_root_domain,
+    missing_proc: struct {
+        lib_kind: dotnet.Kind,
+        name: [:0]const u8,
+    },
+};
+
+fn run() enum { success, fail } {
+    // sanity check that nothing we're calling causes the message pump to run again
+    // and we end up recursively calling ourselves
+    switch (global.wnd_proc_state) {
+        .allowed => global.wnd_proc_state = .inside_run,
+        .inside_run => {
+            std.log.err("run is re-entrant?", .{});
+            std.debug.assert(false);
+            return .fail;
+        },
+    }
+    defer {
+        std.debug.assert(global.wnd_proc_state == .inside_run);
+        global.wnd_proc_state = .allowed;
+    }
+
+    if (global.dotnet_funcs == null) {
+        const lib: DotNetLib = blk: {
+            if (initMono()) |module| break :blk .{ .kind = .mono, .module = module };
+            if (initIl2cpp()) |module| break :blk .{ .kind = .il2cpp, .module = module };
+            coalescedLog(
+                ?RunModsError,
+                &global.run_mods_error,
+                .no_dotnet_lib,
+                .info,
+                "no mono nor il2cpp module yet",
+                .{},
+            );
+            return .fail;
+        };
+
+        global.dotnet_funcs_store = blk: {
+            var missing_proc: [:0]const u8 = undefined;
+            break :blk dotnet.Funcs.init(&missing_proc, lib.kind, lib.module) catch {
+                coalescedLog(
+                    ?RunModsError,
+                    &global.run_mods_error,
+                    .{ .missing_proc = .{
+                        .lib_kind = lib.kind,
+                        .name = missing_proc,
+                    } },
+                    .err,
+                    "{t} dotnet missing proc '{s}'",
+                    .{ lib.kind, missing_proc },
+                );
+                return .fail;
+            };
+        };
+        global.dotnet_funcs = &global.dotnet_funcs_store;
+    }
+    const dotnet_funcs = global.dotnet_funcs.?;
+
+    // "module loaded" doesn't mean "runtime up": if the root domain isn't ready yet, bail so
+    // the retry re-posts rather than invoking managed code against a null domain.
+    if (dotnet_funcs.get_root_domain() == null) {
+        coalescedLog(
+            ?RunModsError,
+            &global.run_mods_error,
+            .no_root_domain,
+            .info,
+            "dotnet loaded but root domain not ready yet",
+            .{},
+        );
+        return .fail;
+    }
+
+    mods.applyUpdates();
+    {
+        var it = mods.iterator();
+        while (it.next()) |mod| {
+            runOne(dotnet_funcs, mod.name.slice(), mod.text.?, null) catch |err| switch (err) {
+                error.WriteFailed => unreachable, // did not pass a writer
+            };
+        }
+    }
+
+    while (scripts.steal()) |script| {
+        defer script.deinit();
+        const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
+        var pipe_buf: [4096]u8 = undefined;
+        var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
+        var write_error: ?error{WriteFailed} = null;
+        switch (script.kind) {
+            .builtin => |builtin_script| runBuiltin(
+                dotnet_funcs,
+                builtin_script,
+                &pipe_writer.interface,
+            ) catch |e| {
+                write_error = e;
+            },
+            .file => |*file| runOne(
+                dotnet_funcs,
+                script.name.slice(),
+                file.text,
+                &pipe_writer.interface,
+            ) catch |e| {
+                write_error = e;
+            },
+        }
+        // just in case we forgot to flush
+        if (write_error == null) pipe_writer.interface.flush() catch |e| {
+            write_error = e;
+        };
+        if (write_error != null) {
+            std.log.err("write to pipe failed with {t}", .{pipe_writer.err.?});
+        }
+    }
+
+    return .success;
+}
+
+fn runOne(
+    dotnet_funcs: *const dotnet.Funcs,
+    name: []const u8,
+    text: []const u8,
+    out: ?*std.Io.Writer,
+) error{WriteFailed}!void {
+    std.debug.assert(arenaIsClear(&global.vm_arena));
+    defer _ = global.vm_arena.reset(.retain_capacity);
+
+    var vm: Vm = .{
+        .dotnet_funcs = dotnet_funcs,
+        .text = text,
+        .mem = .{ .allocator = global.vm_arena.allocator() },
+        .out = out,
+    };
+    defer vm.deinit();
+    if (vm.evalRoot(.{})) |yield| {
+        _ = yield;
+        std.log.info("{s} has yielded, but yield is not implemented, exiting instead", .{name});
+        if (out) |w| try w.print("error: yield not implemented\n", .{});
+    } else |_| switch (vm.error_result) {
+        .exit => std.log.info("{s} has exited", .{name}),
+        .err => |err| switch (err) {
+            .vm_out => return error.WriteFailed,
+            else => {
+                std.log.err("{s}:{f}", .{ name, err.fmt(text, dotnet_funcs) });
+                if (out) |w| try w.print("{s}: error:{f}\n", .{ name, err.fmt(text, dotnet_funcs) });
+            },
+        },
+    }
+    if (out) |w| try w.flush();
+}
+
+fn runBuiltin(
+    dotnet_funcs: *const dotnet.Funcs,
+    builtin_script: Builtin,
+    writer: *std.Io.Writer,
+) error{WriteFailed}!void {
+    switch (builtin_script) {
+        .assemblies => try builtins.writeAssemblies(dotnet_funcs, writer, .names),
+        .decomp => try builtins.writeDecomp(dotnet_funcs, writer),
+    }
+    try writer.flush();
+}
+
+pub const Builtin = enum {
+    assemblies,
+    decomp,
+};
+
+const ModUpdate = union(enum) {
+    open_file_error: std.fs.File.OpenError,
+    file_size_error: std.fs.File.GetEndPosError,
+    file_too_big: u64,
+    out_of_memory,
+    read_file_error: anyerror,
+    content: []const u8,
+};
+
+pub fn arenaIsClear(arena: *std.heap.ArenaAllocator) bool {
+    if (arena.state.end_index != 0) return false;
+    const first = arena.state.buffer_list.first orelse return true;
+    return first.next == null;
+}
+
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
+
+const alloc = @import("alloc.zig");
+const builtins = @import("builtins.zig");
+const dotnet = mutiny.dotnet;
+const dynlib = mutiny.dynlib;
+const mods = @import("mods.zig");
+const scripts = @import("scripts.zig");
+
+const Mod = @import("Mod.zig");
+const Vm = mutiny.Vm;

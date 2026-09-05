@@ -1889,13 +1889,12 @@ fn evalBuiltin(
             vm.log(&file_writer.interface, maybe_get_log_error, args_addr) catch |err| switch (err) {
                 error.WriteFailed => return vm.setError(.{ .log_error = .{
                     .pos = builtin_extent.start,
-                    .err = file_writer.err orelse error.Unexpected,
+                    .err = file_writer.err.?,
                 } }),
             };
             if (vm.out) |out| vm.logOut(out, args_addr) catch |err| switch (err) {
-                error.WriteFailed => return vm.setError(.{ .log_error = .{
+                error.WriteFailed => return vm.setError(.{ .vm_out = .{
                     .pos = builtin_extent.start,
-                    .err = error.Unexpected,
                 } }),
             };
             vm.discardValues(args_addr);
@@ -1908,12 +1907,42 @@ fn evalBuiltin(
             };
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
-            vm.logClass(class) catch |err| switch (err) {
-                error.WriteFailed => return vm.setError(.{ .log_error = .{
+
+            if (vm.out) |vm_out| vm.writeClass(class, vm_out) catch |err| switch (err) {
+                error.WriteFailed => return vm.setError(.{ .vm_out = .{
                     .pos = builtin_extent.start,
-                    .err = error.Unexpected,
                 } }),
             };
+
+            {
+                const log_file, const maybe_open_log_error = logfile.global.get();
+                var buffer: [1024]u8 = undefined;
+                var log_writer = log_file.writer(&buffer);
+                const writer = &log_writer.interface;
+                const maybe_err: ?error{WriteFailed} = blk: {
+                    if (maybe_open_log_error) |*open_log_error| {
+                        logfile.writeLogPrefix(writer) catch |e| break :blk e;
+                        writer.print("{f}\n", .{open_log_error}) catch |e| break :blk e;
+                    }
+                    if (vm.out == null) {
+                        vm.writeClass(class, writer) catch |e| break :blk e;
+                    } else {
+                        const class_name = vm.dotnet_funcs.class_get_name(class);
+                        const class_namespace = vm.dotnet_funcs.class_get_namespace(class);
+                        logfile.writeLogPrefix(writer) catch |e| break :blk e;
+                        writer.print(
+                            "@LogClass|name='{s}' namespace='{s}' written to pipe\n",
+                            .{ class_name, class_namespace },
+                        ) catch |e| break :blk e;
+                        writer.flush() catch |e| break :blk e;
+                    }
+                    break :blk null;
+                };
+                if (maybe_err != null) return vm.setError(.{ .log_error = .{
+                    .pos = builtin_extent.start,
+                    .err = log_writer.err.?,
+                } });
+            }
         },
         .@"@Assembly" => {
             const extent = switch (vm.pop(args_addr)) {
@@ -2117,23 +2146,14 @@ fn log(
     try writer.flush();
 }
 
-fn info(vm: *Vm, comptime fmt: []const u8, args: anytype) error{WriteFailed}!void {
-    const out = vm.out orelse {
-        std.log.info(fmt, args);
-        return;
-    };
-    try out.print(fmt ++ "\n", args);
-    try out.flush();
-}
-
-fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
+fn writeClass(
+    vm: *Vm,
+    class: *const dotnet.Class,
+    writer: *std.Io.Writer,
+) error{WriteFailed}!void {
     const class_name = vm.dotnet_funcs.class_get_name(class);
     const class_namespace = vm.dotnet_funcs.class_get_namespace(class);
-    if (vm.out != null) std.log.info(
-        "@LogClass name='{s}' namespace='{s}' written to pipe",
-        .{ class_name, class_namespace },
-    );
-    try vm.info("@LogClass name='{s}' namespace='{s}':", .{ class_name, class_namespace });
+    try writer.print("@LogClass name='{s}' namespace='{s}':\n", .{ class_name, class_namespace });
     {
         var iterator: ?*anyopaque = null;
         while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {
@@ -2146,7 +2166,7 @@ fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
                 "readonly"
             else
                 "mutable ";
-            try vm.info(" - {s} {s} field '{s}'", .{ stinst, mutability, name });
+            try writer.print(" - {s} {s} field '{s}'\n", .{ stinst, mutability, name });
         }
     }
     {
@@ -2155,9 +2175,10 @@ fn logClass(vm: *Vm, class: *const dotnet.Class) error{WriteFailed}!void {
             const name = vm.dotnet_funcs.method_get_name(method);
             const flags = vm.dotnet_funcs.method_get_flags(method, null);
             const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            try vm.info(" - {s} method '{s}'", .{ stinst, name });
+            try writer.print(" - {s} method '{s}'\n", .{ stinst, name });
         }
     }
+    try writer.flush();
 }
 
 fn logOut(
@@ -3758,6 +3779,9 @@ pub const Error = union(enum) {
         pos: usize,
         err: std.fs.File.WriteError,
     },
+    vm_out: struct {
+        pos: usize,
+    },
     unexpected_token: struct { expected: [:0]const u8, token: Token },
     unexpected_type: struct {
         pos: usize,
@@ -3929,6 +3953,10 @@ const ErrorFmt = struct {
             .log_error => |e| try writer.print(
                 "{d}: @Log failed with {t}",
                 .{ getLineNum(f.text, e.pos), e.err },
+            ),
+            .vm_out => |e| try writer.print(
+                "{d}: vm write output failed",
+                .{getLineNum(f.text, e.pos)},
             ),
             .unexpected_token => |e| try writer.print(
                 "{d}: syntax error: expected {s} but got {f}",

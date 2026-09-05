@@ -2,13 +2,31 @@ pub const enable_mutiny_test_class = false;
 
 const global = struct {
     var hinstance: win32.HINSTANCE = undefined;
+
+    var file_arena: std.heap.ArenaAllocator = undefined;
+    var mods_path_buf: [appdata.max_path]u16 = undefined;
+    var mods_path: ModsPath = undefined;
+    var last_post_result: mainthread.PostResult = undefined;
+    var tick_mode: TickMode = undefined;
+
     var paniced_threads_logging: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_dumping: std.atomic.Value(u32) = .{ .raw = 0 };
     var paniced_threads_msgboxing: std.atomic.Value(u32) = .{ .raw = 0 };
-
-    var mods: std.DoublyLinkedList = .{};
-    var scripts: std.DoublyLinkedList = .{};
 };
+
+const TickMode = union(enum) {
+    init_update,
+    update_mods: struct {
+        last_error: ?UpdateModsError,
+    },
+};
+
+const TimerId = enum(win32.WPARAM) {
+    tick,
+    _,
+};
+const init_update_ms = 200;
+const update_mods_ms = 1000;
 
 pub fn panic(
     msg: []const u8,
@@ -129,86 +147,12 @@ pub export fn _DllMainCRTStartup(
 //     return 0; // EXCEPTION_CONTINUE_SEARCH
 // }
 
-const DotNetLib = struct {
-    kind: dotnet.Kind,
-    module: dynlib.Module,
-};
-fn getDotNet(arg: struct {
-    timeout_seconds: u32,
-}) ?DotNetLib {
-    const start = getNow();
-    var attempt: u32 = 0;
-
-    std.log.info(
-        "attempting to load either {s} or {s} with {} second timeout",
-        .{ dotnet.dll_name_mono, dotnet.dll_name_il2cpp, arg.timeout_seconds },
-    );
-
-    while (true) {
-        if (initMono()) |module| return .{ .kind = .mono, .module = module };
-        if (initIl2cpp()) |module| return .{ .kind = .il2cpp, .module = module };
-
-        attempt += 1;
-        const elapsed_nanos = getNow().since(start);
-        const elapsed_seconds = @as(f32, @floatFromInt(elapsed_nanos)) / std.time.ns_per_s;
-        if (elapsed_seconds >= @as(f32, @floatFromInt(arg.timeout_seconds))) {
-            _ = fmtMsgbox(
-                .{ .ICONHAND = 1 },
-                "Mutiny Fatal Error",
-                "failed to load neither mono nor il2cpp {} seconds ({} attempts)",
-                .{ arg.timeout_seconds, attempt },
-            );
-            return null;
-        }
-        const sleep_ms = 10;
-        if (false) std.log.info("sleeping for {} ms", .{sleep_ms});
-        win32.Sleep(sleep_ms);
-    }
-}
-
-fn initMono() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_mono))) |mono_mod|
-        return mono_mod;
-    switch (win32.GetLastError()) {
-        .ERROR_MOD_NOT_FOUND => {
-            std.log.info("{s}: not found yet...", .{dotnet.dll_name_mono});
-            return null;
-        },
-        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_mono, e }),
-    }
-}
-
-fn initIl2cpp() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_il2cpp))) |mod|
-        return mod;
-    switch (win32.GetLastError()) {
-        .ERROR_MOD_NOT_FOUND => {
-            std.log.info("{s}: not found yet...", .{dotnet.dll_name_il2cpp});
-            return null;
-        },
-        else => |e| std.debug.panic("GetModule '{s}' failed, error={f}", .{ dotnet.dll_name_il2cpp, e }),
-    }
-}
-
 comptime {
     @export(&MutinyStart, .{ .name = mutinyipc.start_export_name });
 }
 fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
-    std.log.info("Init Thread running!", .{});
-
-    const name = switch (logfile.global.getName()) {
-        .success => |s| s,
-        .err => |err| {
-            std.log.err("{f}", .{err});
-            std.log.err("unable to get name, exiting since we use the name to filter which mods we run", .{});
-            return 0xffffffff;
-        },
-    };
-    const localappdata = appdata.get() orelse {
-        std.log.err("no LOCALAPPDATA environment variable, don't know where to find mods", .{});
-        return 0xffffffff;
-    };
+    std.log.info("MutinyStart", .{});
 
     const mutex = blk: {
         var mutex_name_buf: [40]u16 = undefined;
@@ -253,6 +197,40 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
         win32.closeHandle(mutex);
     }
 
+    // we're now considered the sole owner of all our global data
+    global.file_arena = .init(std.heap.page_allocator);
+    defer {
+        std.debug.assert(arenaIsClear(&global.file_arena));
+        global.file_arena.deinit();
+    }
+
+    const name = switch (logfile.global.getName()) {
+        .success => |s| s,
+        .err => |err| {
+            std.log.err("{f}", .{err});
+            std.log.err("unable to get name, exiting since we use the name to filter which mods we run", .{});
+            return 0xffffffff;
+        },
+    };
+    const localappdata = appdata.get() orelse {
+        std.log.err("no LOCALAPPDATA environment variable, don't know where to find mods", .{});
+        return 0xffffffff;
+    };
+    global.mods_path = switch (appdata.format(
+        &global.mods_path_buf,
+        localappdata,
+        &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("mods") },
+    )) {
+        .ok => |p| .{ .slice = p },
+        .too_long => {
+            std.log.err(
+                "mods path too long (LOCALAPPDATA is {} chars, exe name '{f}' is {} chars",
+                .{ localappdata.len, fmtW(name), name.len },
+            );
+            return 0xffffffff;
+        },
+    };
+
     {
         const wc: win32.WNDCLASSEXW = .{
             .cbSize = @sizeOf(win32.WNDCLASSEXW),
@@ -277,6 +255,7 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
             std.log.info("window class: newly created", .{});
         }
     }
+
     const hwnd = win32.CreateWindowExW(
         .{},
         win32.L(mutinyipc.window_class_name),
@@ -291,33 +270,11 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
         global.hinstance,
         null,
     ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
+    defer if (0 == win32.DestroyWindow(hwnd)) win32.panicWin32(
+        "DestroyWindow",
+        win32.GetLastError(),
+    );
     std.log.info("window 0x{x} created", .{@intFromPtr(hwnd)});
-
-    const maybe_unity_version: ?UnityVersion = blk: {
-        const module = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse {
-            std.log.info("unity version: unknown (UnityPlayer.dll is not loaded)", .{});
-            break :blk null;
-        };
-        const version = UnityVersion.fromLoadedModule(module) catch break :blk null;
-        std.log.info("unity version: {f}", .{version});
-        break :blk version;
-    };
-
-    var mods_path_buf: [appdata.max_path]u16 = undefined;
-    const mods_path = switch (appdata.format(
-        &mods_path_buf,
-        localappdata,
-        &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("mods") },
-    )) {
-        .ok => |p| p,
-        .too_long => {
-            std.log.err(
-                "mods path too long (LOCALAPPDATA is {} chars, exe name '{f}' is {} chars",
-                .{ localappdata.len, fmtW(name), name.len },
-            );
-            return 0xffffffff;
-        },
-    };
 
     // if (win32.AddVectoredExceptionHandler(1, on_vectored_exception)) |_| {
     //     std.log.info("AddVectoredExceptionHandler success", .{});
@@ -325,228 +282,57 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     //     std.log.err("AddVectoredExceptionHandler failed, error={f}", .{win32.GetLastError()});
     // }
 
-    const dotnet_lib = getDotNet(.{
-        .timeout_seconds = 10,
-    }) orelse return 0xffffffff;
-    std.log.info("{s}: 0x{x}", .{ dotnet_lib.kind.dllName(), @intFromPtr(dotnet_lib.module) });
+    global.last_post_result = .posted;
+    defer global.last_post_result = .posted;
 
-    const dotnet_funcs: dotnet.Funcs = blk: {
-        var missing_proc: [:0]const u8 = undefined;
-        break :blk dotnet.Funcs.init(&missing_proc, dotnet_lib.kind, dotnet_lib.module) catch {
-            _ = fmtMsgbox(
-                .{ .ICONHAND = 1 },
-                "Mutiny Fatal Error",
-                "{s} is missing proc '{s}'",
-                .{ dotnet_lib.kind.dllName(), missing_proc },
-            );
-            return 0xffffffff;
-        };
-    };
-
-    const root_domain = blk: {
-        var attempt: u32 = 0;
-        while (true) {
-            attempt += 1;
-            if (dotnet_funcs.get_root_domain()) |domain| {
-                std.log.info("dotnet root domain found: 0x{x}", .{@intFromPtr(domain)});
-                break :blk domain;
-            }
-            std.log.info("mono_get_root_domain returned NULL (attempt {})", .{attempt});
-            const max_attempts = 30;
-            if (attempt >= max_attempts) {
-                std.log.err("unable to get dotnet root domain after {} attempts", .{max_attempts});
-                return 0xffffffff;
-            }
-            std.Thread.sleep(std.time.ns_per_s * 1);
-        }
-    };
-
-    // if we go to fast the process will intermittently crash
-    // TODO: find a better way to do this, might need to inspect mono source to find it
-    std.log.info("waiting a second for main process to initialize dotnet...", .{});
-    std.Thread.sleep(std.time.ns_per_s * 1);
-
-    // sanity check, this should be null before we call thread_attach
-    switch (dotnet_lib.kind) {
-        .mono => std.debug.assert(dotnet_funcs.domain_get() == null),
-        .il2cpp => {}, // this crashes on il2cpp
-    }
-
-    // std.log.info("Attaching thread to dotnet domain...", .{});
-    const thread = dotnet_funcs.thread_attach(root_domain) orelse {
-        std.log.err("mono_thread_attach failed!", .{});
+    global.tick_mode = .init_update;
+    if (0 == win32.SetTimer(
+        hwnd,
+        @intFromEnum(TimerId.tick),
+        init_update_ms,
+        null,
+    )) {
+        std.log.err("SetTimer(initial) failed, error={f}", .{win32.GetLastError()});
         return 0xffffffff;
-    };
-    std.log.info("thread attach success 0x{x}", .{@intFromPtr(thread)});
-    defer {
-        std.log.info("detaching thread 0x{x}", .{@intFromPtr(thread)});
-        dotnet_funcs.thread_detach(thread);
     }
 
-    // domain_get is how the Vm accesses the domain, make sure it's
-    // what we expect after attaching our thread to it
-    std.debug.assert(dotnet_funcs.domain_get() == root_domain);
-
-    const il2cpp_layouts: il2cppclass.Layouts = switch (dotnet_funcs.kind) {
-        .mono => undefined,
-        .il2cpp => blk: {
-            const unity_version = maybe_unity_version orelse {
-                std.log.err("cannot verify il2cpp layout without the unity version", .{});
-                return 0xffffffff;
-            };
-            const start = getNow();
-            const layouts = il2cppclass.discover(&dotnet_funcs, unity_version) catch |err| {
-                std.log.err("il2cpp layout could not be verified ({t})", .{err});
-                return 0xffffffff;
-            };
-            std.log.info("il2cpp layout verified in {} ms", .{
-                @divTrunc(getNow().since(start), std.time.ns_per_ms),
-            });
-            break :blk layouts;
-        },
-    };
-    // il2cpp: install the Class::FromIl2CppType hook and build our MonoBehaviour subclass now, so a
-    // later AddComponent(Il2CppType.Of<ours>) on the main thread resolves to it. The gate above
-    // already refused an unfamiliar layout, so these writes into runtime structures are verified.
-    if (dotnet_funcs.kind == .il2cpp) {
-        const target = detour.findFunction(dotnet_lib.module, "il2cpp_class_from_il2cpp_type") catch |err| {
-            std.log.err("could not locate Class::FromIl2CppType ({t})", .{err});
-            return 0xffffffff;
-        };
-        const installed = detour.install(target, @intFromPtr(&il2cppclass.fromIl2CppTypeHook)) catch |err| {
-            std.log.err("could not install the FromIl2CppType hook ({t})", .{err});
-            return 0xffffffff;
-        };
-        il2cppclass.global.fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
-
-        var assembly_count: usize = 0;
-        const assemblies = dotnet_funcs.kind.il2cpp.domain_get_assemblies(root_domain, &assembly_count);
-        il2cppclass.subclassSelfTest(
-            &dotnet_funcs,
-            assemblies[0..assembly_count],
-            il2cpp_layouts,
-            maybe_unity_version.?,
-        ) catch |err| {
-            std.log.err("could not build the injected MonoBehaviour subclass ({t})", .{err});
-            return 0xffffffff;
-        };
-        std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
-    }
-
-    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    var last_update_mods_error: ?UpdateModsError = null;
-
-    main_loop: while (true) {
-        switch (mainthread.update()) {
-            .not_newly_installed => {},
-            .newly_installed => {
-                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-                // TODO: this is just temporary, if we have a 1-time initialization
-                //       to do on the main thread, then that should probably be another
-                //       state in mainthread
-                // getTarget().? is always set after newly_installed
-                var post_error: mainthread.PostError = undefined;
-                mainthread.getTarget().?.post(.subclass_self_test, &post_error) catch {
-                    std.log.err("post failed, error={f}", .{post_error});
-                };
-            },
-        }
-
-        {
-            var msg: win32.MSG = undefined;
-            while (0 != win32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE)) {
-                if (msg.message == win32.WM_QUIT) {
-                    std.log.info("got WM_QUIT, exiting the mutiny thread", .{});
-                    break :main_loop;
-                }
-                _ = win32.TranslateMessage(&msg);
-                _ = win32.DispatchMessageW(&msg);
+    while (true) {
+        var msg: win32.MSG = undefined;
+        const result = win32.GetMessageW(&msg, null, 0, 0);
+        if (result < 0) win32.panicWin32("GetMessage", win32.GetLastError());
+        if (result == 0) {
+            if (mainthread.mutinyThreadDetach()) {
+                std.log.info("got WM_QUIT, exiting the mutiny thread", .{});
+                break;
             }
+            std.log.err("got WM_QUIT, but can't detach main thread", .{});
         }
-
-        var tests_scheduled = false;
-
-        {
-            const maybe_new_error = updateMods(
-                .{ .slice = mods_path },
-                &dotnet_funcs,
-                scratch.allocator(),
-                &tests_scheduled,
-            );
-            if (maybe_new_error) |*new_error| {
-                const same_error = if (last_update_mods_error) |*le| new_error.eql(le) else false;
-                if (!same_error) {
-                    new_error.log(mods_path);
-                }
-            }
-            last_update_mods_error = maybe_new_error;
-        }
-
-        if (!scratch.reset(.retain_capacity)) {
-            std.log.warn("reset scratch allocator failed?", .{});
-        }
-
-        const scripts_sleep_time_ms = serviceScripts(&dotnet_funcs, &tests_scheduled);
-
-        if (tests_scheduled) {
-            std.log.info("@ScheduleTests requested! running...", .{});
-            Vm.runTests(&dotnet_funcs, maybe_unity_version) catch |err| {
-                std.log.err("tests failed with {s}:", .{@errorName(err)});
-                if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
-                } else {
-                    std.log.err("    no error trace", .{});
-                }
-            };
-        }
-
-        // var sleep_time_ms: u64 = 5000;
-        var sleep_time_ms: u64 = @min(1000, scripts_sleep_time_ms);
-        const now = getNow();
-        {
-            var maybe_mod = global.mods.first;
-            while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
-                const mod: *Mod = @fieldParentPtr("list_node", list_node);
-                sleep_time_ms = @min(sleep_time_ms, mod.nextYieldSleepMs(now));
-            }
-        }
-        // std.log.info("sleep time ms {}", .{sleep_time_ms});
-        switch (win32.MsgWaitForMultipleObjectsEx(
-            0,
-            null,
-            @intCast(sleep_time_ms),
-            win32.QS_ALLINPUT,
-            .{},
-        )) {
-            @intFromEnum(win32.WAIT_OBJECT_0), @intFromEnum(win32.WAIT_TIMEOUT) => {},
-            else => win32.panicWin32("MsgWaitForMultipleObjectsEx", win32.GetLastError()),
-        }
+        _ = win32.TranslateMessage(&msg);
+        _ = win32.DispatchMessageW(&msg);
     }
 
     return 0;
 }
 
-const Client = struct {
-    pipe: win32.HANDLE,
-    pid: u32,
-};
-
-const Builtin = enum { assemblies, decomp };
-
-const Run = union(enum) {
-    script: Mod.HaveText,
-    builtin: Builtin,
-};
+fn reportError(
+    writer: *std.Io.Writer,
+    comptime fmt: []const u8,
+    args: anytype,
+) error{ WriteFailed, Reported } {
+    writer.print(fmt ++ "\n", args) catch return error.WriteFailed;
+    writer.flush() catch return error.WriteFailed;
+    return error.Reported;
+}
 
 fn parseBuiltin(
     writer: *std.Io.Writer,
-    name: []const u8,
+    builtin_name: []const u8,
     args: *mutinyipc.StringList,
 ) error{ Reported, WriteFailed }!Builtin {
     const builtin_script = std.meta.stringToEnum(
         Builtin,
-        name[1..],
-    ) orelse return reportError(writer, "unknown builtin script '{s}'", .{name});
+        builtin_name[1..],
+    ) orelse return reportError(writer, "unknown builtin script '{s}'", .{builtin_name});
 
     var arg_count: usize = 0;
     while (args.next() catch return reportError(
@@ -559,15 +345,9 @@ fn parseBuiltin(
     if (arg_count != 0) return reportError(
         writer,
         "builtin script '{s}' takes no arguments but got {}",
-        .{ name, arg_count },
+        .{ builtin_name, arg_count },
     );
     return builtin_script;
-}
-
-fn reportError(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) error{ WriteFailed, Reported } {
-    writer.print(fmt ++ "\n", args) catch return error.WriteFailed;
-    writer.flush() catch return error.WriteFailed;
-    return error.Reported;
 }
 
 fn addScript(
@@ -578,10 +358,10 @@ fn addScript(
     args: *mutinyipc.StringList,
 ) error{ Reported, WriteFailed }!void {
     const name_utf8_len = std.unicode.calcWtf8Len(name_w);
-    if (name_utf8_len > 255) return reportError(
+    if (name_utf8_len > ModNameSlice.max_len) return reportError(
         writer,
-        "script name is {} bytes, too long (max 255)",
-        .{name_utf8_len},
+        "script name is {} bytes, too long (max {})",
+        .{ name_utf8_len, ModNameSlice.max_len },
     );
     if (name_w.len == 0) return reportError(writer, "script name is empty", .{});
     for (name_w) |c| switch (c) {
@@ -596,23 +376,15 @@ fn addScript(
         return reportError(writer, "script name '{f}' is not a file", .{fmtW(name_w)});
     }
 
-    var name_buf: [255]u8 = undefined;
+    var name_buf: [ModNameSlice.max_len]u8 = undefined;
     std.debug.assert(name_utf8_len == std.unicode.wtf16LeToWtf8(&name_buf, name_w));
-    const name = name_buf[0..name_utf8_len];
-    {
-        var maybe_node = global.scripts.first;
-        while (maybe_node) |list_node| : (maybe_node = list_node.next) {
-            const script: *Script = @fieldParentPtr("list_node", list_node);
-            if (std.mem.eql(u8, script.name(), name)) return reportError(
-                writer,
-                "script '{s}' is already running (requested by pid {})",
-                .{ name, script.client.pid },
-            );
-        }
-    }
+    const name_a = name_buf[0..name_utf8_len];
+    const script_name = ModNameSlice.init(name_a) orelse unreachable;
 
-    const run: Run = blk: {
-        if (name[0] == '@') break :blk .{ .builtin = try parseBuiltin(writer, name, args) };
+    const request: mainthread.ScriptRequest = blk: {
+        if (name_w[0] == '@') break :blk .{
+            .builtin = try parseBuiltin(writer, name_a, args),
+        };
 
         if (args.next() catch return reportError(
             writer,
@@ -621,7 +393,7 @@ fn addScript(
         )) |_| return reportError(
             writer,
             "script '{s}' was given arguments but scripts do not take arguments yet",
-            .{name},
+            .{name_a},
         );
 
         const localappdata = appdata.get() orelse return reportError(
@@ -660,249 +432,50 @@ fn addScript(
             .{ fmtW(path), err },
         );
         defer file.close();
-        const text = file.readToEndAlloc(
-            std.heap.page_allocator,
-            std.math.maxInt(usize),
-        ) catch |err| return reportError(
+        const file_size64 = file.getEndPos() catch |err| return reportError(
+            writer,
+            "get size of '{f}' failed with {t}",
+            .{ fmtW(path), err },
+        );
+        const file_size = std.math.cast(usize, file_size64) orelse return reportError(
+            writer,
+            "script '{f}' is too big ({} bytes)",
+            .{ fmtW(path), file_size64 },
+        );
+        std.debug.assert(arenaIsClear(&global.file_arena));
+        const text = global.file_arena.allocator().alloc(u8, file_size) catch return reportError(
+            writer,
+            "out of memory reading '{f}' ({} bytes)",
+            .{ fmtW(path), file_size },
+        );
+        readFile(file, text) catch |err| return reportError(
             writer,
             "read '{f}' failed with {t}",
             .{ fmtW(path), err },
         );
-        break :blk .{ .script = .{ .text = text } };
+        break :blk .{ .file = text };
     };
+    defer _ = global.file_arena.reset(.retain_capacity);
 
-    const script = std.heap.page_allocator.create(Script) catch {
-        switch (run) {
-            .script => |have_text| std.heap.page_allocator.free(have_text.text),
-            .builtin => {},
-        }
-        return reportError(
-            writer,
-            "out of memory creating script '{f}'",
-            .{fmtW(name_w)},
-        );
-    };
-    script.* = .{
-        .list_node = .{},
-        .client = .{ .pid = pid, .pipe = pipe },
-        .name_len = @intCast(name_utf8_len),
-        .name_buf = undefined,
-        .running = run,
-    };
-    @memcpy(script.name_buf[0..name.len], name);
-    global.scripts.append(&script.list_node);
+    mainthread.mutinyThreadQueueScript(pid, pipe, script_name, request) catch return reportError(
+        writer,
+        "out of memory creating script '{f}'",
+        .{fmtW(name_w)},
+    );
+
+    mainthread.mutinyThreadPostRun(&global.last_post_result);
+    switch (global.last_post_result) {
+        .posted => {},
+        .not_ready => std.log.info(
+            "script '{s}' scheduled but main thread not ready yet",
+            .{name_a},
+        ),
+        .post_error => std.log.info(
+            "script '{s}' scheduled but main thread post is failing",
+            .{name_a},
+        ),
+    }
 }
-
-const Script = struct {
-    list_node: std.DoublyLinkedList.Node,
-    client: Client,
-    name_len: u8,
-    name_buf: [255]u8,
-    running: Run,
-
-    pub fn name(script: *const Script) []const u8 {
-        return script.name_buf[0..script.name_len];
-    }
-
-    pub fn delete(script: *Script) void {
-        switch (script.running) {
-            .script => |*have_text| have_text.deinitFreeText(),
-            .builtin => {},
-        }
-        win32.closeHandle(script.client.pipe);
-        global.scripts.remove(&script.list_node);
-        script.* = undefined;
-        std.heap.page_allocator.destroy(script);
-    }
-
-    pub fn reportToClient(script: *Script, comptime fmt: []const u8, args: anytype) void {
-        var file: std.fs.File = .{ .handle = script.client.pipe };
-        var buf: [512]u8 = undefined;
-        var file_writer = file.writerStreaming(&buf);
-        const write_failed = blk: {
-            file_writer.interface.print(fmt ++ "\n", args) catch |e| switch (e) {
-                error.WriteFailed => break :blk true,
-            };
-            file_writer.interface.flush() catch |e| switch (e) {
-                error.WriteFailed => break :blk true,
-            };
-            break :blk false;
-        };
-        if (write_failed) std.log.err(
-            "write to client pipe failed with {t}",
-            .{file_writer.err.?},
-        );
-    }
-
-    pub fn nextYieldSleepMs(script: *const Script, now: std.time.Instant) u64 {
-        const have_text = switch (script.running) {
-            .script => |*t| t,
-            .builtin => return std.math.maxInt(u64),
-        };
-        const vm_state = &(have_text.vm_state orelse return std.math.maxInt(u64));
-        const yielded = &(vm_state.yielded orelse return std.math.maxInt(u64));
-        return yielded.nextSleepMs(now);
-    }
-};
-
-const Mod = struct {
-    list_node: std.DoublyLinkedList.Node,
-    name_len: u8,
-    name_buf: [255]u8,
-
-    stale: bool,
-    state: union(enum) {
-        initial,
-        err_no_text: ErrorNoText,
-        have_text: HaveText,
-    } = .initial,
-
-    const Yielded = struct {
-        time: std.time.Instant,
-        timeout_ms: u64,
-        block_resume: Vm.BlockResume,
-        pub fn isExpired(yielded: *const Yielded) bool {
-            const since_ns = getNow().since(yielded.time);
-            return @divTrunc(since_ns, std.time.ns_per_ms) >= yielded.timeout_ms;
-        }
-        pub fn nextSleepMs(yielded: *const Yielded, now: std.time.Instant) u64 {
-            const since_ns = now.since(yielded.time);
-            const since_ms = @divTrunc(since_ns, std.time.ns_per_ms);
-            if (since_ms >= yielded.timeout_ms) return 0;
-            return yielded.timeout_ms - since_ms;
-        }
-    };
-
-    const HaveText = struct {
-        text: []u8,
-        vm_state: ?struct {
-            instance: Vm,
-            yielded: ?Yielded,
-        } = null,
-        pub fn deinitTakeText(have_text: *HaveText) []u8 {
-            if (have_text.vm_state) |*vm_state| {
-                vm_state.instance.deinit();
-                vm_state.* = undefined;
-                have_text.vm_state = null;
-            }
-            const text = have_text.text;
-            have_text.* = undefined;
-            return text;
-        }
-        pub fn deinitFreeText(have_text: *HaveText) void {
-            const text = have_text.deinitTakeText();
-            std.heap.page_allocator.free(text);
-        }
-    };
-
-    fn create(name_slice: []const u8, name_len: u8) error{OutOfMemory}!*Mod {
-        const mod = try std.heap.page_allocator.create(Mod);
-        errdefer std.heap.page_allocator.destroy(mod);
-        mod.* = .{
-            .list_node = .{},
-            .name_len = name_len,
-            .name_buf = undefined,
-            .stale = false,
-        };
-        @memcpy(mod.name_buf[0..name_len], name_slice);
-        return mod;
-    }
-
-    pub fn delete(mod: *Mod) void {
-        switch (mod.state) {
-            .initial, .err_no_text => {},
-            .have_text => |*state| {
-                std.heap.page_allocator.free(state.text);
-                state.* = undefined;
-            },
-        }
-        global.mods.remove(&mod.list_node);
-        mod.* = undefined;
-        std.heap.page_allocator.destroy(mod);
-    }
-
-    pub fn nextYieldSleepMs(mod: *const Mod, now: std.time.Instant) u64 {
-        const have_text = switch (mod.state) {
-            .initial, .err_no_text => return std.math.maxInt(u64),
-            .have_text => |h| h,
-        };
-        const vm_state = &(have_text.vm_state orelse return std.math.maxInt(u64));
-        const yielded = &(vm_state.yielded orelse return std.math.maxInt(u64));
-        return yielded.nextSleepMs(now);
-    }
-
-    const ErrorNoText = union(enum) {
-        open_file: std.fs.File.OpenError,
-        // read_file: (error{OutOfMemory} || std.fs.File.ReadError),
-        read_file: anyerror,
-        pub fn eql(self: ErrorNoText, other: ErrorNoText) bool {
-            return switch (self) {
-                .open_file => |self_e| switch (other) {
-                    .open_file => |other_e| self_e == other_e,
-                    else => false,
-                },
-                .read_file => |self_e| switch (other) {
-                    .read_file => |other_e| self_e == other_e,
-                    else => false,
-                },
-            };
-        }
-    };
-
-    pub fn name(mod: *const Mod) []const u8 {
-        return mod.name_buf[0..mod.name_len];
-    }
-
-    fn logNewErrorNoText(mod: *Mod, err: ErrorNoText) void {
-        switch (err) {
-            .open_file => |e| std.log.err("open mod file '{s}' failed with {t}", .{ mod.name(), e }),
-            .read_file => |e| std.log.err("read mod file '{s}' failed with {t}", .{ mod.name(), e }),
-        }
-    }
-
-    pub fn onErrorNoText(mod: *Mod, err: ErrorNoText) void {
-        switch (mod.state) {
-            .initial => {},
-            .err_no_text => |current_error| if (current_error.eql(err)) return,
-            .have_text => |*state| state.deinitFreeText(),
-        }
-        mod.logNewErrorNoText(err);
-        mod.state = .{ .err_no_text = err };
-    }
-
-    pub fn updateText(mod: *Mod, new_text: []const u8) void {
-        switch (mod.state) {
-            .initial, .err_no_text => {},
-            .have_text => |*state| {
-                if (std.mem.eql(u8, state.text, new_text)) return;
-                std.log.info(
-                    "mod '{s}' text updated (size went from {} to {})",
-                    .{ mod.name(), state.text.len, new_text.len },
-                );
-                // NOTE: we need to de-initialize the VM before we resize the text buffer
-                const text = state.deinitTakeText();
-                if (std.heap.page_allocator.resize(text, new_text.len)) {
-                    std.log.debug("  resized text buffer in place", .{ state.text.len, new_text.len });
-                    @memcpy(text.ptr[0..new_text.len], new_text);
-                    state.* = .{ .text = text.ptr[0..new_text.len] };
-                    return;
-                }
-                std.log.debug("  can't resize, freeing old text at 0x{x} of size {}", .{ @intFromPtr(text.ptr), text.len });
-                std.heap.page_allocator.free(text);
-                mod.state = .initial;
-            },
-        }
-        const copy = std.heap.page_allocator.dupe(u8, new_text) catch |e| switch (e) {
-            error.OutOfMemory => {
-                std.log.err("can't save mod source, out of memory", .{});
-                mod.state = .{ .err_no_text = .{ .read_file = e } };
-                return;
-            },
-        };
-        std.log.info("mod '{s}' source loaded", .{mod.name()});
-        mod.state = .{ .have_text = .{ .text = copy, .vm_state = null } };
-    }
-};
 
 const UpdateModsError = union(enum) {
     open_mods_dir_error: std.fs.Dir.OpenError,
@@ -960,343 +533,59 @@ const ModsPath = struct {
     }
 };
 
-fn updateMods(
-    mods_path: ModsPath,
-    dotnet_funcs: *const dotnet.Funcs,
-    scratch: std.mem.Allocator,
-    out_tests_scheduled: *bool,
-) ?UpdateModsError {
-    std.debug.assert(out_tests_scheduled.* == false);
+fn updateMods() ?UpdateModsError {
+    modfiles.markStale();
 
-    {
-        var maybe_mod = global.mods.first;
-        while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
-            const mod: *Mod = @fieldParentPtr("list_node", list_node);
-            mod.stale = true;
-        }
-    }
-
-    if (false) std.log.info("loading mods from '{f}'...", .{mods_path});
-    var dir = mods_path.open(.{ .iterate = true }) catch |err| {
+    if (false) std.log.info("loading mods from '{f}'...", .{global.mods_path});
+    var dir = global.mods_path.open(.{ .iterate = true }) catch |err| {
         // TODO: should we try seeing if the mutiny folder even exists
         return .{ .open_mods_dir_error = err };
     };
     defer dir.close();
 
+    var queued = false;
+
     var it = dir.iterate();
     while (it.next() catch |err| {
-        std.log.err("iterate mod directory '{f}' failed with {s}", .{ mods_path, @errorName(err) });
+        std.log.err("iterate mod directory '{f}' failed with {s}", .{ global.mods_path, @errorName(err) });
         return .{ .iterate_mods_dir_error = err };
     }) |entry| {
         if (entry.kind != .file) continue;
-        const mod_name_len: u8 = std.math.cast(u8, entry.name.len) orelse {
-            std.log.err("mod name ({}) is too log (max is 255)", .{entry.name.len});
+        const mod_name = ModNameSlice.init(entry.name) orelse {
+            std.log.err("mod name ({}) is too long (max is {})", .{ entry.name.len, ModNameSlice.max_len });
             continue;
         };
-
-        const mod: *Mod = blk: {
-            {
-                var maybe_mod = global.mods.first;
-                while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
-                    const mod: *Mod = @fieldParentPtr("list_node", list_node);
-                    if (std.mem.eql(u8, mod.name(), entry.name)) break :blk mod;
-                }
-            }
-
-            const mod = Mod.create(entry.name, mod_name_len) catch |err| switch (err) {
-                error.OutOfMemory => {
-                    std.log.err("can't load new mod '{s}' (out of memory)", .{entry.name});
-                    continue;
-                },
-            };
-            global.mods.append(&mod.list_node);
-            break :blk mod;
-        };
-        mod.stale = false;
-
-        {
-            var file = dir.openFile(entry.name, .{}) catch |err| {
-                mod.onErrorNoText(.{ .open_file = err });
-                continue;
-            };
-            defer file.close();
-            const new_text = file.readToEndAlloc(scratch, std.math.maxInt(usize)) catch |err| {
-                mod.onErrorNoText(.{ .read_file = err });
-                continue;
-            };
-            defer scratch.free(new_text);
-            mod.updateText(new_text);
-        }
-
-        switch (mod.state) {
-            .initial, .err_no_text => {},
-            .have_text => |*h| runMod(dotnet_funcs, out_tests_scheduled, mod.name(), h, null),
-        }
+        std.debug.assert(arenaIsClear(&global.file_arena));
+        defer _ = global.file_arena.reset(.retain_capacity);
+        queued = modfiles.update(mod_name, readModFile(dir, entry.name)) or queued;
     }
 
-    while (findStaleMod()) |mod| {
-        std.log.info("deleting mod '{s}'", .{mod.name()});
-        mod.delete();
-    }
+    queued = modfiles.deleteStale() or queued;
+    if (queued) mainthread.mutinyThreadPostRun(&global.last_post_result);
+
     return null;
 }
 
-fn serviceScripts(dotnet_funcs: *const dotnet.Funcs, out_tests_scheduled: *bool) u64 {
-    var sleep_time_ms: u64 = std.math.maxInt(u64);
-    var maybe_node = global.scripts.first;
-    while (maybe_node) |list_node| {
-        maybe_node = list_node.next;
-        const script: *Script = @fieldParentPtr("list_node", list_node);
-        var pipe_file: std.fs.File = .{ .handle = script.client.pipe };
-        var pipe_buf: [4096]u8 = undefined;
-        var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
-        const have_text = switch (script.running) {
-            .builtin => |builtin_script| {
-                runBuiltin(dotnet_funcs, builtin_script, &pipe_writer.interface) catch |err| switch (err) {
-                    error.WriteFailed => std.log.err(
-                        "write to client pipe failed with {t}",
-                        .{pipe_writer.err.?},
-                    ),
-                };
-                script.delete();
-                continue;
-            },
-            .script => |*t| t,
-        };
-        runMod(
-            dotnet_funcs,
-            out_tests_scheduled,
-            script.name(),
-            have_text,
-            &pipe_writer.interface,
-        );
+fn readModFile(dir: std.fs.Dir, entry_name: []const u8) modfiles.Update {
+    var file = dir.openFile(entry_name, .{}) catch |err| return .{ .err = .{ .open_file = err } };
+    defer file.close();
+    const file_size64 = file.getEndPos() catch |err| return .{ .err = .{ .file_size = err } };
+    const file_size = std.math.cast(usize, file_size64) orelse return .{ .err = .{ .file_too_big = file_size64 } };
 
-        const vm_state = &have_text.vm_state.?;
-        if (vm_state.yielded == null) {
-            switch (vm_state.instance.error_result) {
-                .exit => {},
-                .err => |err| script.reportToClient("error: {f}", .{err.fmt(have_text.text, dotnet_funcs)}),
-            }
-            script.delete();
-        } else {
-            sleep_time_ms = @min(sleep_time_ms, script.nextYieldSleepMs(getNow()));
-        }
-    }
-    return sleep_time_ms;
+    std.debug.assert(arenaIsClear(&global.file_arena));
+    const content = global.file_arena.allocator().alloc(u8, file_size) catch return .{ .err = .out_of_memory };
+    readFile(file, content) catch |err| return .{ .err = .{ .read_file = err } };
+    return .{ .content = content };
 }
 
-fn runBuiltin(
-    dotnet_funcs: *const dotnet.Funcs,
-    builtin_script: Builtin,
-    writer: *std.Io.Writer,
-) error{WriteFailed}!void {
-    switch (builtin_script) {
-        .assemblies => try writeAssemblies(dotnet_funcs, writer, .names),
-        .decomp => try writeDecomp(dotnet_funcs, writer),
-    }
-    try writer.flush();
-}
-
-const AssemblyFormat = enum { names, decomp };
-
-fn writeDecomp(
-    dotnet_funcs: *const dotnet.Funcs,
-    writer: *std.Io.Writer,
-) error{WriteFailed}!void {
-    try writer.print("runtime\t{s}\n", .{@tagName(dotnet_funcs.kind)});
-
-    var path_buf: [appdata.max_path:0]u16 = undefined;
-    {
-        const len = win32.GetModuleFileNameW(null, &path_buf, path_buf.len);
-        if (len == 0) win32.panicWin32("GetModuleFileNameW(null)", win32.GetLastError());
-        try writer.print("exe\t{f}\n", .{fmtW(path_buf[0..len])});
-    }
-    switch (dotnet_funcs.kind) {
-        .mono => {},
-        .il2cpp => {
-            const module = win32.GetModuleHandleW(
-                win32.L(dotnet.dll_name_il2cpp),
-            ) orelse win32.panicWin32("GetModuleHandleW", win32.GetLastError());
-            const len = win32.GetModuleFileNameW(module, &path_buf, path_buf.len);
-            if (len == 0) win32.panicWin32("GetModuleFileNameW", win32.GetLastError());
-            try writer.print("module\t{s}\t{f}\n", .{
-                dotnet.dll_name_il2cpp,
-                fmtW(path_buf[0..len]),
-            });
-        },
-    }
-    try writeAssemblies(dotnet_funcs, writer, .decomp);
-}
-
-const WriteAssemblies = struct {
-    dotnet_funcs: *const dotnet.Funcs,
-    writer: *std.Io.Writer,
-    format: AssemblyFormat,
-    index: usize = 0,
-    write_failed: bool = false,
-};
-
-fn writeAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callconv(.c) void {
-    const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
-    const ctx: *WriteAssemblies = @ptrCast(@alignCast(user_data));
-    defer ctx.index += 1;
-    const mono = &ctx.dotnet_funcs.kind.mono;
-    const assembly_name = mono.assembly_get_name(assembly) orelse {
-        std.log.err("  assembly[{}] mono_assembly_get_name failed", .{ctx.index});
-        return;
-    };
-    const str = mono.assembly_name_get_name(assembly_name) orelse {
-        std.log.err(
-            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
-            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(assembly_name) },
-        );
-        return;
-    };
-    const name = std.mem.span(str);
-    const result = switch (ctx.format) {
-        .names => ctx.writer.print("{s}\n", .{name}),
-        .decomp => blk: {
-            const image = ctx.dotnet_funcs.assembly_get_image(assembly) orelse {
-                std.log.err("  assembly[{}] mono_assembly_get_image failed", .{ctx.index});
-                return;
-            };
-            const filename = mono.image_get_filename(image) orelse {
-                std.log.err("  assembly[{}] mono_image_get_filename failed", .{ctx.index});
-                return;
-            };
-            break :blk ctx.writer.print("assembly\t{s}\t{s}\n", .{ name, std.mem.span(filename) });
-        },
-    };
-    result catch |err| switch (err) {
-        error.WriteFailed => ctx.write_failed = true,
-    };
-}
-
-fn writeAssemblies(
-    dotnet_funcs: *const dotnet.Funcs,
-    writer: *std.Io.Writer,
-    format: AssemblyFormat,
-) error{WriteFailed}!void {
-    switch (dotnet_funcs.kind) {
-        .mono => |*mono| {
-            var context: WriteAssemblies = .{
-                .dotnet_funcs = dotnet_funcs,
-                .writer = writer,
-                .format = format,
-            };
-            mono.assembly_foreach(&writeAssembliesMono, &context);
-            if (context.write_failed) return error.WriteFailed;
-        },
-        .il2cpp => |*il2cpp| {
-            var assembly_count: usize = undefined;
-            const assemblies = il2cpp.domain_get_assemblies(
-                dotnet_funcs.domain_get().?,
-                &assembly_count,
-            );
-            for (0..assembly_count) |i| {
-                const image = il2cpp.assembly_get_image(assemblies[i]);
-                const image_name = std.mem.span(il2cpp.image_get_name(image));
-                if (std.mem.eql(u8, image_name, "__Generated")) continue;
-                if (!std.mem.endsWith(u8, image_name, ".dll")) std.debug.panic(
-                    "expected all image names to end with '.dll' but got '{s}'",
-                    .{image_name},
-                );
-                const name = image_name[0 .. image_name.len - ".dll".len];
-                switch (format) {
-                    .names => try writer.print("{s}\n", .{name}),
-                    .decomp => try writer.print("assembly\t{s}\n", .{name}),
-                }
-            }
-        },
+fn readFile(file: std.fs.File, mem: []u8) (error{EndOfStream} || std.fs.File.ReadError)!void {
+    var total_read: usize = 0;
+    while (total_read != mem.len) {
+        const last_read = try file.read(mem[total_read..]);
+        if (last_read == 0) return error.EndOfStream;
+        total_read += last_read;
     }
 }
-
-fn runMod(
-    dotnet_funcs: *const dotnet.Funcs,
-    out_tests_scheduled: *bool,
-    mod_name: []const u8,
-    have_text: *Mod.HaveText,
-    out: ?*std.Io.Writer,
-) void {
-    const Eval = struct {
-        vm: *Vm,
-        block_resume: Vm.BlockResume,
-    };
-
-    const maybe_eval: ?Eval = blk: {
-        if (have_text.vm_state) |*vm_state| {
-            if (vm_state.yielded) |*yielded| {
-                if (yielded.isExpired()) {
-                    std.log.debug("{s}: yield expired!", .{mod_name});
-                    const block_resume = yielded.block_resume;
-                    vm_state.yielded = null;
-                    break :blk .{
-                        .vm = &vm_state.instance,
-                        .block_resume = block_resume,
-                    };
-                }
-            }
-            break :blk null;
-        } else {
-            have_text.vm_state = .{
-                .yielded = null,
-                .instance = .{
-                    .dotnet_funcs = dotnet_funcs,
-                    .text = have_text.text,
-                    .mem = .{ .allocator = std.heap.page_allocator },
-                },
-            };
-            break :blk .{
-                .vm = &have_text.vm_state.?.instance,
-                .block_resume = .{},
-            };
-        }
-    };
-    if (maybe_eval) |eval| {
-        eval.vm.out = out;
-        defer eval.vm.out = null;
-        if (eval.vm.evalRoot(eval.block_resume)) |yield| {
-            // TODO: call vm.verifyStack?
-            out_tests_scheduled.* = out_tests_scheduled.* or eval.vm.tests_scheduled;
-            eval.vm.tests_scheduled = false;
-            have_text.vm_state.?.yielded = .{
-                .time = getNow(),
-                .timeout_ms = if (yield.millis < 0) 0 else @intCast(yield.millis),
-                .block_resume = yield.block_resume,
-            };
-        } else |_| switch (eval.vm.error_result) {
-            .exit => {
-                out_tests_scheduled.* = out_tests_scheduled.* or eval.vm.tests_scheduled;
-                std.log.info("{s} has exited", .{mod_name});
-                eval.vm.reset();
-                have_text.vm_state.?.yielded = null;
-            },
-            .err => |err| {
-                std.log.err("{s}:{f}", .{ mod_name, err.fmt(have_text.text, dotnet_funcs) });
-            },
-        }
-    }
-}
-
-fn getNow() std.time.Instant {
-    return std.time.Instant.now() catch unreachable;
-}
-
-fn findStaleMod() ?*Mod {
-    var maybe_mod = global.mods.first;
-    while (maybe_mod) |list_node| : (maybe_mod = list_node.next) {
-        const mod: *Mod = @fieldParentPtr("list_node", list_node);
-        if (mod.stale) return mod;
-    }
-    return null;
-}
-
-// // Export a function that the C# managed code can call
-// // This allows us to bridge between native and managed
-// export fn NativeLog(message: [*:0]const u8) callconv(.c) void {
-//     const msg = std.mem.span(message);
-//     std.log.info("{s}", .{msg});
-// }
 
 fn log(
     comptime message_level: std.log.Level,
@@ -1337,42 +626,6 @@ fn writeFlushLog(
     try writer.flush();
 }
 
-// fn getBasename(path: []const u16) []const u16 {
-//     for (1..path.len) |i| {
-//         if (path[path.len - i] == '\\')
-//             return path[path.len - i + 1 ..];
-//     }
-//     return path;
-// }
-// fn getDirname(path: []const u16) ?[]const u16 {
-//     for (1..path.len) |i| {
-//         if (path[path.len - i] == '\\')
-//             return path[0 .. path.len - i];
-//     }
-//     return null;
-// }
-
-fn fmtMsgbox(
-    style: win32.MESSAGEBOX_STYLE,
-    title: [*:0]const u8,
-    comptime fmt: [:0]const u8,
-    args: anytype,
-) win32.MESSAGEBOX_RESULT {
-    if (style.ICONHAND == 1) {
-        std.log.err("msgbox(error) " ++ fmt, args);
-    } else {
-        std.log.info("msgbox: " ++ fmt, args);
-    }
-    var arena_instance = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_instance.deinit();
-    const arena = arena_instance.allocator();
-    const msg = std.fmt.allocPrintSentinel(arena, fmt, args, 0) catch |err| switch (err) {
-        error.OutOfMemory => fmt,
-    };
-    //defer global.arena.free(msg);
-    return win32.MessageBoxA(null, msg, title, style);
-}
-
 fn wndProc(
     hwnd: win32.HWND,
     msg: u32,
@@ -1380,6 +633,26 @@ fn wndProc(
     lparam: win32.LPARAM,
 ) callconv(.winapi) win32.LRESULT {
     switch (msg) {
+        win32.WM_CREATE => {
+            // mainthread.setHwnd(hwnd);
+            return 0;
+        },
+        win32.WM_DESTROY => {
+            // mainthread.unsetHwnd(hwnd);
+            return 0;
+        },
+        win32.WM_CLOSE => {
+            // don't call DefWindowProc, it calls DestroyWindow but we do that ourselves
+            // in a defer.
+            return 0;
+        },
+        win32.WM_TIMER => {
+            switch (@as(TimerId, @enumFromInt(wparam))) {
+                .tick => timerTick(hwnd),
+                else => {},
+            }
+            return 0;
+        },
         win32.WM_COPYDATA => {
             const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             if (copy_data.dwData != mutinyipc.wm_copydata_run_script) {
@@ -1390,8 +663,8 @@ fn wndProc(
                 std.log.info("bad run-script cbData {}", .{copy_data.cbData});
                 return 0x7fffffff;
             }
-            const script_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
-            const request: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, script_bytes));
+            const request_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
+            const request: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, request_bytes));
             var strings = mutinyipc.StringList.init(request) catch {
                 std.log.info("malformed run-script request", .{});
                 return 0x7fffffff;
@@ -1440,6 +713,7 @@ fn wndProc(
             var pipe_write_buf: [400]u8 = undefined;
             var pipe_writer = pipe_file.writerStreaming(&pipe_write_buf);
             const writer = &pipe_writer.interface;
+
             if (addScript(pid, pipe, writer, script, &strings)) {
                 pipe_owned = false;
             } else |e| switch (e) {
@@ -1449,12 +723,47 @@ fn wndProc(
                     return mutinyipc.wm_copydata_result;
                 },
             }
+
             return mutinyipc.wm_copydata_result;
         },
+        // WM_APP...
         mutinyipc.wm_heartbeat => return mutinyipc.heartbeat_result,
         else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
+fn timerTick(hwnd: win32.HWND) void {
+    mainthread.mutinyThreadOnTick(&global.last_post_result);
+    switch (global.tick_mode) {
+        .init_update => switch (mainthread.mutinyThreadInitUpdate()) {
+            .keep_calling => {},
+            .done => {
+                if (0 == win32.SetTimer(
+                    hwnd,
+                    @intFromEnum(TimerId.tick),
+                    update_mods_ms,
+                    null,
+                )) {
+                    std.log.err("SetTimer() failed, error={f}", .{win32.GetLastError()});
+                    return; // don't update mode, next tick will retry to set the timer
+                }
+                global.tick_mode = .{ .update_mods = .{ .last_error = null } };
+            },
+        },
+        .update_mods => |*state| {
+            const maybe_error = updateMods();
+            if (maybe_error) |*new_error| {
+                const same_error = if (state.last_error) |*le| new_error.eql(le) else false;
+                if (!same_error) {
+                    new_error.log(global.mods_path.slice);
+                    state.last_error = new_error.*;
+                    std.debug.assert(new_error.eql(&state.last_error.?));
+                }
+            }
+        },
+    }
+}
+
+const arenaIsClear = mainthread.arenaIsClear;
 
 const fmtW = std.unicode.fmtUtf16Le;
 
@@ -1463,16 +772,11 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const mainthread = @import("mainthread");
 
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// TODO: one or more of these should be removed and moved only into mainthread
+const modfiles = @import("modfiles.zig");
+
 const appdata = mainthread.appdata;
-const detour = mainthread.detour;
-const dotnet = mainthread.dotnet;
-const dynlib = mainthread.dynlib;
-const il2cppclass = mainthread.il2cppclass;
 const logfile = mainthread.logfile;
 const mutinyipc = mainthread.mutinyipc;
 
-const Mutex = mainthread.Mutex;
-const UnityVersion = mainthread.UnityVersion;
-const Vm = mainthread.Vm;
+const Builtin = mainthread.Builtin;
+const ModNameSlice = mainthread.ModNameSlice;

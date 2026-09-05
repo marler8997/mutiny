@@ -1461,10 +1461,10 @@ const fmtW = std.unicode.fmtUtf16Le;
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const mainthread = @import("mainthread");
 
 const appdata = @import("appdata.zig");
 const dynlib = @import("dynlib.zig");
-const mainthread = @import("mainthread.zig");
 const mutinyipc = @import("mutinyipc.zig");
 const logfile = @import("logfile.zig");
 const detour = @import("detour.zig");

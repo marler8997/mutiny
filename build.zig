@@ -44,6 +44,14 @@ pub fn build(b: *std.Build) void {
         "rebuild managed/MutinyTest.dll if MutinyTest.cs changed",
     ).dependOn(&test_dll.step);
 
+    const mainthread_mod = b.createModule(.{
+        .root_source_file = b.path("mainthread/mainthread.zig"),
+        .target = target,
+    });
+    if (target.result.os.tag == .windows) {
+        mainthread_mod.addImport("win32", win32_mod);
+    }
+
     const mutiny_native_dll = b.addLibrary(.{
         .name = "Mutiny",
         .linkage = .dynamic,
@@ -52,17 +60,23 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "win32", .module = win32_mod },
-                // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
-                // handler to use a threadlocal (_tls_index) which the injected DLL has
-                // no startup to define.
-                .{ .name = "zydis", .module = zydis.unsanitized },
+                .{ .name = "mainthread", .module = mainthread_mod },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,
                 // }) },
             },
         }),
     });
+    if (target.result.os.tag == .windows) {
+        mutiny_native_dll.root_module.addImport("win32", win32_mod);
+    }
+    if (target.result.cpu.arch == .x86_64) {
+        // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
+        // handler to use a threadlocal (_tls_index) which the injected DLL has
+        // no startup to define.
+        mutiny_native_dll.root_module.addImport("zydis", zydis.unsanitized);
+    }
+
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(
         b.path("mutiny-agent.md"),
         .{ .custom = "appdata" },

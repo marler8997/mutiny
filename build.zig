@@ -1,6 +1,13 @@
 const std = @import("std");
 const UpdateDll = @import("UpdateDll.zig");
 
+fn SanitizeVariants(comptime T: type) type {
+    return struct {
+        sanitized: T,
+        unsanitized: T,
+    };
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -11,10 +18,7 @@ pub fn build(b: *std.Build) void {
     // const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
-    const zydis: struct {
-        sanitized: *std.Build.Module,
-        unsanitized: *std.Build.Module,
-    } = .{
+    const zydis: SanitizeVariants(*std.Build.Module) = .{
         .sanitized = createZydisModule(b, target, optimize, .{ .sanitize_c = .full }),
         .unsanitized = createZydisModule(b, target, optimize, .{ .sanitize_c = .off }),
     };
@@ -44,6 +48,25 @@ pub fn build(b: *std.Build) void {
         "rebuild managed/MutinyTest.dll if MutinyTest.cs changed",
     ).dependOn(&test_dll.step);
 
+    const mutiny_mod: SanitizeVariants(*std.Build.Module) = .{
+        .sanitized = b.createModule(.{
+            .root_source_file = b.path("src/mutiny.zig"),
+            .target = target,
+        }),
+        .unsanitized = b.createModule(.{
+            .root_source_file = b.path("src/mutiny.zig"),
+            .target = target,
+        }),
+    };
+    if (target.result.os.tag == .windows) {
+        mutiny_mod.sanitized.addImport("win32", win32_mod);
+        mutiny_mod.unsanitized.addImport("win32", win32_mod);
+    }
+    if (target.result.cpu.arch == .x86_64) {
+        mutiny_mod.sanitized.addImport("zydis", zydis.sanitized);
+        mutiny_mod.unsanitized.addImport("zydis", zydis.unsanitized);
+    }
+
     const mainthread_mod = b.createModule(.{
         .root_source_file = b.path("mainthread/mainthread.zig"),
         .target = target,
@@ -56,10 +79,14 @@ pub fn build(b: *std.Build) void {
         .name = "Mutiny",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/mutinydll.zig"),
+            .root_source_file = b.path("mutinydll/mutinydll.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
+                // handler to use a threadlocal (_tls_index) which the injected DLL has
+                // no startup to define.
+                .{ .name = "mutiny", .module = mutiny_mod.unsanitized },
                 .{ .name = "mainthread", .module = mainthread_mod },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,
@@ -69,12 +96,6 @@ pub fn build(b: *std.Build) void {
     });
     if (target.result.os.tag == .windows) {
         mutiny_native_dll.root_module.addImport("win32", win32_mod);
-    }
-    if (target.result.cpu.arch == .x86_64) {
-        // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
-        // handler to use a threadlocal (_tls_index) which the injected DLL has
-        // no startup to define.
-        mutiny_native_dll.root_module.addImport("zydis", zydis.unsanitized);
     }
 
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(
@@ -131,9 +152,12 @@ pub fn build(b: *std.Build) void {
         const cli = b.addExecutable(.{
             .name = "mutiny",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/cli.zig"),
+                .root_source_file = b.path("cli/cli.zig"),
                 .target = target,
                 .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "mutiny", .module = mutiny_mod.sanitized },
+                },
             }),
         });
         if (target.result.os.tag == .windows) {

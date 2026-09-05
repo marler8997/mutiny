@@ -275,6 +275,8 @@ fn oom(e: error{OutOfMemory}) noreturn {
 
 const std = @import("std");
 const win32 = @import("win32").everything;
+const mutiny = @import("mutiny");
+const mutinyipc = mutiny.mutinyipc;
+
 const cliscan = @import("cliscan.zig");
 const injector = @import("injector.zig");
-const mutinyipc = @import("mutinyipc.zig");

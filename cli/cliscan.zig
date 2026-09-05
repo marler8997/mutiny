@@ -115,6 +115,8 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 
 const std = @import("std");
 const win32 = @import("win32").everything;
-const dotnetkind = @import("dotnetkind.zig");
-const getname = @import("getname.zig");
-const mutinyipc = @import("mutinyipc.zig");
+const mutiny = @import("mutiny");
+
+const dotnetkind = mutiny.dotnetkind;
+const getname = mutiny.getname;
+const mutinyipc = mutiny.mutinyipc;

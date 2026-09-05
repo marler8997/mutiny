@@ -475,6 +475,8 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
 
 const std = @import("std");
 const win32 = @import("win32").everything;
-const getname = @import("getname.zig");
-const appdata = @import("appdata.zig");
-const mutinyipc = @import("mutinyipc.zig");
+const mutiny = @import("mutiny");
+
+const appdata = mutiny.appdata;
+const getname = mutiny.getname;
+const mutinyipc = mutiny.mutinyipc;

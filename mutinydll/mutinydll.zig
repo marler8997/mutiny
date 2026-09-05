@@ -1461,16 +1461,17 @@ const fmtW = std.unicode.fmtUtf16Le;
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const mutiny = @import("mutiny");
 const mainthread = @import("mainthread");
 
-const appdata = @import("appdata.zig");
-const dynlib = @import("dynlib.zig");
-const mutinyipc = @import("mutinyipc.zig");
-const logfile = @import("logfile.zig");
-const detour = @import("detour.zig");
-const dotnet = @import("dotnet.zig");
-const il2cppclass = @import("il2cppclass.zig");
+const appdata = mutiny.appdata;
+const detour = mutiny.detour;
+const dotnet = mutiny.dotnet;
+const dynlib = mutiny.dynlib;
+const il2cppclass = mutiny.il2cppclass;
+const logfile = mutiny.logfile;
+const mutinyipc = mutiny.mutinyipc;
 
-const Mutex = @import("Mutex.zig");
-const UnityVersion = @import("UnityVersion.zig");
-const Vm = @import("Vm.zig");
+const Mutex = mutiny.Mutex;
+const UnityVersion = mutiny.UnityVersion;
+const Vm = mutiny.Vm;

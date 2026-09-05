@@ -1461,17 +1461,18 @@ const fmtW = std.unicode.fmtUtf16Le;
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
-const mutiny = @import("mutiny");
 const mainthread = @import("mainthread");
 
-const appdata = mutiny.appdata;
-const detour = mutiny.detour;
-const dotnet = mutiny.dotnet;
-const dynlib = mutiny.dynlib;
-const il2cppclass = mutiny.il2cppclass;
-const logfile = mutiny.logfile;
-const mutinyipc = mutiny.mutinyipc;
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// TODO: one or more of these should be removed and moved only into mainthread
+const appdata = mainthread.appdata;
+const detour = mainthread.detour;
+const dotnet = mainthread.dotnet;
+const dynlib = mainthread.dynlib;
+const il2cppclass = mainthread.il2cppclass;
+const logfile = mainthread.logfile;
+const mutinyipc = mainthread.mutinyipc;
 
-const Mutex = mutiny.Mutex;
-const UnityVersion = mutiny.UnityVersion;
-const Vm = mutiny.Vm;
+const Mutex = mainthread.Mutex;
+const UnityVersion = mainthread.UnityVersion;
+const Vm = mainthread.Vm;

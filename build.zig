@@ -70,6 +70,12 @@ pub fn build(b: *std.Build) void {
     const mainthread_mod = b.createModule(.{
         .root_source_file = b.path("mainthread/mainthread.zig"),
         .target = target,
+        .imports = &.{
+            // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
+            // handler to use a threadlocal (_tls_index) which the injected DLL has
+            // no startup to define.
+            .{ .name = "mutiny", .module = mutiny_mod.unsanitized },
+        },
     });
     if (target.result.os.tag == .windows) {
         mainthread_mod.addImport("win32", win32_mod);
@@ -83,10 +89,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
-                // handler to use a threadlocal (_tls_index) which the injected DLL has
-                // no startup to define.
-                .{ .name = "mutiny", .module = mutiny_mod.unsanitized },
                 .{ .name = "mainthread", .module = mainthread_mod },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,

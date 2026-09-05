@@ -1,3 +1,18 @@
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// TODO: one or more of these should be removed once we move
+//       all relevant functionality out of mutinydll into this module
+pub const appdata = mutiny.appdata;
+pub const detour = mutiny.detour;
+pub const dotnet = mutiny.dotnet;
+pub const dynlib = mutiny.dynlib;
+pub const il2cppclass = mutiny.il2cppclass;
+pub const logfile = mutiny.logfile;
+pub const mutinyipc = mutiny.mutinyipc;
+
+pub const Mutex = mutiny.Mutex;
+pub const UnityVersion = mutiny.UnityVersion;
+pub const Vm = mutiny.Vm;
+
 const global = struct {
     var state: State = .{ .initial = .{} };
     var wnd_msg: u32 = undefined;
@@ -332,3 +347,4 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const mutiny = @import("mutiny");

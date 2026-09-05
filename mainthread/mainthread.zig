@@ -1,26 +1,45 @@
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// TODO: one or more of these should be removed once we move
-//       all relevant functionality out of mutinydll into this module
 pub const appdata = mutiny.appdata;
-pub const detour = mutiny.detour;
-pub const dotnet = mutiny.dotnet;
-pub const dynlib = mutiny.dynlib;
-pub const il2cppclass = mutiny.il2cppclass;
 pub const logfile = mutiny.logfile;
 pub const mutinyipc = mutiny.mutinyipc;
 
 pub const Mutex = mutiny.Mutex;
-pub const UnityVersion = mutiny.UnityVersion;
-pub const Vm = mutiny.Vm;
+
+// use WM_USER so this is a private message to this process
+pub const wm_mutiny_init_ack = win32.WM_USER + 0;
 
 const global = struct {
+    var shared: struct {
+        mutex: Mutex = .{},
+        mutiny_hwnd: ?win32.HWND = null,
+        init_state: InitState = .idle,
+    } = .{};
     var state: State = .{ .initial = .{} };
     var wnd_msg: u32 = undefined;
+    var hwnd: win32.HWND = undefined;
     var subclass: struct {
         mutex: std.Thread.Mutex = .{},
         wndproc: win32.WNDPROC = undefined,
     } = .{};
 };
+
+const InitState = union(enum) {
+    idle,
+    initializing,
+    complete,
+};
+
+pub fn setHwnd(hwnd: win32.HWND) void {
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    std.debug.assert(global.shared.mutiny_hwnd == null);
+    global.shared.mutiny_hwnd = hwnd;
+}
+pub fn unsetHwnd(hwnd: win32.HWND) void {
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    std.debug.assert(global.shared.mutiny_hwnd == hwnd);
+    global.shared.mutiny_hwnd = null;
+}
 
 const State = union(enum) {
     initial: struct {
@@ -31,14 +50,13 @@ const State = union(enum) {
         candidate_count: ?u32 = null,
     },
     subclass: struct {
-        hwnd: win32.HWND,
-        tid: u32,
         set_wndproc_error: ?win32.WIN32_ERROR = null,
     },
-    installed: struct {
-        hwnd: win32.HWND,
-        tid: u32,
+    post_init: struct {
+        post_error: ?PostError = null,
     },
+    init_posted,
+    // initialized,
 };
 
 fn coalescedLog(
@@ -60,6 +78,10 @@ fn coalescedLog(
 
 fn eql(comptime T: type, a: *const T, b: *const T) bool {
     if (T == ?win32.WIN32_ERROR or T == ?u32) return a.* == b.*;
+    if (T == ?PostError) {
+        if (a.* == null) return b.* == null;
+        return std.meta.eql(&a.*.?, &b.*.?);
+    }
     @compileError("todo: implement eql for " ++ @typeName(T));
 }
 
@@ -69,18 +91,21 @@ const PostActionArgs = if (builtin.os.tag == .windows) struct {
 } else struct {};
 
 pub const PostAction = union(enum) {
+    init,
     subclass_self_test,
     pub fn deserialize(args: PostActionArgs) ?PostAction {
         if (builtin.os.tag == .windows) {
             return switch (args.wparam) {
-                1 => return .subclass_self_test,
+                1 => return .init,
+                2 => return .subclass_self_test,
                 else => null,
             };
         } else @panic("todo");
     }
     pub fn serialize(action: PostAction) PostActionArgs {
         if (builtin.os.tag == .windows) return switch (action) {
-            .subclass_self_test => .{ .wparam = 1, .lparam = undefined },
+            .init => .{ .wparam = 1, .lparam = undefined },
+            .subclass_self_test => .{ .wparam = 2, .lparam = undefined },
         } else @panic("todo");
     }
 };
@@ -113,18 +138,42 @@ pub const Target = struct {
         }
     }
 };
-pub fn getTarget() ?Target {
-    return switch (global.state) {
-        .initial,
-        .find_window,
-        .subclass,
-        => null,
-        .installed => |*state| .{ .data = .{ .hwnd = state.hwnd, .msg = global.wnd_msg } },
-    };
+// pub fn getInitializedTarget() ?Target {
+//     return switch (global.state) {
+//         .initial,
+//         .find_window,
+//         .subclass,
+//         .post_init, // has hwnd/msg but it's not initialized yet
+//         .init_posted, // has hwnd/msg but it's not initialized yet
+//         => null,
+//         // .init_posted => .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } },
+//         // .installed =>
+//     };
+// }
+
+pub fn onInitAck() void {
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    switch (global.shared.init_state) {
+        .idle, .initializing => {
+            std.log.warn(
+                "mutiny thread received wm_mutiny_init_ack({d}) with init state {t}",
+                .{ wm_mutiny_init_ack, global.shared.init_state },
+            );
+        },
+        .complete => {
+            switch (global.state) {
+                .initial, .find_window, .subclass, .post_init => {
+                    std.log.warn("mutiny thread received wm_mutiny_init_ack but hasn't posted init", .{});
+                },
+                .init_posted => {},
+            }
+        },
+    }
 }
 
 // should be called by the mutiny thread
-pub fn update() enum { not_newly_installed, newly_installed } {
+pub fn update() enum { keep_timer, kill_timer } {
     state: switch (global.state) {
         .initial => |*state| {
             global.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
@@ -138,7 +187,7 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     "RegiserWindowMessage failed, error={f}",
                     .{err},
                 );
-                return .not_newly_installed;
+                return .keep_timer;
             }
             global.state = .{ .find_window = .{} };
             continue :state global.state;
@@ -155,7 +204,7 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     "EnumWindows failed, error={f}",
                     .{err},
                 );
-                return .not_newly_installed;
+                return .keep_timer;
             }
 
             if (ctx.candidate_count != 1) {
@@ -167,11 +216,12 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     "{} main unity window candidates",
                     .{ctx.candidate_count},
                 );
-                return .not_newly_installed;
+                return .keep_timer;
             }
             const window = &ctx.first_candidate.?;
             std.log.info("found unity window 0x{x} on thread {}", .{ @intFromPtr(window.hwnd), window.tid });
-            global.state = .{ .subclass = .{ .hwnd = window.hwnd, .tid = window.tid } };
+            global.hwnd = window.hwnd;
+            global.state = .{ .subclass = .{} };
             continue :state global.state;
         },
         .subclass => |*state| {
@@ -180,7 +230,7 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                 defer global.subclass.mutex.unlock();
                 win32.SetLastError(.NO_ERROR);
                 const old_wndproc = win32.setWindowLongPtrW(
-                    state.hwnd,
+                    global.hwnd,
                     @intFromEnum(win32.GWLP_WNDPROC),
                     @intFromPtr(&subclassProc),
                 );
@@ -204,21 +254,27 @@ pub fn update() enum { not_newly_installed, newly_installed } {
                     },
                     else => {},
                 }
-                return .not_newly_installed;
+                return .keep_timer;
             }
-            std.log.info("mainthread: subclassed window 0x{x} on thread {} (original wndproc 0x{x})", .{
-                @intFromPtr(state.hwnd),
-                state.tid,
+            std.log.info("mainthread: subclassed window 0x{x} (original wndproc 0x{x})", .{
+                @intFromPtr(global.hwnd),
                 old_wndproc,
             });
-            const hwnd = state.hwnd;
-            const tid = state.tid;
-            global.state = .{ .installed = .{ .hwnd = hwnd, .tid = tid } };
-            return .newly_installed;
+            global.state = .{ .post_init = .{} };
+            continue :state global.state;
         },
-        .installed => {},
+        .post_init => |*state| {
+            const target: Target = .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } };
+            var err: PostError = undefined;
+            target.post(.init, &err) catch {
+                coalescedLog(?PostError, &state.post_error, err, .err, "PostMessage failed, error={f}", .{err});
+                return .keep_timer;
+            };
+            global.state = .init_posted;
+            continue :state global.state;
+        },
+        .init_posted => return .kill_timer,
     }
-    return .not_newly_installed;
 }
 
 fn BoundedArray(comptime T: type, buffer_capacity: usize) type {
@@ -323,6 +379,20 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
     return win32.TRUE; // never stop early, so EnumWindows returning FALSE is unambiguously an error
 }
 
+fn lockedSendInitAck() void {
+    if (global.shared.mutiny_hwnd == null) {
+        std.log.warn("mutiny thread hwnd gone after init complete", .{});
+    } else if (0 == win32.PostMessageW(global.shared.mutiny_hwnd, wm_mutiny_init_ack, 0, 0)) {
+        // failing to post would result in mutiny waiting forever, and, the lock should prevent
+        // the hwnd from being destroyed so, this should always work, no need to
+        // handle if it doesn't, panic helps surface counterexample if it exists.
+        std.debug.panic(
+            "PostMessage for wm_mutiny_init_ack failed, error={f}",
+            .{win32.GetLastError()},
+        );
+    }
+}
+
 fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
     if (msg == global.wnd_msg) {
         const action = PostAction.deserialize(.{ .wparam = wparam, .lparam = lparam }) orelse {
@@ -330,6 +400,36 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
             return 0;
         };
         switch (action) {
+            .init => {
+                {
+                    global.shared.mutex.lock();
+                    defer global.shared.mutex.unlock();
+                    switch (global.shared.init_state) {
+                        .idle => global.shared.init_state = .initializing,
+                        .initializing => {
+                            std.log.err("main thread received init while already initialinzg?", .{});
+                            return 0;
+                        },
+                        .complete => {
+                            lockedSendInitAck();
+                            return 0;
+                        },
+                    }
+                }
+
+                init();
+
+                {
+                    global.shared.mutex.lock();
+                    defer global.shared.mutex.unlock();
+                    switch (global.shared.init_state) {
+                        .idle, .complete => unreachable,
+                        .initializing => {},
+                    }
+                    global.shared.init_state = .complete;
+                    lockedSendInitAck();
+                }
+            },
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
             },
@@ -342,6 +442,10 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
         break :blk global.subclass.wndproc;
     };
     return win32.CallWindowProcW(wndproc, hwnd, msg, wparam, lparam);
+}
+
+fn init() void {
+    std.log.info("TODO: implement init", .{});
 }
 
 const builtin = @import("builtin");

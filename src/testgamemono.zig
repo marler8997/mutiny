@@ -30,7 +30,7 @@ pub export fn wWinMain(
 
     global.mono_state = initMono();
 
-    const CLASS_NAME = win32.L("TestGameWindow");
+    const CLASS_NAME = win32.L("UnityWndClass");
     const wc = win32.WNDCLASSW{
         .style = .{},
         .lpfnWndProc = WindowProc,

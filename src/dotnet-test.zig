@@ -131,16 +131,12 @@ pub fn main() !void {
 
             std.log.info("il2cpp_init...", .{});
             init_funcs.init("dotnet-test");
-            const from_il2cpp_type = detour.findFunction(
-                module,
-                "il2cpp_class_from_il2cpp_type",
-            ) catch |e| errExit("locate Class::FromIl2CppType: {s}", .{@errorName(e)});
-
-            std.log.info("detour: Class::FromIl2CppType resolved to 0x{x}", .{from_il2cpp_type});
-            break :blk dotnet_funcs.get_root_domain() orelse errExit(
+            const domain = dotnet_funcs.get_root_domain() orelse errExit(
                 "mono_get_root_domain returned NULL",
                 .{},
             );
+            testDetour(&dotnet_funcs, module, domain);
+            break :blk domain;
         },
     };
 
@@ -161,6 +157,51 @@ pub fn main() !void {
         std.process.exit(0xff);
     };
     std.log.info("dotnet-test: success", .{});
+}
+
+// Locate the internal Class::FromIl2CppType, install a pass-through detour on it, and confirm the
+// hooked export still resolves the same class through the trampoline -- proving the trampoline+patch
+// are byte-correct before any real hook logic rides on them.
+fn testDetour(funcs: *const dotnet.Funcs, module: dynlib.Module, domain: *const dotnet.Domain) void {
+    const target = detour.findFunction(module, "il2cpp_class_from_il2cpp_type") catch |e|
+        errExit("locate Class::FromIl2CppType: {s}", .{@errorName(e)});
+    std.log.info("detour: Class::FromIl2CppType at 0x{x}", .{target});
+
+    const object = findClassByName(funcs, domain, "System", "Object") orelse errExit("no System.Object", .{});
+    const object_type = funcs.class_get_type(object);
+    const from_type: *const fn (*const dotnet.Type) callconv(.c) ?*const dotnet.Class =
+        @ptrCast(dynlib.getProc(module, "il2cpp_class_from_il2cpp_type") catch unreachable);
+    const before = from_type(object_type);
+
+    const installed = detour.install(target, @intFromPtr(&fromIl2CppTypeHook)) catch |e|
+        errExit("detour install: {s}", .{@errorName(e)});
+    fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
+
+    const after = from_type(object_type);
+    if (after != before or after != object)
+        errExit("pass-through detour changed class_from_il2cpp_type result", .{});
+    std.log.info("detour: pass-through hook validated -- resolves the same class through the trampoline", .{});
+}
+
+fn findClassByName(
+    funcs: *const dotnet.Funcs,
+    domain: *const dotnet.Domain,
+    namespace: [*:0]const u8,
+    name: [*:0]const u8,
+) ?*const dotnet.Class {
+    var count: usize = 0;
+    const assemblies = funcs.kind.il2cpp.domain_get_assemblies(domain, &count);
+    for (assemblies[0..count]) |assembly| {
+        const image = funcs.assembly_get_image(assembly) orelse continue;
+        if (funcs.class_from_name(image, namespace, name)) |class| return class;
+    }
+    return null;
+}
+
+const FromIl2CppType = *const fn (*const dotnet.Type, bool) callconv(.c) ?*const dotnet.Class;
+var fromIl2CppTypeOrig: FromIl2CppType = undefined;
+fn fromIl2CppTypeHook(t: *const dotnet.Type, throw_on_error: bool) callconv(.c) ?*const dotnet.Class {
+    return fromIl2CppTypeOrig(t, throw_on_error);
 }
 
 const Il2cppInitFuncs = struct {
@@ -257,7 +298,8 @@ const std = @import("std");
 const detour = @import("detour.zig");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
-const UnityVersion = @import("UnityVersion.zig");
 const mono_funcs = @import("dotnetload.zig").template(MonoInitFuncs);
 const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppInitFuncs);
+
+const UnityVersion = @import("UnityVersion.zig");
 const Vm = @import("Vm.zig");

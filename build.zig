@@ -28,7 +28,15 @@ pub fn build(b: *std.Build) void {
         mod.addCMacro("ZYAN_NO_LIBC", "");
         mod.addCSourceFiles(.{
             .root = zydis_dep.path("src"),
-            .files = &.{ "Decoder.c", "DecoderData.c", "SharedData.c", "Register.c" },
+            .files = &.{
+                "Decoder.c",
+                "DecoderData.c",
+                "SharedData.c",
+                "Register.c",
+                "Encoder.c",
+                "EncoderData.c",
+                "Utils.c",
+            },
             .flags = &.{"-std=c11"},
         });
         mod.addCSourceFiles(.{

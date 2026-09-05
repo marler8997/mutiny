@@ -131,7 +131,7 @@ pub export fn _DllMainCRTStartup(
 
 const DotNetLib = struct {
     kind: dotnet.Kind,
-    module: win32.HINSTANCE,
+    module: dynlib.Module,
 };
 fn getDotNet(arg: struct {
     timeout_seconds: u32,
@@ -405,15 +405,52 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
             break :blk layouts;
         },
     };
-    // only the test fixture writes to the runtime today, and it discovers its own layouts;
-    // this call is the gate that refuses an unfamiliar layout before we run at all
-    _ = il2cpp_layouts;
+    // il2cpp: install the Class::FromIl2CppType hook and build our MonoBehaviour subclass now, so a
+    // later AddComponent(Il2CppType.Of<ours>) on the main thread resolves to it. The gate above
+    // already refused an unfamiliar layout, so these writes into runtime structures are verified.
+    if (dotnet_funcs.kind == .il2cpp) {
+        const target = detour.findFunction(dotnet_lib.module, "il2cpp_class_from_il2cpp_type") catch |err| {
+            std.log.err("could not locate Class::FromIl2CppType ({t})", .{err});
+            return 0xffffffff;
+        };
+        const installed = detour.install(target, @intFromPtr(&il2cppclass.fromIl2CppTypeHook)) catch |err| {
+            std.log.err("could not install the FromIl2CppType hook ({t})", .{err});
+            return 0xffffffff;
+        };
+        il2cppclass.global.fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
+
+        var assembly_count: usize = 0;
+        const assemblies = dotnet_funcs.kind.il2cpp.domain_get_assemblies(root_domain, &assembly_count);
+        il2cppclass.subclassSelfTest(
+            &dotnet_funcs,
+            assemblies[0..assembly_count],
+            il2cpp_layouts,
+            maybe_unity_version.?,
+        ) catch |err| {
+            std.log.err("could not build the injected MonoBehaviour subclass ({t})", .{err});
+            return 0xffffffff;
+        };
+        std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
+    }
 
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var last_update_mods_error: ?UpdateModsError = null;
 
     main_loop: while (true) {
-        mainthread.update();
+        switch (mainthread.update()) {
+            .not_newly_installed => {},
+            .newly_installed => {
+                // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                // TODO: this is just temporary, if we have a 1-time initialization
+                //       to do on the main thread, then that should probably be another
+                //       state in mainthread
+                // getTarget().? is always set after newly_installed
+                var post_error: mainthread.PostError = undefined;
+                mainthread.getTarget().?.post(.subclass_self_test, &post_error) catch {
+                    std.log.err("post failed, error={f}", .{post_error});
+                };
+            },
+        }
 
         {
             var msg: win32.MSG = undefined;
@@ -1424,12 +1461,16 @@ const fmtW = std.unicode.fmtUtf16Le;
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+
 const appdata = @import("appdata.zig");
+const dynlib = @import("dynlib.zig");
 const mainthread = @import("mainthread.zig");
-const Mutex = @import("Mutex.zig");
 const mutinyipc = @import("mutinyipc.zig");
-const Vm = @import("Vm.zig");
 const logfile = @import("logfile.zig");
+const detour = @import("detour.zig");
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
+
+const Mutex = @import("Mutex.zig");
 const UnityVersion = @import("UnityVersion.zig");
+const Vm = @import("Vm.zig");

@@ -11,40 +11,12 @@ pub fn build(b: *std.Build) void {
     // const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
-    // Zydis (x86-64 decoder) for the il2cpp detour
-    const zydis_mod = blk: {
-        const zydis_dep = b.dependency("zydis", .{});
-        const zycore_dep = b.dependency("zycore", .{});
-        const mod = b.createModule(.{
-            .root_source_file = b.path("zydis/zydis.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        mod.addIncludePath(zydis_dep.path("include"));
-        mod.addIncludePath(zydis_dep.path("src")); // the .c files include <Generated/*.inc> from here
-        mod.addIncludePath(zycore_dep.path("include"));
-        mod.addCMacro("ZYDIS_STATIC_BUILD", "");
-        mod.addCMacro("ZYAN_STATIC_DEFINE", "");
-        mod.addCMacro("ZYAN_NO_LIBC", "");
-        mod.addCSourceFiles(.{
-            .root = zydis_dep.path("src"),
-            .files = &.{
-                "Decoder.c",
-                "DecoderData.c",
-                "SharedData.c",
-                "Register.c",
-                "Encoder.c",
-                "EncoderData.c",
-                "Utils.c",
-            },
-            .flags = &.{"-std=c11"},
-        });
-        mod.addCSourceFiles(.{
-            .root = zycore_dep.path("src"),
-            .files = &.{"Zycore.c"},
-            .flags = &.{"-std=c11"},
-        });
-        break :blk mod;
+    const zydis: struct {
+        sanitized: *std.Build.Module,
+        unsanitized: *std.Build.Module,
+    } = .{
+        .sanitized = createZydisModule(b, target, optimize, .{ .sanitize_c = .full }),
+        .unsanitized = createZydisModule(b, target, optimize, .{ .sanitize_c = .off }),
     };
 
     // old code that I'll probably need later in order to inject my own managed dll
@@ -81,6 +53,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "win32", .module = win32_mod },
+                // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
+                // handler to use a threadlocal (_tls_index) which the injected DLL has
+                // no startup to define.
+                .{ .name = "zydis", .module = zydis.unsanitized },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,
                 // }) },
@@ -216,7 +192,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zydis", .module = zydis_mod },
+                .{ .name = "zydis", .module = zydis.sanitized },
             },
         }),
     });
@@ -283,4 +259,47 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run.addArgs(args);
         b.step("dumpty", "").dependOn(&run.step);
     }
+}
+
+fn createZydisModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    named: struct {
+        sanitize_c: std.zig.SanitizeC,
+    },
+) *std.Build.Module {
+    const zydis_dep = b.dependency("zydis", .{});
+    const zycore_dep = b.dependency("zycore", .{});
+    const mod = b.createModule(.{
+        .root_source_file = b.path("zydis/zydis.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = named.sanitize_c,
+    });
+    mod.addIncludePath(zydis_dep.path("include"));
+    mod.addIncludePath(zydis_dep.path("src")); // the .c files include <Generated/*.inc> from here
+    mod.addIncludePath(zycore_dep.path("include"));
+    mod.addCMacro("ZYDIS_STATIC_BUILD", "");
+    mod.addCMacro("ZYAN_STATIC_DEFINE", "");
+    mod.addCMacro("ZYAN_NO_LIBC", "");
+    mod.addCSourceFiles(.{
+        .root = zydis_dep.path("src"),
+        .files = &.{
+            "Decoder.c",
+            "DecoderData.c",
+            "SharedData.c",
+            "Register.c",
+            "Encoder.c",
+            "EncoderData.c",
+            "Utils.c",
+        },
+        .flags = &.{"-std=c11"},
+    });
+    mod.addCSourceFiles(.{
+        .root = zycore_dep.path("src"),
+        .files = &.{"Zycore.c"},
+        .flags = &.{"-std=c11"},
+    });
+    return mod;
 }

@@ -48,8 +48,68 @@ fn eql(comptime T: type, a: *const T, b: *const T) bool {
     @compileError("todo: implement eql for " ++ @typeName(T));
 }
 
+const PostActionArgs = if (builtin.os.tag == .windows) struct {
+    wparam: win32.WPARAM,
+    lparam: win32.LPARAM,
+} else struct {};
+
+pub const PostAction = union(enum) {
+    subclass_self_test,
+    pub fn deserialize(args: PostActionArgs) ?PostAction {
+        if (builtin.os.tag == .windows) {
+            return switch (args.wparam) {
+                1 => return .subclass_self_test,
+                else => null,
+            };
+        } else @panic("todo");
+    }
+    pub fn serialize(action: PostAction) PostActionArgs {
+        if (builtin.os.tag == .windows) return switch (action) {
+            .subclass_self_test => .{ .wparam = 1, .lparam = undefined },
+        } else @panic("todo");
+    }
+};
+
+pub const PostError = struct {
+    data: if (builtin.os.tag == .windows) win32.WIN32_ERROR else void,
+    pub fn format(e: PostError, writer: *std.Io.Writer) error{WriteFailed}!void {
+        if (builtin.os.tag == .windows) {
+            try writer.print("{f}", .{e.data});
+        } else {
+            @compileError("todo");
+        }
+    }
+};
+pub const Target = struct {
+    data: if (builtin.os.tag == .windows) struct {
+        hwnd: win32.HWND,
+        msg: u32,
+    } else struct {},
+
+    pub fn post(target: *const Target, action: PostAction, out_err: *PostError) error{Post}!void {
+        if (builtin.os.tag == .windows) {
+            const args = action.serialize();
+            if (0 == win32.PostMessageW(target.data.hwnd, target.data.msg, args.wparam, args.lparam)) {
+                out_err.* = .{ .data = win32.GetLastError() };
+                return error.Post;
+            }
+        } else {
+            @panic("todo");
+        }
+    }
+};
+pub fn getTarget() ?Target {
+    return switch (global.state) {
+        .initial,
+        .find_window,
+        .subclass,
+        => null,
+        .installed => |*state| .{ .data = .{ .hwnd = state.hwnd, .msg = global.wnd_msg } },
+    };
+}
+
 // should be called by the mutiny thread
-pub fn update() void {
+pub fn update() enum { not_newly_installed, newly_installed } {
     state: switch (global.state) {
         .initial => |*state| {
             global.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
@@ -63,7 +123,7 @@ pub fn update() void {
                     "RegiserWindowMessage failed, error={f}",
                     .{err},
                 );
-                return;
+                return .not_newly_installed;
             }
             global.state = .{ .find_window = .{} };
             continue :state global.state;
@@ -80,7 +140,7 @@ pub fn update() void {
                     "EnumWindows failed, error={f}",
                     .{err},
                 );
-                return;
+                return .not_newly_installed;
             }
 
             if (ctx.candidate_count != 1) {
@@ -92,7 +152,7 @@ pub fn update() void {
                     "{} main unity window candidates",
                     .{ctx.candidate_count},
                 );
-                return;
+                return .not_newly_installed;
             }
             const window = &ctx.first_candidate.?;
             std.log.info("found unity window 0x{x} on thread {}", .{ @intFromPtr(window.hwnd), window.tid });
@@ -129,7 +189,7 @@ pub fn update() void {
                     },
                     else => {},
                 }
-                return;
+                return .not_newly_installed;
             }
             std.log.info("mainthread: subclassed window 0x{x} on thread {} (original wndproc 0x{x})", .{
                 @intFromPtr(state.hwnd),
@@ -139,10 +199,11 @@ pub fn update() void {
             const hwnd = state.hwnd;
             const tid = state.tid;
             global.state = .{ .installed = .{ .hwnd = hwnd, .tid = tid } };
-            continue :state global.state;
+            return .newly_installed;
         },
         .installed => {},
     }
+    return .not_newly_installed;
 }
 
 fn BoundedArray(comptime T: type, buffer_capacity: usize) type {
@@ -249,7 +310,15 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
 
 fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
     if (msg == global.wnd_msg) {
-        std.log.info("TODO: handle message on main thread", .{});
+        const action = PostAction.deserialize(.{ .wparam = wparam, .lparam = lparam }) orelse {
+            std.log.err("unknown wparam 0x{x} lparam 0x{x}", .{ wparam, lparam });
+            return 0;
+        };
+        switch (action) {
+            .subclass_self_test => {
+                std.log.info("TODO: run subclass self test", .{});
+            },
+        }
         return 0;
     }
     const wndproc = blk: {

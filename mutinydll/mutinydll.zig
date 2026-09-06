@@ -3,6 +3,7 @@ pub const enable_mutiny_test_class = false;
 const global = struct {
     var hinstance: win32.HINSTANCE = undefined;
 
+    var thread_id: u32 = 0;
     var file_arena: std.heap.ArenaAllocator = undefined;
     var mods_path_buf: [appdata.max_path]u16 = undefined;
     var mods_path: ModsPath = undefined;
@@ -39,32 +40,49 @@ pub fn panic(
     if (0 == global.paniced_threads_dumping.fetchAdd(1, .seq_cst)) {
         const log_file, const maybe_open_log_error = logfile.global.get();
         _ = maybe_open_log_error;
-        var buffer: [1024]u8 = undefined;
-        var file_writer = log_file.writer(&buffer);
+        // no buffer so we flush as soon as possible so as not to lose any output
+        var file_writer = log_file.writer(&.{});
         writeStackTrace(
             error_return_trace,
             ret_addr,
             std.io.tty.detectConfig(log_file),
             &file_writer.interface,
         ) catch |err| file_writer.interface.print(
-            "write stack trace failed with {t}",
+            "write stack trace failed with {t}\n",
             .{switch (err) {
                 error.WriteFailed => file_writer.err orelse error.Unexpected,
                 else => |e| e,
             }},
         ) catch {};
     }
-    if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
-        var buf: [200]u8 = undefined;
-        if (std.fmt.bufPrintZ(&buf, "{s}", .{msg})) |msg_z| {
-            _ = win32.MessageBoxA(null, msg_z, "Mutiny Panic", .{});
-        } else |_| {
-            _ = win32.MessageBoxA(null, "message too long", "Mutiny.dll Panic", .{});
+    const current_thread_id = win32.GetCurrentThreadId();
+    if (current_thread_id == global.thread_id) {
+        if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
+            var buf: [200]u8 = undefined;
+            if (std.fmt.bufPrintZ(&buf, "{s}", .{msg})) |msg_z| {
+                _ = win32.MessageBoxA(null, msg_z, "Mutiny Panic", .{});
+            } else |_| {
+                _ = win32.MessageBoxA(null, "message too long", "Mutiny.dll Panic", .{});
+            }
         }
+        if (win32.IsDebuggerPresent() != 0) @breakpoint();
+        win32.ExitThread(0x8071540);
     }
-    @breakpoint();
-    win32.ExitThread(0x8071540);
+    std.log.err(
+        "panic on thread {} (not the mutiny thread), raising an exception for the game's crash handler",
+        .{current_thread_id},
+    );
+    if (win32.IsDebuggerPresent() != 0) @breakpoint();
+    win32.RaiseException(
+        mutiny_panic_exception_code,
+        win32.EXCEPTION_NONCONTINUABLE,
+        0,
+        null,
+    );
+    unreachable; // RaiseException should be noreturn when passed EXCEPTION_NONCONTINUABLE,
 }
+
+const mutiny_panic_exception_code: u32 = 0xE0000000 | 0x4D544E59;
 
 fn writeStackTrace(
     error_return_trace: ?*std.builtin.StackTrace,
@@ -198,6 +216,8 @@ fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
     }
 
     // we're now considered the sole owner of all our global data
+    global.thread_id = win32.GetCurrentThreadId();
+    defer global.thread_id = 0;
     global.file_arena = .init(std.heap.page_allocator);
     defer {
         std.debug.assert(arenaIsClear(&global.file_arena));

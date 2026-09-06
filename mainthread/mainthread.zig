@@ -31,7 +31,7 @@ const global = struct {
     var run_mods_error: ?RunModsError = null;
     var dotnet_funcs_store: dotnet.Funcs = undefined;
     var dotnet_funcs: ?*dotnet.Funcs = null;
-    var wnd_proc_state: enum { allowed, inside_run } = .allowed;
+    var inside_run: bool = false;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
 
@@ -395,17 +395,6 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
 }
 
 fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
-    switch (global.wnd_proc_state) {
-        .allowed => {},
-        .inside_run => {
-            std.log.err(
-                "wndproc called while inside run! msg={} wparam={} lparam={}",
-                .{ msg, wparam, lparam },
-            );
-            std.debug.assert(false);
-        },
-    }
-
     if (msg == global.wnd_msg) {
         const action = PostAction.deserialize(.{ .wparam = wparam, .lparam = lparam }) orelse {
             std.log.err("unknown wparam 0x{x} lparam 0x{x}", .{ wparam, lparam });
@@ -415,6 +404,8 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
             .run => global.post_retry_enabled.store(switch (run()) {
                 .success => false,
                 .fail => true,
+                // next run above us in the stack will set this to true if needed
+                .recursed => false,
             }, .monotonic),
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
@@ -467,21 +458,10 @@ const RunModsError = union(enum) {
     },
 };
 
-fn run() enum { success, fail } {
-    // sanity check that nothing we're calling causes the message pump to run again
-    // and we end up recursively calling ourselves
-    switch (global.wnd_proc_state) {
-        .allowed => global.wnd_proc_state = .inside_run,
-        .inside_run => {
-            std.log.err("run is re-entrant?", .{});
-            std.debug.assert(false);
-            return .fail;
-        },
-    }
-    defer {
-        std.debug.assert(global.wnd_proc_state == .inside_run);
-        global.wnd_proc_state = .allowed;
-    }
+fn run() enum { success, fail, recursed } {
+    if (global.inside_run) return .recursed;
+    global.inside_run = true;
+    defer global.inside_run = false;
 
     if (global.dotnet_funcs == null) {
         const lib: DotNetLib = blk: {

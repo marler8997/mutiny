@@ -4475,7 +4475,7 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     test_domain.init(dotnet_funcs);
     defer test_domain.deinit();
 
-    var buffer: [4096 * 2]u8 = undefined;
+    var buffer: [4096 * 3]u8 = undefined;
     std.debug.assert(buffer.len >= std.heap.pageSize());
     var vm_fixed_fba: std.heap.FixedBufferAllocator = .init(&buffer);
     var tracker_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -4952,6 +4952,10 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\set decimal.hi = 1
         \\@Assert(decimal.hi == 1)
     );
+}
+
+comptime {
+    if (@import("builtin").is_test) _ = @import("vmtest.zig");
 }
 
 const monolog = std.log.scoped(.mono);

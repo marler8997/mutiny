@@ -163,10 +163,22 @@ pub fn after(mem: *Memory, comptime T: type, addr: Addr) Addr {
 
     std.debug.assert(addr.offset >= chunk_metadata_size);
     const chunk: *Chunk = @fieldParentPtr("list_node", node);
-    std.debug.assert(addr.offset + aligned_sizeof_t <= chunk.total_used);
+
+    if (addr.offset < chunk.total_used) {
+        std.debug.assert(addr.offset + aligned_sizeof_t <= chunk.total_used);
+        return .{
+            .node = &chunk.list_node,
+            .offset = addr.offset + aligned_sizeof_t,
+        };
+    }
+
+    std.debug.assert(addr.offset == chunk.total_used);
+    const next_node = node.next.?;
+    const next_chunk: *Chunk = @fieldParentPtr("list_node", next_node);
+    std.debug.assert(chunk_metadata_size + aligned_sizeof_t <= next_chunk.total_used);
     return .{
-        .node = &chunk.list_node,
-        .offset = addr.offset + aligned_sizeof_t,
+        .node = next_node,
+        .offset = chunk_metadata_size + aligned_sizeof_t,
     };
 }
 
@@ -194,12 +206,13 @@ pub fn push(mem: *Memory, comptime T: type) error{OutOfMemory}!*T {
         const new_size = allocation.len + std.mem.alignForward(usize, aligned_size, std.heap.pageSize());
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // std.debug.print("attempting to resize chunk from size {} to {}\n", .{ allocation.len, new_size });
-        if (std.heap.page_allocator.resize(allocation, new_size)) {
+        if (mem.allocator.resize(allocation, new_size)) {
             chunk.alloc_size = new_size;
-            std.debug.assert(chunk.total_used + aligned_size <= allocation.len);
+            const grown = chunk.getAllocation();
+            std.debug.assert(chunk.total_used + aligned_size <= grown.len);
             const offset = chunk.total_used;
             chunk.total_used += aligned_size;
-            return @ptrCast(@alignCast(&allocation[offset]));
+            return @ptrCast(@alignCast(&grown[offset]));
         }
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // std.debug.print("unable to resize, allocating new chunk\n", .{});
@@ -229,9 +242,7 @@ fn allocateChunk(mem: *Memory, min_capacity: usize) error{OutOfMemory}!void {
 }
 
 test "Memory basic allocation" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     var memory = Memory{ .allocator = allocator };
     defer memory.deinit();
@@ -249,9 +260,7 @@ test "Memory basic allocation" {
 }
 
 test "Memory multiple chunks" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     var memory = Memory{ .allocator = allocator };
     defer memory.deinit();
@@ -270,9 +279,7 @@ test "Memory multiple chunks" {
 }
 
 test "Memory alignment" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     var memory = Memory{ .allocator = allocator };
     defer memory.deinit();
@@ -295,9 +302,7 @@ test "Memory alignment" {
 }
 
 test "Memory toPointer all cases" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     var mem = Memory{ .allocator = allocator };
     defer mem.deinit();
@@ -365,6 +370,49 @@ test "Memory toPointer all cases" {
 
     const boundary_ptr = mem.toPointer(u32, boundary_addr);
     try testing.expectEqual(test_value, boundary_ptr.*);
+}
+
+test "Memory push across chunks with an arena allocator" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var mem = Memory{ .allocator = arena.allocator() };
+    defer mem.deinit();
+
+    var ptrs: [1000]*u64 = undefined;
+    for (&ptrs, 0..) |*ptr, i| {
+        ptr.* = try mem.push(u64);
+        ptr.*.* = i;
+    }
+    try testing.expect(mem.chunks.first != mem.chunks.last);
+    for (ptrs, 0..) |ptr, i| {
+        try testing.expectEqual(@as(u64, i), ptr.*);
+    }
+}
+
+test "Memory after at chunk boundary" {
+    var mem = Memory{ .allocator = std.testing.allocator };
+    defer mem.deinit();
+
+    _ = try mem.push(u64);
+    const first = mem.chunks.first.?;
+    while (mem.chunks.last == first) {
+        _ = try mem.push([alignment]u8);
+    }
+
+    const first_chunk: *Chunk = @fieldParentPtr("list_node", first);
+    const boundary_addr = Addr{ .node = first, .offset = first_chunk.total_used };
+    try testing.expect(boundary_addr.eql(.{ .node = mem.chunks.last, .offset = chunk_metadata_size }));
+
+    const next_ptr = try mem.push(u32);
+    next_ptr.* = 0x5eed;
+
+    const next_addr = mem.after([alignment]u8, boundary_addr);
+    try testing.expectEqual(Addr{
+        .node = mem.chunks.last,
+        .offset = chunk_metadata_size + alignment,
+    }, next_addr);
+    try testing.expectEqual(@as(u32, 0x5eed), mem.toPointer(u32, next_addr).*);
+    try testing.expectEqual(mem.top(), mem.after(u32, next_addr));
 }
 
 const std = @import("std");

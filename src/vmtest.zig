@@ -77,6 +77,15 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
             \\@Assert(@IsNull(Test.NullObject()))
         );
     }
+    try Vm.testCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    if (n == 110) { break }
+        \\    var a = 1
+        \\    var b = 2
+        \\    set n = n + a + b - 2
+        \\continue
+    );
 }
 
 const std = @import("std");

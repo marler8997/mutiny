@@ -21,6 +21,11 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
     }
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
+        \\var CultureInfo = @Class(mscorlib.System.Globalization.CultureInfo)
+        \\@Log(CultureInfo.get_InvariantCulture())
+    );
+    try Vm.testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
         \\@Assert(Int32.MaxValue == 2147483647)
         \\@Assert(Int32.MinValue == 0 - 2147483648)

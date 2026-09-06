@@ -462,8 +462,8 @@ pub fn evalFunction(
                     std.debug.assert(loop_text_offset.? < offset);
                     break :blk loop_text_offset.?;
                 },
-                .direct_break_no_loop => @panic("todo"),
-                .child_block_break => @panic("todo"),
+                .direct_break_no_loop => return vm.setError(.{ .not_implemented = "break inside a function" }),
+                .child_block_break => return vm.setError(.{ .not_implemented = "break inside a block inside a function" }),
             };
             std.debug.assert(new_offset != offset);
             offset = new_offset;
@@ -527,7 +527,7 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
             },
             .child_block_break => |after_child_block| {
                 _ = after_child_block;
-                @panic("todo");
+                return vm.setError(.{ .not_implemented = "break inside a block nested in a block" });
                 // const after_r_brace = try vm.eat().remainingBlock(break_end);
                 // if (loop_text_offset) |_| return .{ .complete = after_r_brace };
                 // return .{ .break_parent = after_r_brace };
@@ -612,7 +612,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
             return switch (try vm.evalBlock(after_rparen, .@"if")) {
                 .complete => |end| .{ .statement_end = end },
                 .break_parent => |block_break| return .{ .child_block_break = block_break },
-                .continue_parent => @panic("todo"),
+                .continue_parent => return vm.setError(.{ .not_implemented = "continue inside an if block" }),
             };
         },
         .keyword_loop => {
@@ -2290,16 +2290,10 @@ fn writeObject(
                 var value: ?*dotnet.Object = null;
                 dotnet_funcs.field_get_value(obj, field, @ptrCast(&value));
                 if (value) |str_obj| {
-                    const c_str = switch (dotnet_funcs.kind) {
-                        .mono => |*mono| mono.string_to_utf8(@ptrCast(str_obj)),
-                        .il2cpp => @panic("il2cpp string_to_utf8"),
-                    };
-                    if (c_str) |s| {
-                        defer dotnet_funcs.free(@ptrCast(@constCast(s)));
-                        try writer.print("\"{s}\"", .{std.mem.span(s)});
-                    } else {
-                        try writer.writeAll("null");
-                    }
+                    const str: *const dotnet.String = @ptrCast(str_obj);
+                    const len = dotnet_funcs.string_length(str);
+                    const chars = dotnet_funcs.string_chars(str);
+                    try writer.print("\"{f}\"", .{std.unicode.fmtUtf16Le(chars[0..@intCast(len)])});
                 } else {
                     try writer.writeAll("null");
                 }
@@ -2728,7 +2722,10 @@ const VmEat = struct {
                     return .{ .statement_end = after_expr };
                 }
             },
-            .keyword_fn => @panic("todo"),
+            .keyword_fn => return vm.setError(.{ .not_implemented2 = .{
+                .pos = first_token.start,
+                .msg = "skipping over a 'fn' declaration",
+            } }),
             .keyword_if => {
                 const after_lparen = try vm.eatToken(
                     first_token.end,

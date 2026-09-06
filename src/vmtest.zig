@@ -91,6 +91,74 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
         \\    set n = n + a + b - 2
         \\continue
     );
+
+    try Vm.testCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    if (n == 500) { break }
+        \\    var a = 1
+        \\    var b = 2
+        \\    set n = n + a + b - 2
+        \\continue
+        \\@Assert(n == 500)
+    );
+    try Vm.testBadCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    if (n == 3) { break }
+        \\    var a = n
+        \\    set n = n + 1
+        \\continue
+        \\@Log(a)
+    , "7: undefined identifier 'a'");
+    try Vm.testBadCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    var a = 5
+        \\    if (n == 0) { break }
+        \\continue
+        \\@Log(a)
+    , "6: undefined identifier 'a'");
+    try Vm.testCode(dotnet_funcs,
+        \\var n = 0
+        \\var last = 0
+        \\loop
+        \\    if (n == 3) { break }
+        \\    var a = n + 10
+        \\    set last = a
+        \\    set n = n + 1
+        \\continue
+        \\@Assert(n == 3)
+        \\@Assert(last == 12)
+    );
+
+    try Vm.testCode(dotnet_funcs,
+        \\if (1 == 1) { var x = 7 }
+        \\@Assert(x == 7)
+    );
+    try Vm.testBadCode(dotnet_funcs,
+        \\if (1 == 0) { var x = 7 }
+        \\@Log(x)
+    , "2: undefined identifier 'x'");
+
+    try Vm.testCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    if (n == 3) { break }
+        \\    if (1 == 1) { var x = n }
+        \\    @Assert(x == n)
+        \\    set n = n + 1
+        \\continue
+    );
+    try Vm.testBadCode(dotnet_funcs,
+        \\var n = 0
+        \\loop
+        \\    if (n == 3) { break }
+        \\    if (n == 1) { var t = 1 }
+        \\    set n = n + 1
+        \\continue
+        \\@Log(t)
+    , "7: undefined identifier 't'");
 }
 
 const std = @import("std");

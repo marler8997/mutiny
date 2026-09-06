@@ -190,6 +190,27 @@ pub fn reset(vm: *Vm) void {
     _ = vm.mem.discardFrom(.zero);
 }
 
+const Loop = struct {
+    text_offset: usize,
+    symbols: ?Memory.Addr,
+};
+
+fn discardSymbolsUntil(vm: *Vm, mark: ?Memory.Addr) void {
+    while (true) {
+        const newest = switch (vm.symbol_state) {
+            .none => {
+                std.debug.assert(mark == null);
+                return;
+            },
+            .evaluating => unreachable,
+            .stable => |s| s.newest,
+        };
+        if (mark) |m| if (newest.eql(m)) return;
+        const previous = vm.discardTopSymbol(newest);
+        vm.symbol_state = if (previous) |p| .{ .stable = .{ .newest = p, .next = vm.mem.top() } } else .none;
+    }
+}
+
 fn discardTopSymbol(vm: *Vm, addr: Memory.Addr) ?Memory.Addr {
     const id_start, const after_id_addr = vm.readValue(usize, addr);
     const id = lex(vm.text, id_start);
@@ -356,7 +377,7 @@ const ManagedId = struct {
 
 pub const BlockResume = struct {
     text_offset: usize = 0,
-    loop_text_offset: ?usize = null,
+    loop: ?Loop = null,
 };
 
 pub const Yield = struct {
@@ -366,10 +387,10 @@ pub const Yield = struct {
 
 pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
     var next_statement_offset: usize = block_resume.text_offset;
-    var loop_text_offset: ?usize = block_resume.loop_text_offset;
+    var maybe_loop: ?Loop = block_resume.loop;
     while (true) {
         std.debug.assert(next_statement_offset <= vm.text.len);
-        const new_offset = blk: switch (try vm.evalStatement(next_statement_offset, &loop_text_offset)) {
+        const new_offset = blk: switch (try vm.evalStatement(next_statement_offset, &maybe_loop)) {
             .not_statement => |token| {
                 if (token.tag == .eof) {
                     vm.error_result = .exit;
@@ -386,26 +407,28 @@ pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
             },
             .yield => |yield| return yield,
             .@"continue" => |continue_pos| {
-                const new_offset = loop_text_offset orelse return vm.setError(.{ .static_error = .{
+                const loop = maybe_loop orelse return vm.setError(.{ .static_error = .{
                     .pos = continue_pos,
                     .string = "continue must correspond to a loop",
                 } });
-                std.debug.assert(new_offset < next_statement_offset);
-                break :blk loop_text_offset.?;
+                std.debug.assert(loop.text_offset < next_statement_offset);
+                vm.discardSymbolsUntil(loop.symbols);
+                break :blk loop.text_offset;
             },
             .direct_break_no_loop => |after_break| {
-                std.debug.assert(loop_text_offset == null);
+                std.debug.assert(maybe_loop == null);
                 return vm.setError(.{ .static_error = .{
                     .pos = after_break - "break".len,
                     .string = "break must correspond to a loop",
                 } });
             },
             .child_block_break => |child_block| {
-                if (loop_text_offset == null) return vm.setError(.{ .static_error = .{
+                const loop = maybe_loop orelse return vm.setError(.{ .static_error = .{
                     .pos = child_block.break_pos,
                     .string = "break must correspond to a loop",
                 } });
-                loop_text_offset = null;
+                vm.discardSymbolsUntil(loop.symbols);
+                maybe_loop = null;
                 // find the end of the loop (break, continue or EOF)
                 var offset: usize = child_block.end;
                 _ = &offset;
@@ -436,13 +459,13 @@ pub fn evalFunction(
         break :blk token.end;
     };
 
-    var loop_text_offset: ?usize = null;
-    _ = &loop_text_offset;
+    var maybe_loop: ?Loop = null;
+    _ = &maybe_loop;
 
     const after_close_brace = blk: {
         var offset: usize = body_start;
         while (true) {
-            const new_offset = switch (try vm.evalStatement(offset, &loop_text_offset)) {
+            const new_offset = switch (try vm.evalStatement(offset, &maybe_loop)) {
                 .not_statement => |token| {
                     if (token.tag == .r_brace) break :blk token.end;
                     return vm.setError(.{ .unexpected_token = .{
@@ -459,8 +482,10 @@ pub fn evalFunction(
                     .string = "yield unsupported inside a function",
                 } }),
                 .@"continue" => {
-                    std.debug.assert(loop_text_offset.? < offset);
-                    break :blk loop_text_offset.?;
+                    const loop = maybe_loop.?;
+                    std.debug.assert(loop.text_offset < offset);
+                    vm.discardSymbolsUntil(loop.symbols);
+                    break :blk loop.text_offset;
                 },
                 .direct_break_no_loop => return vm.setError(.{ .not_implemented = "break inside a function" }),
                 .child_block_break => return vm.setError(.{ .not_implemented = "break inside a block inside a function" }),
@@ -494,12 +519,12 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
         break :blk token.end;
     };
 
-    var loop_text_offset: ?usize = null;
+    var maybe_loop: ?Loop = null;
 
     // const eat_start = eat_remaining_block: {
     var offset: usize = body_start;
     while (true) {
-        const new_offset = blk: switch (try vm.evalStatement(offset, &loop_text_offset)) {
+        const new_offset = blk: switch (try vm.evalStatement(offset, &maybe_loop)) {
             .not_statement => |token| {
                 if (token.tag == .r_brace) return .{ .complete = token.end };
                 return vm.setError(.{ .unexpected_token = .{
@@ -515,11 +540,14 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
                 .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block",
             }),
             .@"continue" => |continue_pos| {
-                if (loop_text_offset) |o| break :blk o;
+                if (maybe_loop) |loop| {
+                    vm.discardSymbolsUntil(loop.symbols);
+                    break :blk loop.text_offset;
+                }
                 return .{ .continue_parent = continue_pos };
             },
             .direct_break_no_loop => |after_break| {
-                std.debug.assert(loop_text_offset == null);
+                std.debug.assert(maybe_loop == null);
                 return .{ .break_parent = .{
                     .break_pos = after_break - "break".len,
                     .end = try vm.eat().remainingBlock(after_break),
@@ -540,7 +568,7 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
 
 }
 
-fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union(enum) {
+fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
     yield: Yield,
@@ -620,11 +648,19 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
                 .pos = first_token.start,
                 .string = "cannot loop inside loop (end with break or continue at the same depth as the original loop)",
             } });
-            maybe_loop_ref.* = first_token.end;
+            maybe_loop_ref.* = .{
+                .text_offset = first_token.end,
+                .symbols = switch (vm.symbol_state) {
+                    .none => null,
+                    .evaluating => unreachable,
+                    .stable => |s| s.newest,
+                },
+            };
             return .{ .statement_end = first_token.end };
         },
         .keyword_break => {
-            if (maybe_loop_ref.* == null) return .{ .direct_break_no_loop = first_token.end };
+            const loop = maybe_loop_ref.* orelse return .{ .direct_break_no_loop = first_token.end };
+            vm.discardSymbolsUntil(loop.symbols);
             maybe_loop_ref.* = null;
             return .{ .statement_end = first_token.end };
         },
@@ -697,7 +733,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?usize) error{Vm}!union
                 .actual = null,
             } });
             return .{ .yield = .{
-                .block_resume = .{ .text_offset = expr_end, .loop_text_offset = maybe_loop_ref.* },
+                .block_resume = .{ .text_offset = expr_end, .loop = maybe_loop_ref.* },
                 .millis = switch (vm.pop(expr_addr)) {
                     .integer => |v| v,
                     else => |t| return vm.setError(.{ .unexpected_type = .{

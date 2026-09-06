@@ -114,6 +114,7 @@ pub fn discardFrom(mem: *Memory, addr: Addr) usize {
         // save this before freeing the chunk
         const prev = it.prev.?;
         total_discarded += chunk.total_used - chunk_metadata_size;
+        mem.chunks.remove(it);
         mem.allocator.free(chunk.getAllocation());
         it = prev;
     }
@@ -387,6 +388,30 @@ test "Memory push across chunks with an arena allocator" {
     for (ptrs, 0..) |ptr, i| {
         try testing.expectEqual(@as(u64, i), ptr.*);
     }
+}
+
+test "Memory discardFrom unlinks freed chunks" {
+    var mem = Memory{ .allocator = std.testing.allocator };
+    defer mem.deinit();
+
+    const first = blk: {
+        _ = try mem.push(u64);
+        break :blk mem.chunks.first.?;
+    };
+    const keep = mem.top();
+    while (mem.chunks.last == first) {
+        _ = try mem.push([alignment]u8);
+    }
+    _ = try mem.push(u64);
+    try testing.expect(mem.chunks.first != mem.chunks.last);
+
+    _ = mem.discardFrom(keep);
+    try testing.expectEqual(first, mem.chunks.last.?);
+    try testing.expect(keep.eql(mem.top()));
+
+    const again = try mem.push(u32);
+    again.* = 7;
+    try testing.expectEqual(@as(u32, 7), mem.toPointer(u32, keep).*);
 }
 
 test "Memory after at chunk boundary" {

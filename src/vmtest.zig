@@ -5,11 +5,42 @@ fn installIl2cppFixture(funcs: *const dotnet.Funcs, unity_version: UnityVersion)
     const assemblies = il2cpp.domain_get_assemblies(funcs.domain_get().?, &assembly_count);
     try il2cppclass.selfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
     try il2cppclass.subclassSelfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
+    try testIl2cppUpdate(funcs);
     if (Vm.enable_mutiny_test_class)
         try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts, unity_version, assemblies[0..assembly_count]);
 }
 
+fn testIl2cppUpdate(funcs: *const dotnet.Funcs) !void {
+    const sub_class = il2cppclass.global.subclassClass() orelse return error.SubclassNotBuilt;
+    const update = funcs.class_get_method_from_name(sub_class, "Update", 0) orelse return error.SubclassUpdateNotFound;
+    const cursor = @import("root").testMutinyUpdateCursor();
+    var exception: ?*const dotnet.Object = null;
+    _ = funcs.runtime_invoke(update, null, null, &exception);
+    if (exception) |e| {
+        std.log.err("synthetic Update threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
+        return error.SubclassUpdateThrew;
+    }
+    if (!@import("root").testMutinyUpdateCalled(cursor)) return error.SubclassUpdateNotInvoked;
+    std.log.info("il2cpp synthetic subclass: Update reached the invoker and onUpdate", .{});
+}
+
+fn testMonoUpdate(funcs: *const dotnet.Funcs) !void {
+    const ticker = try mutinymono.load(funcs);
+    const update = funcs.class_get_method_from_name(ticker, "Update", 0) orelse return error.TickerUpdateNotFound;
+    const ticker_instance = funcs.object_new(ticker) orelse return error.TickerObjectNewFailed;
+    const cursor = @import("root").testMutinyUpdateCursor();
+    var exception: ?*const dotnet.Object = null;
+    _ = funcs.runtime_invoke(update, ticker_instance, null, &exception);
+    if (exception) |e| {
+        std.log.err("Ticker.Update threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
+        return error.TickerUpdateThrew;
+    }
+    if (!@import("root").testMutinyUpdateCalled(cursor)) return error.TickerUpdateNotInvoked;
+    std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, Ticker.Update reached the OnUpdate internal call", .{});
+}
+
 pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {
+    if (dotnet_funcs.kind == .mono) try testMonoUpdate(dotnet_funcs);
     if (dotnet_funcs.kind == .il2cpp) {
         // il2cpp needs the version to gate the synthetic-class layout; mono never uses it, so a
         // mono game with an unreadable UnityPlayer.dll can still run these tests.
@@ -44,6 +75,14 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
         \\var String = @Class(mscorlib.System.String)
         \\@Assert(@NotNull(String.Empty))
         \\@Assert(@NotNull(String.Empty.GetType()))
+    );
+    try Vm.testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var String = @Class(mscorlib.System.String)
+        \\@Assert(String.IsNullOrEmpty("") == 1)
+        \\@Assert(String.IsNullOrEmpty("abc") == 0)
+        \\@Assert(String.IsNullOrWhiteSpace("   ") == 1)
+        \\@Assert(String.IsNullOrWhiteSpace(" x ") == 0)
     );
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
@@ -192,6 +231,7 @@ const std = @import("std");
 
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
+const mutinymono = @import("mutinymono.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
 
 const UnityVersion = @import("UnityVersion.zig");

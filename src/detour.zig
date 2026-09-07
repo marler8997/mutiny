@@ -1,8 +1,45 @@
 pub const FindError = dynlib.GetProcError || error{
     ExportNotFound,
     NoJumpFound,
+    NoTailJumpFound,
     DecodeInstructionFailed,
 };
+
+pub fn findTypeInfoFromTypeDefinitionIndex(module: dynlib.Module) FindError!usize {
+    const image_get_class = try findFunction(module, "il2cpp_image_get_class");
+    const from_handle = resolveJumps(try findTailJump(image_get_class, "il2cpp_image_get_class"));
+    return resolveJumps(try findTailJump(from_handle, "MetadataCache::GetTypeInfoFromHandle"));
+}
+
+fn findTailJump(start: usize, label: [:0]const u8) FindError!usize {
+    var addr = start;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        var status: zydis.Status = undefined;
+        var instr: zydis.DecodedInstruction = undefined;
+        var operands: [zydis.max_operand_count]zydis.DecodedOperand = undefined;
+        zydis.decodeFull(&status, @ptrFromInt(addr), &instr, &operands) catch {
+            std.log.err("detour: failed to decode instruction at 0x{x} locating the tail jump of '{s}': {f}", .{ addr, label, status });
+            return error.DecodeInstructionFailed;
+        };
+        if (instr.mnemonic == zydis.mnemonic_ret) return error.NoTailJumpFound;
+        if (instr.mnemonic == zydis.mnemonic_jmp) {
+            if (zydis.relativeBranchTarget(&instr, &operands, addr)) |target| return target;
+            return error.NoTailJumpFound;
+        }
+        addr += instr.length;
+    }
+    return error.NoTailJumpFound;
+}
+
+fn resolveJumps(start: usize) usize {
+    var addr = start;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        addr = followJump(addr) orelse return addr;
+    }
+    return addr;
+}
 
 pub fn findFunction(module: dynlib.Module, export_name: [:0]const u8) FindError!usize {
     const proc_addr: usize = @intFromPtr(try dynlib.getProc(module, export_name));

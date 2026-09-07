@@ -23,22 +23,6 @@ pub fn build(b: *std.Build) void {
         .unsanitized = createZydisModule(b, target, optimize, .{ .sanitize_c = .off }),
     };
 
-    // old code that I'll probably need later in order to inject my own managed dll
-    const mutiny_managed_dll = blk: {
-        const compile = b.addSystemCommand(&.{
-            "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
-            "/target:library",
-        });
-        const out_dll = compile.addPrefixedOutputFileArg("/out:", "MutinyManaged.dll");
-        compile.addFileArg(b.path("managed/MutinyManaged.cs"));
-        break :blk out_dll;
-    };
-    const install_mutiny_managed_dll = b.addInstallLibFile(
-        mutiny_managed_dll,
-        "MutinyManaged.dll",
-    );
-    b.step("managed-dll", "").dependOn(&install_mutiny_managed_dll.step);
-
     const test_dll = UpdateDll.create(b, .{
         .source_path = "managed/MutinyTest.cs",
         .out_path = "managed/MutinyTest.dll",
@@ -47,6 +31,20 @@ pub fn build(b: *std.Build) void {
         "update-test-dll",
         "rebuild managed/MutinyTest.dll if MutinyTest.cs changed",
     ).dependOn(&test_dll.step);
+
+    const unity_stub_dll = UpdateDll.create(b, .{
+        .source_path = "managed/UnityEngine.CoreModule.cs",
+        .out_path = "managed/UnityEngine.CoreModule.dll",
+    });
+    const mutiny_mono_dll = UpdateDll.create(b, .{
+        .source_path = "managed/MutinyMono.cs",
+        .out_path = "managed/MutinyMono.dll",
+        .references = &.{unity_stub_dll.path()},
+    });
+    b.step(
+        "update-mono-dll",
+        "rebuild managed/MutinyMono.dll if MutinyMono.cs or the UnityEngine stub changed",
+    ).dependOn(&mutiny_mono_dll.step);
 
     const mutiny_mod: SanitizeVariants(*std.Build.Module) = .{
         .sanitized = b.createModule(.{
@@ -66,6 +64,9 @@ pub fn build(b: *std.Build) void {
         mutiny_mod.sanitized.addImport("zydis", zydis.sanitized);
         mutiny_mod.unsanitized.addImport("zydis", zydis.unsanitized);
     }
+    const mutiny_mono_dll_mod = b.createModule(.{ .root_source_file = mutiny_mono_dll.path() });
+    mutiny_mod.sanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
+    mutiny_mod.unsanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
 
     const mainthread_mod = b.createModule(.{
         .root_source_file = b.path("mainthread/mainthread.zig"),
@@ -234,15 +235,16 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zydis", .module = zydis.sanitized },
+                .{ .name = "mutiny_test_dll", .module = b.createModule(.{
+                    .root_source_file = test_dll.path(),
+                }) },
+                .{ .name = "mutiny_mono_dll", .module = mutiny_mono_dll_mod },
             },
         }),
     });
     if (target.result.os.tag == .windows) {
         dotnet_test_exe.root_module.addImport("win32", win32_mod);
     }
-    dotnet_test_exe.root_module.addAnonymousImport("mutiny_test_dll", .{
-        .root_source_file = test_dll.path(),
-    });
     const install_dotnet_test = b.addInstallArtifact(dotnet_test_exe, .{});
     b.step("install-dotnet-test", "").dependOn(&install_dotnet_test.step);
 

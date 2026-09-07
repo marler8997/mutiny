@@ -108,6 +108,8 @@ fn writeStackTrace(
     try writer.flush();
 }
 
+pub const mutiny_options: mainthread.Options = .{ .onUpdate = mainthread.onUpdate };
+
 pub const std_options: std.Options = .{
     .logFn = log,
     .log_level = .info,
@@ -172,6 +174,7 @@ comptime {
 fn MutinyMain(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
     std.log.info("MutinyMain", .{});
+    std.log.info("module \"Mutiny.dll\" at 0x{x}", .{@intFromPtr(global.hinstance)});
 
     const mutex = blk: {
         var mutex_name_buf: [40]u16 = undefined;

@@ -1,5 +1,25 @@
 pub const enable_mutiny_test_class = true;
 
+pub const mutiny_options: @import("mutiny.zig").Options = .{
+    .onUpdate = onMutinyUpdate,
+};
+
+var mutiny_update_called: bool = false;
+const UpdateCursor = struct {};
+pub fn testMutinyUpdateCursor() UpdateCursor {
+    std.debug.assert(!mutiny_update_called);
+    return .{};
+}
+pub fn testMutinyUpdateCalled(cursor: UpdateCursor) bool {
+    _ = cursor;
+    return mutiny_update_called;
+}
+
+fn onMutinyUpdate() callconv(.c) void {
+    std.debug.assert(!mutiny_update_called);
+    mutiny_update_called = true;
+}
+
 pub fn main() !void {
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     // no need to deinit
@@ -107,7 +127,7 @@ pub fn main() !void {
                 .{},
             );
             std.log.info("mono_jit_init success", .{});
-            loadTestAssembly(init_funcs);
+            loadTestAssembly(&dotnet_funcs.kind.mono);
             break :blk result;
         },
         .il2cpp => {
@@ -181,6 +201,25 @@ fn testDetour(funcs: *const dotnet.Funcs, module: dynlib.Module, domain: *const 
     if (after != before or after != object)
         errExit("pass-through detour changed class_from_il2cpp_type result", .{});
     std.log.info("detour: pass-through hook validated -- resolves the same class through the trampoline", .{});
+
+    const handle_target = detour.findTypeInfoFromTypeDefinitionIndex(module) catch |e|
+        errExit("locate MetadataCache::GetTypeInfoFromTypeDefinitionIndex: {s}", .{@errorName(e)});
+    std.log.info("detour: GetTypeInfoFromTypeDefinitionIndex at +0x{x}", .{handle_target - @intFromPtr(module)});
+
+    const il2cpp = &funcs.kind.il2cpp;
+    var assembly_count: usize = 0;
+    const assemblies = il2cpp.domain_get_assemblies(domain, &assembly_count);
+    const image = il2cpp.assembly_get_image(assemblies[0]);
+    const class_before = il2cpp.image_get_class(image, 0);
+
+    const handle_installed = detour.install(handle_target, @intFromPtr(&il2cppclass.typeInfoFromTypeDefinitionIndexHook)) catch |e|
+        errExit("detour install (GetTypeInfoFromTypeDefinitionIndex): {s}", .{@errorName(e)});
+    il2cppclass.global.typeInfoFromTypeDefinitionIndexOrig = @ptrFromInt(handle_installed.trampoline);
+
+    const class_after = il2cpp.image_get_class(image, 0);
+    if (class_after != class_before)
+        errExit("pass-through GetTypeInfoFromTypeDefinitionIndex detour changed image_get_class result", .{});
+    std.log.info("detour: GetTypeInfoFromTypeDefinitionIndex pass-through validated ({s})", .{funcs.class_get_name(class_after)});
 }
 
 fn findClassByName(
@@ -216,47 +255,26 @@ const Il2cppInitFuncs = struct {
 const MonoInitFuncs = struct {
     jit_init: *const fn (name: [*:0]const u8) callconv(.c) ?*const dotnet.Domain,
     set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
-    image_open_from_data: *const fn (
-        data: [*]const u8,
-        data_len: u32,
-        need_copy: i32,
-        status: *MonoImageOpenStatus,
-    ) callconv(.c) ?*const dotnet.Image,
-    assembly_load_from: *const fn (
-        image: *const dotnet.Image,
-        name: [*:0]const u8,
-        status: *MonoImageOpenStatus,
-    ) callconv(.c) ?*const dotnet.Assembly,
     pub fn init(proc_ref: *[:0]const u8, mod: dynlib.Module) error{ProcNotFound}!MonoInitFuncs {
         return .{
             .jit_init = try mono_funcs.monoGet(mod, .jit_init, proc_ref),
             .set_assemblies_path = try mono_funcs.monoGet(mod, .set_assemblies_path, proc_ref),
-            .image_open_from_data = try mono_funcs.monoGet(mod, .image_open_from_data, proc_ref),
-            .assembly_load_from = try mono_funcs.monoGet(mod, .assembly_load_from, proc_ref),
         };
     }
 };
 
-const MonoImageOpenStatus = enum(c_int) {
-    ok = 0,
-    error_errno = 1,
-    image_invalid = 2,
-    missing_assemblyref = 3,
-    _,
-};
-
 const mutiny_test_dll = @embedFile("mutiny_test_dll");
 
-fn loadTestAssembly(init_funcs: MonoInitFuncs) void {
-    var status: MonoImageOpenStatus = .ok;
-    const image = init_funcs.image_open_from_data(
+fn loadTestAssembly(mono: *const dotnet.MonoFuncs) void {
+    var status: dotnet.MonoImageOpenStatus = .ok;
+    const image = mono.image_open_from_data(
         mutiny_test_dll,
         @intCast(mutiny_test_dll.len),
         1,
         &status,
     ) orelse errExit("mono_image_open_from_data failed with {t}", .{status});
     if (status != .ok) errExit("mono_image_open_from_data gave status {t}", .{status});
-    _ = init_funcs.assembly_load_from(image, "MutinyTest", &status) orelse errExit(
+    _ = mono.assembly_load_from(image, "MutinyTest", &status) orelse errExit(
         "mono_assembly_load_from failed with {t}",
         .{status},
     );

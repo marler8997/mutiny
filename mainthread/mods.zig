@@ -3,8 +3,11 @@ const global = struct {
     var queue: std.DoublyLinkedList = .{};
 
     // no need to lock list, only accessed by the main thread
-    var list: std.DoublyLinkedList = .{};
+    var noevent_list: std.DoublyLinkedList = .{};
+    var on_update_list: std.DoublyLinkedList = .{};
 };
+
+pub const on_update_prefix = "on-update-";
 
 pub fn mutinyThreadQueueUpdate(name: ModNameSlice, content: []const u8) error{OutOfMemory}!void {
     const text = try alloc.general().dupe(u8, content);
@@ -30,10 +33,10 @@ fn stealUpdate() ?*Mod {
     return @fieldParentPtr("list_node", node);
 }
 
-fn find(mod_name: []const u8) ?*Mod {
-    var maybe_node = global.list.first;
+fn find(comptime T: type, list: *const std.DoublyLinkedList, mod_name: []const u8) ?*T {
+    var maybe_node = list.first;
     while (maybe_node) |node| : (maybe_node = node.next) {
-        const mod: *Mod = @fieldParentPtr("list_node", node);
+        const mod: *T = @fieldParentPtr("list_node", node);
         if (std.mem.eql(u8, mod.name.slice(), mod_name)) return mod;
     }
     return null;
@@ -41,32 +44,70 @@ fn find(mod_name: []const u8) ?*Mod {
 
 pub fn applyUpdates() void {
     while (stealUpdate()) |update| {
-        const existing = find(update.name.slice());
-        if (update.text) |new_text| {
-            if (existing) |old_mod| {
-                std.log.info(
-                    "mod '{s}' updated ({} to {} bytes)",
-                    .{ old_mod.name.slice(), old_mod.text.?.len, new_text.len },
-                );
-                global.list.remove(&old_mod.list_node);
-                old_mod.destroy();
-            } else {
-                std.log.info("mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
-            }
-            global.list.append(&update.list_node);
+        if (std.mem.startsWith(u8, update.name.slice(), on_update_prefix)) {
+            applyUpdateModEvent(update);
         } else {
-            defer update.destroy();
-            const mod = existing orelse std.debug.panic("remove for unknown mod '{s}'", .{update.name.slice()});
-            std.log.info("deleting mod '{s}'", .{mod.name.slice()});
-            global.list.remove(&mod.list_node);
-            mod.destroy();
+            applyModEvent(update);
         }
     }
 }
 
-pub const Iterator = struct {
+fn applyModEvent(update: *Mod) void {
+    const existing = find(Mod, &global.noevent_list, update.name.slice());
+    if (update.text) |new_text| {
+        if (existing) |old_mod| {
+            std.log.info(
+                "mod '{s}' updated ({} to {} bytes)",
+                .{ old_mod.name.slice(), old_mod.text.?.len, new_text.len },
+            );
+            global.noevent_list.remove(&old_mod.list_node);
+            old_mod.destroy();
+        } else {
+            std.log.info("mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
+        }
+        global.noevent_list.append(&update.list_node);
+    } else {
+        defer update.destroy();
+        const mod = existing orelse std.debug.panic("remove for unknown mod '{s}'", .{update.name.slice()});
+        std.log.info("deleting mod '{s}'", .{mod.name.slice()});
+        global.noevent_list.remove(&mod.list_node);
+        mod.destroy();
+    }
+}
+
+fn applyUpdateModEvent(update: *Mod) void {
+    defer update.destroy();
+    const existing = find(UpdateMod, &global.on_update_list, update.name.slice());
+    if (update.text) |new_text| {
+        const mod = UpdateMod.create(update.name, new_text) catch |err| switch (err) {
+            error.OutOfMemory => {
+                std.log.err("update mod '{s}' dropped: out of memory", .{update.name.slice()});
+                return;
+            },
+        };
+        update.text = null;
+        if (existing) |old_mod| {
+            std.log.info(
+                "update mod '{s}' updated ({} to {} bytes)",
+                .{ old_mod.name.slice(), old_mod.text.len, new_text.len },
+            );
+            global.on_update_list.remove(&old_mod.list_node);
+            old_mod.destroy();
+        } else {
+            std.log.info("update mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
+        }
+        global.on_update_list.append(&mod.list_node);
+    } else {
+        const mod = existing orelse std.debug.panic("remove for unknown update mod '{s}'", .{update.name.slice()});
+        std.log.info("deleting update mod '{s}'", .{mod.name.slice()});
+        global.on_update_list.remove(&mod.list_node);
+        mod.destroy();
+    }
+}
+
+pub const NoeventIterator = struct {
     node: ?*std.DoublyLinkedList.Node,
-    pub fn next(it: *Iterator, now: std.time.Instant) ?*Mod {
+    pub fn next(it: *NoeventIterator, now: std.time.Instant) ?*Mod {
         while (it.node) |node| {
             it.node = node.next;
             const mod: *Mod = @fieldParentPtr("list_node", node);
@@ -81,13 +122,31 @@ pub const Iterator = struct {
         return null;
     }
 };
-pub fn iterator() Iterator {
-    return .{ .node = global.list.first };
+pub fn noeventIterator() NoeventIterator {
+    return .{ .node = global.noevent_list.first };
+}
+
+pub const OnUpdateIterator = struct {
+    node: ?*std.DoublyLinkedList.Node,
+    pub fn next(it: *OnUpdateIterator) ?*UpdateMod {
+        while (it.node) |node| {
+            it.node = node.next;
+            const mod: *UpdateMod = @fieldParentPtr("list_node", node);
+            return mod;
+        }
+        return null;
+    }
+};
+pub fn hasUpdateMods() bool {
+    return global.on_update_list.first != null;
+}
+pub fn onUpdateIterator() OnUpdateIterator {
+    return .{ .node = global.on_update_list.first };
 }
 
 pub fn nextRerunMs(now: std.time.Instant) ?u32 {
     var earliest: ?u32 = null;
-    var maybe_node = global.list.first;
+    var maybe_node = global.noevent_list.first;
     while (maybe_node) |node| : (maybe_node = node.next) {
         const mod: *Mod = @fieldParentPtr("list_node", node);
         switch (mod.run) {
@@ -106,5 +165,6 @@ const mainthread = @import("mainthread.zig");
 
 const alloc = @import("alloc.zig");
 const Mod = @import("Mod.zig");
+const UpdateMod = @import("UpdateMod.zig");
 const ModNameSlice = @import("ModNameSlice.zig");
 const Mutex = mainthread.Mutex;

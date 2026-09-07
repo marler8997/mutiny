@@ -1209,7 +1209,6 @@ fn callMethod(
             .string_literal => |extent| {
                 const slice = vm.text[extent.start + 1 .. extent.end - 1];
                 const str = vm.dotnet_funcs.string_new_len(
-                    vm.dotnet_funcs.domain_get().?,
                     slice.ptr,
                     std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
                         .pos = after_lparen,
@@ -2142,7 +2141,6 @@ fn evalBuiltin(
 
 fn pushNewManagedString(vm: *Vm, text_pos: usize, slice: []const u8) error{Vm}!void {
     const managed_str = vm.dotnet_funcs.string_new_len(
-        vm.dotnet_funcs.domain_get().?,
         slice.ptr,
         std.math.cast(c_uint, slice.len) orelse return vm.setError(.{ .static_error = .{
             .pos = text_pos,

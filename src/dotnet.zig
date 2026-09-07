@@ -31,7 +31,15 @@ pub const String = opaque {};
 
 pub const Callback = fn (data: *anyopaque, user_data: ?*anyopaque) callconv(.c) void;
 
-const MonoFuncs = struct {
+pub const MonoImageOpenStatus = enum(c_int) {
+    ok = 0,
+    error_errno = 1,
+    image_invalid = 2,
+    missing_assemblyref = 3,
+    _,
+};
+
+pub const MonoFuncs = struct {
     runtime_class_init: *const fn (*const VTable) callconv(.c) void,
     assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
     assembly_get_name: *const fn (*const Assembly) callconv(.c) ?*const AssemblyName,
@@ -44,7 +52,21 @@ const MonoFuncs = struct {
     signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
     signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
     gchandle: MonoGcHandle,
-    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+    string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
+    object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
+    type_get_object: *const fn (*const Domain, *const Type) callconv(.c) ?*const Object,
+    image_open_from_data: *const fn (
+        data: [*]const u8,
+        data_len: u32,
+        need_copy: i32,
+        status: *MonoImageOpenStatus,
+    ) callconv(.c) ?*const Image,
+    assembly_load_from: *const fn (
+        image: *const Image,
+        name: [*:0]const u8,
+        status: *MonoImageOpenStatus,
+    ) callconv(.c) ?*const Assembly,
+    add_internal_call: *const fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void,
 
     pub fn gchandle_new(mono: *const MonoFuncs, object: *const Object, pinned: i32) GcHandleV2 {
         return switch (mono.gchandle) {
@@ -98,9 +120,12 @@ const Il2cppFuncs = struct {
     method_get_param_count: *const fn (*const Method) callconv(.c) u32,
     method_get_param: *const fn (*const Method, index: u32) callconv(.c) *const Type,
     method_get_param_name: *const fn (*const Method, index: u32) callconv(.c) [*:0]const u8,
+    type_get_object: *const fn (*const Type) callconv(.c) ?*const Object,
     gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV1,
     gchandle_free: *const fn (handle: GcHandleV1) callconv(.c) void,
     gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
+    object_new: *const fn (*const Class) callconv(.c) ?*const Object,
+    string_new_len: *const fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
 };
 
 pub const Funcs = struct {
@@ -139,19 +164,36 @@ pub const Funcs = struct {
 
     type_get_type: *const fn (*const Type) callconv(.c) TypeKind,
 
-    object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
     object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
     object_get_class: *const fn (*const Object) callconv(.c) *const Class,
 
     runtime_invoke: *const fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
 
-    string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
     string_chars: *const fn (*const String) callconv(.c) [*]const u16,
     string_length: *const fn (*const String) callconv(.c) c_int,
 
     free: *const fn (*anyopaque) callconv(.c) void,
 
     class_from_type: *const fn (*const Type) callconv(.c) ?*const Class,
+
+    pub fn object_new(f: *const Funcs, class: *const Class) ?*const Object {
+        return switch (f.kind) {
+            .mono => |mono| mono.object_new(f.domain_get().?, class),
+            .il2cpp => |il2cpp| il2cpp.object_new(class),
+        };
+    }
+    pub fn string_new_len(f: *const Funcs, text: [*]const u8, len: c_uint) ?*const String {
+        return switch (f.kind) {
+            .mono => |mono| mono.string_new_len(f.domain_get().?, text, len),
+            .il2cpp => |il2cpp| il2cpp.string_new_len(text, len),
+        };
+    }
+    pub fn type_get_object(f: *const Funcs, t: *const Type) ?*const Object {
+        return switch (f.kind) {
+            .mono => |mono| mono.type_get_object(f.domain_get().?, t),
+            .il2cpp => |il2cpp| il2cpp.type_get_object(t),
+        };
+    }
 
     pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: dynlib.Module) error{ProcNotFound}!Funcs {
         return .{
@@ -183,14 +225,12 @@ pub const Funcs = struct {
             .method_get_flags = try funcs.sharedGet(kind, mod, .method_get_flags, proc_ref),
             .method_get_class = try funcs.sharedGet(kind, mod, .method_get_class, proc_ref),
             .type_get_type = try funcs.sharedGet(kind, mod, .type_get_type, proc_ref),
-            .object_new = try funcs.sharedGet(kind, mod, .object_new, proc_ref),
             .object_unbox = try funcs.sharedGet(kind, mod, .object_unbox, proc_ref),
             .object_get_class = try funcs.sharedGet(kind, mod, .object_get_class, proc_ref),
             // .gchandle_new = try funcs.monoGet(mod, .gchandle_new, proc_ref),
             // .gchandle_free = try funcs.monoGet(mod, .gchandle_free, proc_ref),
             // .gchandle_get_target = try funcs.monoGet(mod, .gchandle_get_target, proc_ref),
             .runtime_invoke = try funcs.sharedGet(kind, mod, .runtime_invoke, proc_ref),
-            .string_new_len = try funcs.sharedGet(kind, mod, .string_new_len, proc_ref),
             .string_chars = try funcs.sharedGet(kind, mod, .string_chars, proc_ref),
             .string_length = try funcs.sharedGet(kind, mod, .string_length, proc_ref),
             .free = try funcs.sharedGet(kind, mod, .free, proc_ref),
@@ -218,7 +258,12 @@ pub const Funcs = struct {
                             .gchandle_get_target = try mono_gchandle_v1.monoGet(mod, .gchandle_get_target, proc_ref),
                         } },
                     },
-                    .string_to_utf8 = try mono_funcs.monoGet(mod, .string_to_utf8, proc_ref),
+                    .string_new_len = try mono_funcs.monoGet(mod, .string_new_len, proc_ref),
+                    .object_new = try mono_funcs.monoGet(mod, .object_new, proc_ref),
+                    .type_get_object = try mono_funcs.monoGet(mod, .type_get_object, proc_ref),
+                    .image_open_from_data = try mono_funcs.monoGet(mod, .image_open_from_data, proc_ref),
+                    .assembly_load_from = try mono_funcs.monoGet(mod, .assembly_load_from, proc_ref),
+                    .add_internal_call = try mono_funcs.monoGet(mod, .add_internal_call, proc_ref),
                 } },
                 .il2cpp => .{
                     .il2cpp = .{
@@ -234,9 +279,12 @@ pub const Funcs = struct {
                         .method_get_param_count = try il2cpp_funcs.il2cppGet(mod, .method_get_param_count, proc_ref),
                         .method_get_param = try il2cpp_funcs.il2cppGet(mod, .method_get_param, proc_ref),
                         .method_get_param_name = try il2cpp_funcs.il2cppGet(mod, .method_get_param_name, proc_ref),
+                        .type_get_object = try il2cpp_funcs.il2cppGet(mod, .type_get_object, proc_ref),
                         .gchandle_new = try il2cpp_funcs.il2cppGet(mod, .gchandle_new, proc_ref),
                         .gchandle_free = try il2cpp_funcs.il2cppGet(mod, .gchandle_free, proc_ref),
                         .gchandle_get_target = try il2cpp_funcs.il2cppGet(mod, .gchandle_get_target, proc_ref),
+                        .object_new = try il2cpp_funcs.il2cppGet(mod, .object_new, proc_ref),
+                        .string_new_len = try il2cpp_funcs.il2cppGet(mod, .string_new_len, proc_ref),
                     },
                 },
             },

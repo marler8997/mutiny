@@ -33,6 +33,7 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              everything the injected DLL logs, including @Log output from scripts
   mods\<name>      persistent effects, these files are monitored by the injected DLL for changes and are automatically re-executed when changed
+  mods\on-update-<name>  a mod that runs from the top on every frame of the game (see below)
   scripts\<name>   unliks mods, only executed when requested via `mutiny <PID> run-script <SCRIPT_NAME>`.
 ```
 
@@ -46,6 +47,22 @@ Which directory to use is decided by *lifetime*, not content - both hold the sam
   itself as soon as you write the file, and re-runs from the top every time you change the text.
 
 Writing a file into `mods\` starts it immediately.
+
+A mod whose name starts with **`on-update-`** is an **update mod**: instead of running once when
+written, it runs from the top on every frame of the game, from inside Unity's `Update`. Use it
+for effects that must be re-applied continuously ("keep stamina full"). Rules that differ from
+a normal mod:
+
+- Keep it short: it runs every frame, on the main thread, so its cost is paid every frame.
+- **Do not `@Log` from an update mod** unless it is behind an `if` that is rarely true. A
+  `@Log` at the top level writes a line to the log on every frame - thousands per minute -
+  and buries everything else in it. Errors are the exception: they are coalesced (see below).
+- `@Rerun` is an error (the next frame is the rerun). `@IsFirstRun()` is always 0. `@Exit` just
+  ends this frame's run.
+- Nothing survives between frames; state lives in the game, as with `@Rerun`.
+- An error does not stop it: it keeps running every frame, the error is logged once, again only
+  if it changes, and `<name>: recovered` is logged when a frame succeeds again. So an update mod
+  that fails until the level has loaded is fine and needs no guard.
 
 ## Finding the right code
 
@@ -198,8 +215,8 @@ memory — see the rules below on argument types.
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
 | `@Exit()` / `@Nothing()` | no arguments | |
-| `@Rerun(ms)` | an integer | mods only: exit now, run again from the top after `ms` milliseconds |
-| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on a rerun |
+| `@Rerun(ms)` | an integer | mods only (not update mods): exit now, run again from the top after `ms` milliseconds |
+| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on a rerun (always 0 in an update mod) |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started

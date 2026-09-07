@@ -9,11 +9,15 @@ step: std.Build.Step,
 generated: std.Build.GeneratedFile,
 source_path: []const u8,
 out_path: []const u8,
+references: []const std.Build.LazyPath,
 
 pub fn create(b: *std.Build, paths: struct {
     source_path: []const u8,
     out_path: []const u8,
+    references: []const std.Build.LazyPath = &.{},
 }) *UpdateDll {
+    const references = b.allocator.alloc(std.Build.LazyPath, paths.references.len) catch @panic("OOM");
+    for (references, paths.references) |*dst, src| dst.* = src.dupe(b);
     const self = b.allocator.create(UpdateDll) catch @panic("OOM");
     self.* = .{
         .step = std.Build.Step.init(.{
@@ -25,7 +29,9 @@ pub fn create(b: *std.Build, paths: struct {
         .generated = .{ .step = &self.step, .path = b.pathFromRoot(paths.out_path) },
         .source_path = b.dupePath(paths.source_path),
         .out_path = b.dupePath(paths.out_path),
+        .references = references,
     };
+    for (references) |reference| reference.addStepDependencies(&self.step);
     return self;
 }
 
@@ -39,14 +45,13 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
     const self: *UpdateDll = @fieldParentPtr("step", step);
     const b = step.owner;
 
-    const source = b.build_root.handle.readFileAlloc(
-        b.allocator,
-        self.source_path,
-        std.math.maxInt(usize),
-    ) catch |err| return step.fail("read {s} failed with {t}", .{ self.source_path, err });
-
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+    {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        try hashFile(step, &hasher, b.pathFromRoot(self.source_path));
+        for (self.references) |reference| try hashFile(step, &hasher, reference.getPath2(b, step));
+        hasher.final(&digest);
+    }
 
     if (b.build_root.handle.readFileAlloc(
         b.allocator,
@@ -71,15 +76,20 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
     // csc names the assembly after the output file's basename, so compile to the real
     // name (in a temp dir) rather than something like raw.dll
     const raw_path = b.pathJoin(&.{ b.makeTempPath(), std.fs.path.basename(self.out_path) });
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.appendSlice(b.allocator, &.{
+        "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
+        "/target:library",
+        "/nologo",
+        b.fmt("/out:{s}", .{raw_path}),
+    }) catch @panic("OOM");
+    for (self.references) |reference| {
+        argv.append(b.allocator, b.fmt("/reference:{s}", .{reference.getPath2(b, step)})) catch @panic("OOM");
+    }
+    argv.append(b.allocator, b.pathFromRoot(self.source_path)) catch @panic("OOM");
     const result = std.process.Child.run(.{
         .allocator = b.allocator,
-        .argv = &.{
-            "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
-            "/target:library",
-            "/nologo",
-            b.fmt("/out:{s}", .{raw_path}),
-            b.pathFromRoot(self.source_path),
-        },
+        .argv = argv.items,
     }) catch |err| return step.fail("running csc failed with {t}", .{err});
     switch (result.term) {
         .Exited => |code| if (code != 0) return step.fail(
@@ -99,6 +109,19 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
     b.build_root.handle.writeFile(
         .{ .sub_path = self.out_path, .data = image },
     ) catch |err| return step.fail("write {s} failed with {t}", .{ self.out_path, err });
+}
+
+fn hashFile(step: *std.Build.Step, hasher: *std.crypto.hash.sha2.Sha256, file_path: []const u8) !void {
+    const b = step.owner;
+    const content = std.fs.cwd().readFileAlloc(
+        b.allocator,
+        file_path,
+        std.math.maxInt(usize),
+    ) catch |err| return step.fail("read {s} failed with {t}", .{ file_path, err });
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, content.len, .little);
+    hasher.update(&len);
+    hasher.update(content);
 }
 
 fn purify(step: *std.Build.Step, image: []u8, input_hash: *const [32]u8) !void {

@@ -3,6 +3,19 @@ pub const max_operand_count = c.ZYDIS_MAX_OPERAND_COUNT;
 
 pub const DecodedInstruction = c.ZydisDecodedInstruction;
 pub const DecodedOperand = c.ZydisDecodedOperand;
+pub const mnemonic_call = c.ZYDIS_MNEMONIC_CALL;
+pub const mnemonic_jmp = c.ZYDIS_MNEMONIC_JMP;
+pub const mnemonic_ret = c.ZYDIS_MNEMONIC_RET;
+
+pub fn relativeBranchTarget(instr: *const DecodedInstruction, operands: *const [max_operand_count]DecodedOperand, addr: usize) ?usize {
+    if (instr.mnemonic != mnemonic_call and instr.mnemonic != mnemonic_jmp) return null;
+    const op = &operands[0];
+    if (op.type != c.ZYDIS_OPERAND_TYPE_IMMEDIATE) return null;
+    const imm = &op.unnamed_0.imm;
+    if (imm.is_relative == 0) return null;
+    const next: isize = @intCast(addr + instr.length);
+    return @bitCast(next +% imm.value.s);
+}
 
 pub fn instructionLength(status: *Status, code: [*]const u8) error{Error}!usize {
     return (try decodeInstruction(status, code)).length;

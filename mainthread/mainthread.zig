@@ -5,6 +5,7 @@ pub const mutinyipc = mutiny.mutinyipc;
 pub const BoundedArray = mutiny.BoundedArray;
 pub const ModNameSlice = @import("ModNameSlice.zig");
 pub const Mutex = mutiny.Mutex;
+pub const Options = mutiny.Options;
 pub const Pool = mutiny.Pool;
 
 pub const mutinyThreadQueueModUpdate = mods.mutinyThreadQueueUpdate;
@@ -31,8 +32,11 @@ const global = struct {
 
     var post_retry_enabled: std.atomic.Value(bool) = .init(false);
     var runtime: RuntimeState = .{ .find_lib = .{} };
+    var update_hook: UpdateHookState = .pending;
     var dotnet_funcs_store: dotnet.Funcs = undefined;
-    var inside_run: bool = false;
+    // protects both run and onUpdate functions from simulatneously using shared state like
+    // vm_arena due to recursive calls via message pump
+    var vm_pass_active: bool = false;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
 
@@ -423,7 +427,7 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
         switch (action) {
             .run => global.post_retry_enabled.store(switch (run()) {
                 .success => false,
-                .fail => true,
+                .retry => true,
                 // next run above us in the stack will set this to true if needed
                 .recursed => false,
                 .unrecoverable_error => false, // no need to keep retrying
@@ -448,8 +452,10 @@ const DotNetLib = struct {
 };
 
 fn initMono() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_mono))) |mono_mod|
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_mono))) |mono_mod| {
+        std.log.info("module \"{s}\" at 0x{x}", .{ dotnet.dll_name_mono, @intFromPtr(mono_mod) });
         return mono_mod;
+    }
     switch (win32.GetLastError()) {
         .ERROR_MOD_NOT_FOUND => {
             std.log.info("{s}: not found yet...", .{dotnet.dll_name_mono});
@@ -459,8 +465,10 @@ fn initMono() ?win32.HINSTANCE {
     }
 }
 fn initIl2cpp() ?win32.HINSTANCE {
-    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_il2cpp))) |mod|
+    if (win32.GetModuleHandleW(win32.L(dotnet.dll_name_il2cpp))) |mod| {
+        std.log.info("module \"{s}\" at 0x{x}", .{ dotnet.dll_name_il2cpp, @intFromPtr(mod) });
         return mod;
+    }
     switch (win32.GetLastError()) {
         .ERROR_MOD_NOT_FOUND => {
             std.log.info("{s}: not found yet...", .{dotnet.dll_name_il2cpp});
@@ -481,28 +489,103 @@ const RuntimeState = union(enum) {
         module: dynlib.Module,
         no_domain_logged: bool = false,
     },
-    bootstrap: struct {
+    unrecoverable_error: UnrecoverableError,
+    ready: struct {
         module: dynlib.Module,
         root_domain: *const dotnet.Domain,
     },
-    unrecoverable_error: UnrecoverableError,
-    ready,
 
     const UnrecoverableError = union(enum) {
         missing_proc: struct {
             lib: DotNetLib,
             name: [:0]const u8,
         },
-        il2cpp_bootstrap: BootstrapIl2cppError,
 
         pub fn format(err: UnrecoverableError, writer: *std.Io.Writer) error{WriteFailed}!void {
             switch (err) {
                 .missing_proc => |e| try writer.print("{t} runtime is missing '{s}'", .{ e.lib.kind, e.name }),
-                .il2cpp_bootstrap => |e| try writer.print("il2cpp bootstrap failed with {t}", .{e}),
             }
         }
     };
 };
+
+const UpdateHookState = union(enum) {
+    pending,
+    mono_instantiate: struct {
+        ticker: *const dotnet.Class,
+        not_ready_logged: ?mutinymono.InstantiateError = null,
+    },
+    installed,
+    failed: struct {
+        err: Error,
+        update_mods_warned: bool = false,
+    },
+
+    const Error = union(enum) {
+        mono: mutinymono.Error,
+        il2cpp: BootstrapIl2cppError,
+    };
+};
+
+fn updateUpdateHook(
+    dotnet_funcs: *const dotnet.Funcs,
+    module: dynlib.Module,
+    root_domain: *const dotnet.Domain,
+) enum { settled, retry } {
+    state: switch (global.update_hook) {
+        .pending => switch (dotnet_funcs.kind) {
+            .mono => {
+                const ticker = mutinymono.load(dotnet_funcs) catch |err| {
+                    std.log.err("loading the embedded MutinyMono.dll failed ({t}), on-update mods will not run", .{err});
+                    global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
+                    return .settled;
+                };
+                global.update_hook = .{ .mono_instantiate = .{ .ticker = ticker } };
+                continue :state global.update_hook;
+            },
+            .il2cpp => {
+                bootstrapIl2cpp(dotnet_funcs, module, root_domain) catch |err| {
+                    std.log.err("il2cpp Update hook failed to install ({t}), on-update mods will not run", .{err});
+                    global.update_hook = .{ .failed = .{ .err = .{ .il2cpp = err } } };
+                    return .settled;
+                };
+                global.update_hook = .installed;
+                return .settled;
+            },
+        },
+        .mono_instantiate => |*hook| {
+            mutinymono.instantiate(dotnet_funcs, hook.ticker) catch |err| switch (err) {
+                error.MissingAssembly, error.ManagedException => {
+                    coalescedLog(
+                        ?mutinymono.InstantiateError,
+                        &hook.not_ready_logged,
+                        err,
+                        .info,
+                        "mono Update hook not installed yet ({t}), will retry",
+                        .{err},
+                    );
+                    return .retry;
+                },
+                else => {
+                    std.log.err("mono Update hook failed to install ({t}), on-update mods will not run", .{err});
+                    global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
+                    return .settled;
+                },
+            };
+            global.update_hook = .installed;
+            return .settled;
+        },
+        .installed => return .settled,
+        .failed => |*hook| {
+            const has_update_mods = mods.hasUpdateMods();
+            if (has_update_mods and !hook.update_mods_warned) {
+                std.log.err("on-update mods will not run: the Update hook failed to install (see the error above)", .{});
+            }
+            hook.update_mods_warned = has_update_mods;
+            return .settled;
+        },
+    }
+}
 fn updateRuntime() union(enum) {
     not_ready,
     unrecoverable_error: RuntimeState.UnrecoverableError,
@@ -564,26 +647,7 @@ fn updateRuntime() union(enum) {
             };
             // ensure runtime does not appear in the assignment as we're re-assigning it
             const module = runtime.module;
-            global.runtime = switch (global.dotnet_funcs_store.kind) {
-                .mono => .ready,
-                .il2cpp => .{ .bootstrap = .{ .module = module, .root_domain = root_domain } },
-            };
-            continue :state global.runtime;
-        },
-        .bootstrap => |*runtime| {
-            bootstrapIl2cpp(
-                &global.dotnet_funcs_store,
-                runtime.module,
-                runtime.root_domain,
-            ) catch |err| {
-                std.log.err(
-                    "il2cpp bootstrap failed ({t}), refusing to run scripts on an unverified layout",
-                    .{err},
-                );
-                global.runtime = .{ .unrecoverable_error = .{ .il2cpp_bootstrap = err } };
-                continue :state global.runtime;
-            };
-            global.runtime = .ready;
+            global.runtime = .{ .ready = .{ .module = module, .root_domain = root_domain } };
             continue :state global.runtime;
         },
         .unrecoverable_error => |e| return .{ .unrecoverable_error = e },
@@ -594,19 +658,18 @@ fn updateRuntime() union(enum) {
 const BootstrapIl2cppError = error{
     UnityPlayerNotLoaded,
     UnityVersionUnreadable,
-} || il2cppclass.DiscoverError || detour.FindError || detour.InstallError || il2cppclass.SelfTestError;
+} || il2cppclass.DiscoverError || detour.FindError || detour.InstallError || il2cppclass.SelfTestError || il2cppclass.InstantiateError;
 
 fn bootstrapIl2cpp(
     dotnet_funcs: *const dotnet.Funcs,
     module: dynlib.Module,
     root_domain: *const dotnet.Domain,
 ) BootstrapIl2cppError!void {
-    const unity_version = blk: {
-        const player = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse return error.UnityPlayerNotLoaded;
-        break :blk UnityVersion.fromLoadedModule(player) catch |err| {
-            std.log.err("could not read the unity version from UnityPlayer.dll ({t})", .{err});
-            return error.UnityVersionUnreadable;
-        };
+    const player = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse return error.UnityPlayerNotLoaded;
+    std.log.info("module \"UnityPlayer.dll\" at 0x{x}", .{@intFromPtr(player)});
+    const unity_version = UnityVersion.fromLoadedModule(player) catch |err| {
+        std.log.err("could not read the unity version from UnityPlayer.dll ({t})", .{err});
+        return error.UnityVersionUnreadable;
     };
     std.log.info("unity version: {f}", .{unity_version});
 
@@ -618,16 +681,86 @@ fn bootstrapIl2cpp(
     const installed = try detour.install(target, @intFromPtr(&il2cppclass.fromIl2CppTypeHook));
     il2cppclass.global.fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
 
+    const handle_target = try detour.findTypeInfoFromTypeDefinitionIndex(module);
+    const handle_installed = try detour.install(handle_target, @intFromPtr(&il2cppclass.typeInfoFromTypeDefinitionIndexHook));
+    il2cppclass.global.typeInfoFromTypeDefinitionIndexOrig = @ptrFromInt(handle_installed.trampoline);
+    std.log.info("il2cpp: GetTypeInfoFromTypeDefinitionIndex hook installed at +0x{x}", .{handle_target - @intFromPtr(module)});
+
     var assembly_count: usize = 0;
     const assemblies = dotnet_funcs.kind.il2cpp.domain_get_assemblies(root_domain, &assembly_count);
     try il2cppclass.subclassSelfTest(dotnet_funcs, assemblies[0..assembly_count], layouts, unity_version);
     std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
+    try il2cppclass.instantiate(dotnet_funcs, assemblies[0..assembly_count]);
 }
 
-fn run() enum { success, fail, recursed, unrecoverable_error } {
-    if (global.inside_run) return .recursed;
-    global.inside_run = true;
-    defer global.inside_run = false;
+// Note: this is called on EVERY game update, which can happen hundreds of times
+//       per second. Be very cautious about performance and logging.
+pub fn onUpdate() callconv(.c) void {
+    std.debug.assert(!global.vm_pass_active);
+    global.vm_pass_active = true;
+    defer global.vm_pass_active = false;
+    const dotnet_funcs = switch (updateRuntime()) {
+        .ready => |funcs| funcs,
+        .unrecoverable_error, .not_ready => return,
+    };
+    var it = mods.onUpdateIterator();
+    while (it.next()) |mod| runUpdateMod(dotnet_funcs, mod);
+}
+fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
+    std.debug.assert(arenaIsClear(&global.vm_arena));
+    defer _ = global.vm_arena.reset(.retain_capacity);
+    var vm: Vm = .{
+        .dotnet_funcs = dotnet_funcs,
+        .text = mod.text,
+        .mem = .{ .allocator = global.vm_arena.allocator() },
+        .out = null,
+        .is_first_run = false,
+    };
+    defer vm.deinit();
+    const name = mod.name.slice();
+    var error_text_buf: [1024]u8 = undefined;
+    var error_text: []const u8 = undefined;
+    const new_state: UpdateMod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
+        .exit => .ok,
+        .rerun_ms => .rerun_requested,
+        .err => |err| switch (err) {
+            .vm_out => unreachable, // no writer
+            else => blk: {
+                const ellipsis = "...";
+                error_text = std.fmt.bufPrint(
+                    error_text_buf[0 .. error_text_buf.len - ellipsis.len],
+                    "{f}",
+                    .{err.fmt(mod.text, dotnet_funcs)},
+                ) catch |e| switch (e) {
+                    error.NoSpaceLeft => truncated: {
+                        @memcpy(error_text_buf[error_text_buf.len - ellipsis.len ..], ellipsis);
+                        break :truncated &error_text_buf;
+                    },
+                };
+                break :blk .{ .err = .{
+                    .error_wyhash = std.hash.Wyhash.hash(0, error_text),
+                } };
+            },
+        },
+    };
+    if (!std.meta.eql(new_state, mod.state)) {
+        switch (new_state) {
+            .ok => std.log.info("{s}: recovered", .{name}),
+            .err => std.log.err("{s}:{s}", .{ name, error_text }),
+            .rerun_requested => std.log.err(
+                "{s}: @Rerun is invalid in on-update mods",
+                .{name},
+            ),
+        }
+        mod.state = new_state;
+        std.debug.assert(std.meta.eql(new_state, mod.state));
+    }
+}
+
+fn run() enum { success, retry, recursed, unrecoverable_error } {
+    if (global.vm_pass_active) return .recursed;
+    global.vm_pass_active = true;
+    defer global.vm_pass_active = false;
     var rerun_schedule_failed = false;
 
     const dotnet_funcs = switch (updateRuntime()) {
@@ -636,13 +769,22 @@ fn run() enum { success, fail, recursed, unrecoverable_error } {
             failQueuedScripts(err);
             return .unrecoverable_error;
         },
-        .not_ready => return .fail,
+        .not_ready => return .retry,
     };
 
     mods.applyUpdates();
+    const update_hook_retry = switch (updateUpdateHook(
+        dotnet_funcs,
+        global.runtime.ready.module,
+        global.runtime.ready.root_domain,
+    )) {
+        .settled => false,
+        .retry => true,
+    };
+
     {
         const now = getNow();
-        var it = mods.iterator();
+        var it = mods.noeventIterator();
         while (it.next(now)) |mod| {
             const maybe_rerun_ms = runOne(dotnet_funcs, mod.name.slice(), mod.text.?, mod.is_first_run, null) catch |err| switch (err) {
                 error.WriteFailed => unreachable, // did not pass a writer
@@ -690,7 +832,7 @@ fn run() enum { success, fail, recursed, unrecoverable_error } {
         }
     }
 
-    return if (rerun_schedule_failed) .fail else .success;
+    return if (rerun_schedule_failed or update_hook_retry) .retry else .success;
 }
 
 fn failQueuedScripts(err: RuntimeState.UnrecoverableError) void {
@@ -802,8 +944,10 @@ const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
 const mods = @import("mods.zig");
+const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
 
 const Mod = @import("Mod.zig");
+const UpdateMod = @import("UpdateMod.zig");
 const UnityVersion = mutiny.UnityVersion;
 const Vm = mutiny.Vm;

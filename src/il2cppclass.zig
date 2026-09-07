@@ -332,6 +332,10 @@ pub const MethodLayout = struct {
     pub fn parameters(l: MethodLayout) usize {
         return l.return_type + @sizeOf(usize);
     }
+    pub fn slot(l: MethodLayout) usize {
+        std.debug.assert(l.parameters_count == l.flags + 6);
+        return l.flags + 4;
+    }
 };
 const MethodCandidates = struct {
     name: [method_ptr_slots]bool = @splat(true),
@@ -432,6 +436,7 @@ pub const SyntheticMethod = struct {
         self.write(usize, l.return_type, @intFromPtr(args.return_type));
         self.write(u8, l.parameters_count, args.parameters_count);
         self.write(u16, l.flags, args.flags);
+        self.write(u16, l.slot(), std.math.maxInt(u16));
         if (args.klass) |k| self.write(usize, l.klass, @intFromPtr(k));
         if (args.parameters) |p| self.write(usize, l.parameters(), @intFromPtr(p));
         return @ptrCast(&self.storage);
@@ -681,7 +686,18 @@ fn findClass(
 ) ?*const dotnet.Class {
     for (assemblies) |assembly| {
         const image = funcs.kind.il2cpp.assembly_get_image(assembly);
-        if (funcs.class_from_name(image, namespace, name)) |class| return class;
+        if (funcs.class_from_name(image, namespace, name)) |class| {
+            const got_name = std.mem.span(funcs.class_get_name(class));
+            const got_namespace = std.mem.span(funcs.class_get_namespace(class));
+            if (!std.mem.eql(u8, got_name, std.mem.span(name)) or !std.mem.eql(u8, got_namespace, std.mem.span(namespace))) {
+                std.debug.panic(
+                    "class_from_name({s}, \"{s}\", \"{s}\") returned class 0x{x} named \"{s}.{s}\"",
+                    .{ funcs.kind.il2cpp.image_get_name(image), namespace, name, @intFromPtr(class), got_namespace, got_name },
+                );
+            }
+            std.log.info("{s}.{s} is class 0x{x} via {s}", .{ namespace, name, @intFromPtr(class), funcs.kind.il2cpp.image_get_name(image) });
+            return class;
+        }
     }
     return null;
 }
@@ -702,8 +718,12 @@ pub const global = struct {
     var subclass_method: SyntheticMethod = undefined;
     var subclass_methods: [1]*const dotnet.Method = undefined;
     var subclass_class: ?SyntheticClass = null;
+    pub fn subclassClass() ?*const dotnet.Class {
+        return if (subclass_class) |*sub| sub.class() else null;
+    }
 
     pub var fromIl2CppTypeOrig: FromIl2CppType = undefined;
+    pub var typeInfoFromTypeDefinitionIndexOrig: TypeInfoFromTypeDefinitionIndex = undefined;
     var injected: ValuePerEnum(InjectedClassId, ?*const dotnet.Class) = .{
         .test_class = null,
     };
@@ -873,16 +893,23 @@ pub fn selfTest(
 
 const subclass_update_name = "Update";
 
-fn subclassUpdatePointer() callconv(.c) void {
-    @panic("subclass Update methodPointer called directly");
+const SubclassUpdate = *const fn (this: ?*anyopaque, method: *const dotnet.Method) callconv(.c) void;
+
+fn subclassUpdate(this: ?*anyopaque, method: *const dotnet.Method) callconv(.c) void {
+    _ = this;
+    _ = method;
+    mutiny.options.onUpdate();
 }
 fn subclassUpdateInvoke(
-    _: MethodPointer,
-    _: *const dotnet.Method,
-    _: ?*anyopaque, // obj
+    method_pointer: MethodPointer,
+    method: *const dotnet.Method,
+    obj: ?*anyopaque,
     _: ?[*]?*anyopaque,
     _: ?*anyopaque, // void return, nothing to write
-) callconv(.c) void {}
+) callconv(.c) void {
+    const update: SubclassUpdate = @ptrCast(method_pointer);
+    update(obj, method);
+}
 
 // The detour installs fromIl2CppTypeHook over the internal Class::FromIl2CppType. An injected class
 // has no slot in the baked metadata table, so class_from_type(class_get_type(ours)) resolves to the
@@ -894,7 +921,7 @@ fn subclassUpdateInvoke(
 // byval_arg.data and mapped back by the hook. A second injected type adds its own sentinel and arm.
 
 const InjectedClassId = enum(isize) {
-    test_class = -1,
+    test_class = -2,
     pub fn fromType(t: *const dotnet.Type) ?InjectedClassId {
         const data: *const isize = @ptrCast(@alignCast(t)); // Il2CppType.data is the first field
         return std.enums.fromInt(InjectedClassId, data.*);
@@ -910,6 +937,15 @@ pub fn fromIl2CppTypeHook(t: *const dotnet.Type, throw_on_error: bool) callconv(
         global.fromIl2CppTypeOrig(t, throw_on_error);
 }
 
+pub const TypeInfoFromTypeDefinitionIndex = *const fn (index: c_int) callconv(.c) ?*const dotnet.Class;
+
+pub fn typeInfoFromTypeDefinitionIndexHook(index: c_int) callconv(.c) ?*const dotnet.Class {
+    return if (std.enums.fromInt(InjectedClassId, index)) |class_id|
+        global.getInjected(class_id)
+    else
+        global.typeInfoFromTypeDefinitionIndexOrig(index);
+}
+
 // this_arg.data wants the same write for the real AddComponent icall, but it has no public accessor;
 // byval_arg is what class_get_type / Il2CppType.Of return and all the identity check needs.
 fn registerInjected(
@@ -922,7 +958,11 @@ fn registerInjected(
     ref.* = class;
     const byval: *isize = @ptrCast(@alignCast(@constCast(funcs.class_get_type(class))));
     byval.* = @bitCast(@intFromEnum(id));
+    const this_arg: *isize = @ptrFromInt(@intFromPtr(byval) + il2cpp_type_size);
+    this_arg.* = @bitCast(@intFromEnum(id));
 }
+
+const il2cpp_type_size = 16;
 
 // Derives a subclass of UnityEngine.MonoBehaviour and checks the runtime agrees via the public
 // IsAssignableFrom, exercising the discovered typeHierarchy offsets through real il2cpp code.
@@ -967,7 +1007,7 @@ pub fn subclassSelfTest(
     global.subclass_methods[0] = global.subclass_method.init(layouts.method, .{
         .name = subclass_update_name,
         .return_type = funcs.class_get_type(void_class),
-        .method_pointer = &subclassUpdatePointer,
+        .method_pointer = @ptrCast(&subclassUpdate),
         .invoker = &subclassUpdateInvoke,
         .parameters_count = 0,
     });
@@ -1004,9 +1044,70 @@ pub fn subclassSelfTest(
     });
 }
 
+pub const InstantiateError = error{
+    NotBootstrapped,
+    MissingClass,
+    MissingMethod,
+    ObjectNewFailed,
+    TypeObjectFailed,
+    ManagedException,
+    AddComponentReturnedNull,
+    AddComponentWrongClass,
+};
+
+fn invoke(
+    funcs: *const dotnet.Funcs,
+    what: []const u8,
+    method: *const dotnet.Method,
+    obj: ?*const dotnet.Object,
+    params: ?**anyopaque,
+) InstantiateError!?*const dotnet.Object {
+    var exception: ?*const dotnet.Object = null;
+    const result = funcs.runtime_invoke(method, obj, params, &exception);
+    if (exception) |e| {
+        std.log.err("{s} threw {s}", .{ what, funcs.class_get_name(funcs.object_get_class(e)) });
+        return error.ManagedException;
+    }
+    return result;
+}
+
+pub fn instantiate(
+    funcs: *const dotnet.Funcs,
+    assemblies: []const *const dotnet.Assembly,
+) InstantiateError!void {
+    const sub = global.subclass_class orelse return error.NotBootstrapped;
+    const sub_class = sub.class();
+
+    const game_object_class = findClass(funcs, assemblies, "UnityEngine", "GameObject") orelse return error.MissingClass;
+    const object_class = findClass(funcs, assemblies, "UnityEngine", "Object") orelse return error.MissingClass;
+    const ctor = funcs.class_get_method_from_name(game_object_class, ".ctor", 0) orelse return error.MissingMethod;
+    const dont_destroy = funcs.class_get_method_from_name(object_class, "DontDestroyOnLoad", 1) orelse return error.MissingMethod;
+    const add_component = funcs.class_get_method_from_name(game_object_class, "AddComponent", 1) orelse return error.MissingMethod;
+
+    const game_object = funcs.object_new(game_object_class) orelse return error.ObjectNewFailed;
+    _ = try invoke(funcs, "GameObject..ctor", ctor, game_object, null);
+
+    var dont_destroy_args = [_]*anyopaque{@constCast(game_object)};
+    _ = try invoke(funcs, "Object.DontDestroyOnLoad", dont_destroy, null, @ptrCast(&dont_destroy_args));
+
+    const type_object = funcs.type_get_object(funcs.class_get_type(sub_class)) orelse return error.TypeObjectFailed;
+    var add_component_args = [_]*anyopaque{@constCast(type_object)};
+    const component = try invoke(funcs, "GameObject.AddComponent", add_component, game_object, @ptrCast(&add_component_args)) orelse
+        return error.AddComponentReturnedNull;
+
+    const component_class = funcs.object_get_class(component);
+    std.log.info("injected MonoBehaviour: AddComponent returned {*} of class {s}{s}", .{
+        component,
+        funcs.class_get_name(component_class),
+        if (component_class == sub_class) " (ours)" else " (NOT ours)",
+    });
+    if (component_class != sub_class) return error.AddComponentWrongClass;
+}
+
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
+const mutiny = @import("mutiny.zig");
 
 const dotnet = @import("dotnet.zig");
 

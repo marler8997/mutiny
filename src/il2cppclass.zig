@@ -923,7 +923,7 @@ fn subclassUpdateInvoke(
 const InjectedClassId = enum(isize) {
     test_class = -2,
     pub fn fromType(t: *const dotnet.Type) ?InjectedClassId {
-        const data: *const isize = @ptrCast(@alignCast(t)); // Il2CppType.data is the first field
+        const data: *align(1) const isize = @ptrCast(t); // Il2CppType.data is the first field
         return std.enums.fromInt(InjectedClassId, data.*);
     }
 };

@@ -35,6 +35,7 @@ pub fn panic(
     error_return_trace: ?*std.builtin.StackTrace,
     ret_addr: ?usize,
 ) noreturn {
+    const current_thread_id = win32.GetCurrentThreadId();
     if (0 == global.paniced_threads_logging.fetchAdd(1, .seq_cst)) {
         std.log.err("panic: {s}", .{msg});
     }
@@ -43,12 +44,13 @@ pub fn panic(
         _ = maybe_open_log_error;
         // no buffer so we flush as soon as possible so as not to lose any output
         var file_writer = log_file.writer(&.{});
-        writeStackTrace(
+        const trace_result = if (current_thread_id == global.thread_id) writeStackTrace(
             error_return_trace,
             ret_addr,
             std.io.tty.detectConfig(log_file),
             &file_writer.interface,
-        ) catch |err| file_writer.interface.print(
+        ) else writeRawStackTrace(&file_writer.interface);
+        trace_result catch |err| file_writer.interface.print(
             "write stack trace failed with {t}\n",
             .{switch (err) {
                 error.WriteFailed => file_writer.err orelse error.Unexpected,
@@ -56,7 +58,6 @@ pub fn panic(
             }},
         ) catch {};
     }
-    const current_thread_id = win32.GetCurrentThreadId();
     if (current_thread_id == global.thread_id) {
         if (0 == global.paniced_threads_msgboxing.fetchAdd(1, .seq_cst)) {
             var buf: [200]u8 = undefined;
@@ -84,6 +85,36 @@ pub fn panic(
 }
 
 const mutiny_panic_exception_code: u32 = 0xE0000000 | 0x4D544E59;
+
+fn writeRawStackTrace(writer: *std.Io.Writer) !void {
+    var frames: [64]?*anyopaque = undefined;
+    const count = win32.RtlCaptureStackBackTrace(1, frames.len, &frames, null);
+    try writer.print("stack trace ({} frames, module+offset):\n", .{count});
+    for (frames[0..count]) |frame| {
+        const addr = @intFromPtr(frame);
+        var module: ?win32.HINSTANCE = null;
+        if (0 != win32.GetModuleHandleExW(
+            win32.GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | win32.GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            @ptrFromInt(addr),
+            &module,
+        )) {
+            var path: [win32.MAX_PATH:0]u16 = undefined;
+            const len = win32.GetModuleFileNameW(module, &path, path.len);
+            const name = path[0..len];
+            var basename_start: usize = 0;
+            for (name, 0..) |c, i| if (c == '\\' or c == '/') {
+                basename_start = i + 1;
+            };
+            try writer.print("  {f}+0x{x}\n", .{
+                std.unicode.fmtUtf16Le(name[basename_start..]),
+                addr - @intFromPtr(module.?),
+            });
+        } else {
+            try writer.print("  0x{x}\n", .{addr});
+        }
+    }
+    try writer.flush();
+}
 
 fn writeStackTrace(
     error_return_trace: ?*std.builtin.StackTrace,

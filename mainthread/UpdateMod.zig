@@ -6,6 +6,9 @@ text: []u8,
 state: State,
 pub const State = union(enum) {
     ok,
+    result: struct {
+        wyhash: u64,
+    },
     err: struct {
         error_wyhash: u64,
     },

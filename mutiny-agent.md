@@ -54,15 +54,18 @@ for effects that must be re-applied continuously ("keep stamina full"). Rules th
 a normal mod:
 
 - Keep it short: it runs every frame, on the main thread, so its cost is paid every frame.
-- **Do not `@Log` from an update mod** unless it is behind an `if` that is rarely true. A
-  `@Log` at the top level writes a line to the log on every frame - thousands per minute -
-  and buries everything else in it. Errors are the exception: they are coalesced (see below).
+- **`@Log` is an error in an update mod** - a line per frame would bury the log. Use
+  `@UpdateResult(...)` instead: same arguments as `@Log`, but it *ends this frame's run* with
+  that text as the frame's result, and the result only reaches the log when it **changes**. So
+  `@UpdateResult("health ", h)` logs once per distinct value, not once per frame - that is how
+  you debug an update mod.
 - `@Rerun` is an error (the next frame is the rerun). `@IsFirstRun()` is always 0. `@Exit` just
   ends this frame's run.
 - Nothing survives between frames; state lives in the game, as with `@Rerun`.
-- An error does not stop it: it keeps running every frame, the error is logged once, again only
-  if it changes, and `<name>: recovered` is logged when a frame succeeds again. So an update mod
-  that fails until the level has loaded is fine and needs no guard.
+- An error does not stop it: it keeps running every frame, and errors are coalesced the same way
+  as results - logged when they first happen, again only if they change, and
+  `<name>: recovered` when a frame finishes cleanly again. So an update mod that fails until the
+  level has loaded is fine and needs no guard.
 
 ## Finding the right code
 
@@ -209,7 +212,8 @@ memory — see the rules below on argument types.
 | `@TryClass(a.B)` | an **assembly field** | same; returns nothing instead of erroring if the class is absent |
 | `@ClassOf(o)` | an object | the class of a live object |
 | `@LogClass(c)` | a class | prints its fields and methods |
-| `@Log(...)` | any number of anything | concatenates them |
+| `@Log(...)` | any number of anything | concatenates them; an error in an update mod |
+| `@UpdateResult(...)` | any number of anything | update mods only: ends the run with the concatenation as this frame's result, logged only when it changes |
 | `@ToString(v)` | anything | |
 | `@IsNull(v)` / `@NotNull(v)` | anything | return an integer 0 or 1 |
 | `@Assert(v)` | an integer | |

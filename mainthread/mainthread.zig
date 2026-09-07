@@ -709,36 +709,40 @@ pub fn onUpdate() callconv(.c) void {
 fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
+    var text_buf: [1024]u8 = undefined;
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = mod.text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = null,
+        .out = .{ .update_result = &text_buf },
         .is_first_run = false,
     };
     defer vm.deinit();
     const name = mod.name.slice();
-    var error_text_buf: [1024]u8 = undefined;
-    var error_text: []const u8 = undefined;
+    var text: []const u8 = undefined;
     const new_state: UpdateMod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
         .rerun_ms => .rerun_requested,
+        .update_result => |result| blk: {
+            text = result;
+            break :blk .{ .result = .{ .wyhash = std.hash.Wyhash.hash(0, result) } };
+        },
         .err => |err| switch (err) {
             .vm_out => unreachable, // no writer
             else => blk: {
                 const ellipsis = "...";
-                error_text = std.fmt.bufPrint(
-                    error_text_buf[0 .. error_text_buf.len - ellipsis.len],
+                text = std.fmt.bufPrint(
+                    text_buf[0 .. text_buf.len - ellipsis.len],
                     "{f}",
                     .{err.fmt(mod.text, dotnet_funcs)},
                 ) catch |e| switch (e) {
                     error.NoSpaceLeft => truncated: {
-                        @memcpy(error_text_buf[error_text_buf.len - ellipsis.len ..], ellipsis);
-                        break :truncated &error_text_buf;
+                        @memcpy(text_buf[text_buf.len - ellipsis.len ..], ellipsis);
+                        break :truncated &text_buf;
                     },
                 };
                 break :blk .{ .err = .{
-                    .error_wyhash = std.hash.Wyhash.hash(0, error_text),
+                    .error_wyhash = std.hash.Wyhash.hash(0, text),
                 } };
             },
         },
@@ -746,7 +750,8 @@ fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
     if (!std.meta.eql(new_state, mod.state)) {
         switch (new_state) {
             .ok => std.log.info("{s}: recovered", .{name}),
-            .err => std.log.err("{s}:{s}", .{ name, error_text }),
+            .result => std.log.info("{s}: {s}", .{ name, text }),
+            .err => std.log.err("{s}:{s}", .{ name, text }),
             .rerun_requested => std.log.err(
                 "{s}: @Rerun is invalid in on-update mods",
                 .{name},
@@ -867,6 +872,7 @@ fn runOne(
     is_first_run: bool,
     out: ?*std.Io.Writer,
 ) error{WriteFailed}!?u32 {
+    const vm_out: Vm.Out = if (out) |pipe| .{ .pipe = pipe } else .log;
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
 
@@ -874,13 +880,14 @@ fn runOne(
         .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = out,
+        .out = vm_out,
         .is_first_run = is_first_run,
     };
     defer vm.deinit();
     var rerun_ms: ?u32 = null;
     vm.evalRoot() catch switch (vm.error_result) {
         .exit => std.log.info("{s} has exited", .{name}),
+        .update_result => unreachable, // out is never .update_result here
         .rerun_ms => |ms| if (out) |w| {
             std.log.err("{s}: @Rerun is only supported in mods", .{name});
             try w.print("{s}: error: @Rerun is only supported in mods\n", .{name});

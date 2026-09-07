@@ -121,6 +121,19 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
             \\@Assert(@IsNull(Test.NullObject()))
         );
     }
+    try Vm.testUpdateMod(dotnet_funcs,
+        \\@UpdateResult("health is ", 100, " of ", 100)
+    , .{ .result = "health is 100 of 100" });
+    try Vm.testUpdateMod(dotnet_funcs,
+        \\var n = 1
+        \\if (n == 2) { @UpdateResult("never") }
+    , .done);
+    try Vm.testUpdateMod(dotnet_funcs,
+        \\@Log("every frame")
+    , .{ .err = "1: @Log is not supported in on-update mods, use @UpdateResult" });
+    try Vm.testBadCode(dotnet_funcs,
+        \\@UpdateResult("not an update mod")
+    , "1: @UpdateResult is only supported in on-update mods");
     try Vm.testCode(dotnet_funcs,
         \\var n = 0
         \\loop

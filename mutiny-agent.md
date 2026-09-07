@@ -64,6 +64,11 @@ There is not yet a tool that lists a class's methods offline, so discovery is cu
 `@LogClass(@ClassOf(someObject))` in a `scripts\` file prints the fields and methods of an
 object's class. Use that to check a member exists **before** you write a mod that depends on it.
 
+Private field names can differ between versions of a game (or of the .NET runtime it ships):
+`@HasField(obj, "name")` returns 1 or 0 at runtime, so a mod can branch on which name exists
+instead of failing with "has no field". There is no equivalent for methods, because a method
+name alone doesn't identify one when it has overloads.
+
 ## The script language
 
 It is not C#, JavaScript, or Python. It is small and strict. Everything below is the whole
@@ -195,6 +200,7 @@ memory — see the rules below on argument types.
 | `@Exit()` / `@Nothing()` | no arguments | |
 | `@Rerun(ms)` | an integer | mods only: exit now, run again from the top after `ms` milliseconds |
 | `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on a rerun |
+| `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started
 with `run-script`.

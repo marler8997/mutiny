@@ -1893,6 +1893,25 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = @intFromBool(vm.is_first_run);
         },
+        .@"@HasField" => {
+            var object_value, const name_addr = vm.read(args_addr);
+            defer object_value.discard(vm.dotnet_funcs, vm.handle_tracker);
+            const name_extent = switch (vm.pop(name_addr)) {
+                .string_literal => |e| e,
+                else => unreachable,
+            };
+            const class = switch (object_value) {
+                .object => |gc_handle| vm.dotnet_funcs.object_get_class(
+                    gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker),
+                ),
+                else => unreachable,
+            };
+            const name = try vm.managedId(.{ .start = name_extent.start + 1, .end = name_extent.end - 1 });
+            const has_field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) != null;
+            _ = vm.mem.discardFrom(args_addr);
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = @intFromBool(has_field);
+        },
         .@"@Log" => {
             const log_file, const maybe_get_log_error = logfile.global.get();
             var buffer: [1024]u8 = undefined;
@@ -3186,7 +3205,7 @@ fn gchandleNew(
     maybe_tracker: ?*HandleTracker,
 ) dotnet.GcHandleV2 {
     const handle: dotnet.GcHandleV2 = switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_new_v2(object, 0),
+        .mono => |*mono| mono.gchandle_new(object, 0),
         .il2cpp => |*il2cpp| il2cpp.gchandle_new(object, 0).toV2(),
     };
     gchandlelog.info("new  {*} {}", .{ object, handle });
@@ -3198,7 +3217,7 @@ fn gchandleNew(
     const sanity_check = true;
     if (sanity_check) {
         const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-            .mono => |*mono| mono.gchandle_get_target_v2(handle),
+            .mono => |*mono| mono.gchandle_get_target(handle),
             .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
         };
         std.debug.assert(target != null);
@@ -3221,14 +3240,14 @@ fn gchandleFree(
     if (maybe_tracker) |tracker| tracker.untrack(handle);
     {
         const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-            .mono => |*mono| mono.gchandle_get_target_v2(handle),
+            .mono => |*mono| mono.gchandle_get_target(handle),
             .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
         };
         std.debug.assert(target != null);
         // gchandlelog.info("    --> free target is {*}", .{target.?});
     }
     switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_free_v2(handle),
+        .mono => |*mono| mono.gchandle_free(handle),
         .il2cpp => |*il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
     }
 }
@@ -3239,7 +3258,7 @@ fn gchandleTarget(
 ) *const dotnet.Object {
     if (maybe_tracker) |tracker| tracker.assertLive(handle);
     const obj: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_get_target_v2(handle),
+        .mono => |*mono| mono.gchandle_get_target(handle),
         .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
     };
     std.debug.assert(obj != null);
@@ -3265,6 +3284,7 @@ const Builtin = enum {
     @"@Exit",
     @"@Rerun",
     @"@IsFirstRun",
+    @"@HasField",
     @"@Log",
     @"@LogClass",
     @"@Assembly",
@@ -3285,6 +3305,7 @@ const Builtin = enum {
             .@"@Exit" => &.{},
             .@"@Rerun" => &.{.{ .concrete = .integer }},
             .@"@IsFirstRun" => &.{},
+            .@"@HasField" => &.{ .{ .concrete = .object }, .{ .concrete = .string_literal } },
             .@"@Log" => null,
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
@@ -3307,6 +3328,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Exit", .@"@Exit" },
     .{ "@Rerun", .@"@Rerun" },
     .{ "@IsFirstRun", .@"@IsFirstRun" },
+    .{ "@HasField", .@"@HasField" },
     .{ "@Log", .@"@Log" },
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
@@ -4704,18 +4726,28 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(0 == @IsNull(Int32))
         \\@Assert(Int32.MaxValue == 2147483647)
     );
-    // il2cpp keeps System.DateTime but strips get_Now in our test games; mono-only until we
-    // can probe method existence
-    if (dotnet_funcs.kind == .mono) try testCode(dotnet_funcs,
+    try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var dt = DateTime.get_Now()
-        \\set dt._dateData = 123
-        \\@Assert(dt._dateData == 123)
-        \\var declared_after = 7
-        \\set dt._dateData = 456
-        \\@Assert(dt._dateData == 456)
-        \\@Assert(declared_after == 7)
+        \\if (@HasField(dt, "_dateData")) {
+        \\    set dt._dateData = 123
+        \\    @Assert(dt._dateData == 123)
+        \\    var declared_after = 7
+        \\    set dt._dateData = 456
+        \\    @Assert(dt._dateData == 456)
+        \\    @Assert(declared_after == 7)
+        \\}
+        \\if (@HasField(dt, "dateData")) {
+        \\    set dt.dateData = 123
+        \\    @Assert(dt.dateData == 123)
+        \\    var declared_after = 7
+        \\    set dt.dateData = 456
+        \\    @Assert(dt.dateData == 456)
+        \\    @Assert(declared_after == 7)
+        \\}
+        \\@Assert(@HasField(dt, "_dateData") + @HasField(dt, "dateData") == 1)
+        \\@Assert(@HasField(dt, "no_such_field") == 0)
     );
     try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")

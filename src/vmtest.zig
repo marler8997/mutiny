@@ -169,6 +169,23 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
     try Vm.testBadCode(dotnet_funcs,
         \\@Rerun(0 - 1)
     , "1: @Rerun delay must be between 0 and 4294967295 milliseconds");
+
+    try Vm.testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+        \\var ts = TimeSpan.FromSeconds(1)
+        \\@Assert(@HasField(ts, "_ticks") == 1)
+        \\@Assert(@HasField(ts, "no_such_field") == 0)
+        \\@Assert(@HasField(ts, "") == 0)
+    );
+    try Vm.testBadCode(dotnet_funcs,
+        \\@HasField(1, "x")
+    , "1: expected argument 0 to be an object but got an integer");
+    try Vm.testBadCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+        \\@HasField(TimeSpan.FromSeconds(1), 5)
+    , "3: expected argument 1 to be a string literal but got an integer");
 }
 
 const std = @import("std");

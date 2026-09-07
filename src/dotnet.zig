@@ -43,14 +43,46 @@ const MonoFuncs = struct {
     method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
     signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
     signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
-    // V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
-    // gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandle,
-    // gchandle_free: *const fn (handle: GcHandle) callconv(.c) void,
-    // gchandle_get_target: *const fn (handle: GcHandle) callconv(.c) *const Object,
+    gchandle: MonoGcHandle,
+    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+
+    pub fn gchandle_new(mono: *const MonoFuncs, object: *const Object, pinned: i32) GcHandleV2 {
+        return switch (mono.gchandle) {
+            .v1 => |v1| v1.gchandle_new(object, pinned).toV2(),
+            .v2 => |v2| v2.gchandle_new_v2(object, pinned),
+        };
+    }
+    pub fn gchandle_free(mono: *const MonoFuncs, handle: GcHandleV2) void {
+        switch (mono.gchandle) {
+            .v1 => |v1| v1.gchandle_free(.fromV2(handle)),
+            .v2 => |v2| v2.gchandle_free_v2(handle),
+        }
+    }
+    pub fn gchandle_get_target(mono: *const MonoFuncs, handle: GcHandleV2) *const Object {
+        return switch (mono.gchandle) {
+            .v1 => |v1| v1.gchandle_get_target(.fromV2(handle)),
+            .v2 => |v2| v2.gchandle_get_target_v2(handle),
+        };
+    }
+};
+
+const MonoGcHandleV1 = struct {
+    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV1,
+    gchandle_free: *const fn (handle: GcHandleV1) callconv(.c) void,
+    gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
+};
+const MonoGcHandleV2 = struct {
     gchandle_new_v2: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV2,
     gchandle_free_v2: *const fn (handle: GcHandleV2) callconv(.c) void,
     gchandle_get_target_v2: *const fn (handle: GcHandleV2) callconv(.c) *const Object,
-    string_to_utf8: *const fn (*const Object) callconv(.c) ?[*:0]const u8,
+};
+
+// V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
+// which ships a newer mono where V2 exists. Older runtimes (Unity 2019, e.g. Outer Wilds) only
+// have V1, so resolve V2 when present and fall back to V1.
+const MonoGcHandle = union(enum) {
+    v1: MonoGcHandleV1,
+    v2: MonoGcHandleV2,
 };
 
 const Il2cppFuncs = struct {
@@ -175,9 +207,17 @@ pub const Funcs = struct {
                     .method_signature = try mono_funcs.monoGet(mod, .method_signature, proc_ref),
                     .signature_get_return_type = try mono_funcs.monoGet(mod, .signature_get_return_type, proc_ref),
                     .signature_get_params = try mono_funcs.monoGet(mod, .signature_get_params, proc_ref),
-                    .gchandle_new_v2 = try mono_funcs.monoGet(mod, .gchandle_new_v2, proc_ref),
-                    .gchandle_free_v2 = try mono_funcs.monoGet(mod, .gchandle_free_v2, proc_ref),
-                    .gchandle_get_target_v2 = try mono_funcs.monoGet(mod, .gchandle_get_target_v2, proc_ref),
+                    .gchandle = if (mono_gchandle_v2.monoGet(mod, .gchandle_new_v2, proc_ref)) |gchandle_new_v2| .{ .v2 = .{
+                        .gchandle_new_v2 = gchandle_new_v2,
+                        .gchandle_free_v2 = try mono_gchandle_v2.monoGet(mod, .gchandle_free_v2, proc_ref),
+                        .gchandle_get_target_v2 = try mono_gchandle_v2.monoGet(mod, .gchandle_get_target_v2, proc_ref),
+                    } } else |err| switch (err) {
+                        error.ProcNotFound => .{ .v1 = .{
+                            .gchandle_new = try mono_gchandle_v1.monoGet(mod, .gchandle_new, proc_ref),
+                            .gchandle_free = try mono_gchandle_v1.monoGet(mod, .gchandle_free, proc_ref),
+                            .gchandle_get_target = try mono_gchandle_v1.monoGet(mod, .gchandle_get_target, proc_ref),
+                        } },
+                    },
                     .string_to_utf8 = try mono_funcs.monoGet(mod, .string_to_utf8, proc_ref),
                 } },
                 .il2cpp => .{
@@ -297,4 +337,6 @@ const dotnetkind = @import("dotnetkind.zig");
 
 const funcs = @import("dotnetload.zig").template(Funcs);
 const mono_funcs = @import("dotnetload.zig").template(MonoFuncs);
+const mono_gchandle_v1 = @import("dotnetload.zig").template(MonoGcHandleV1);
+const mono_gchandle_v2 = @import("dotnetload.zig").template(MonoGcHandleV2);
 const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppFuncs);

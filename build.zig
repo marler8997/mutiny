@@ -267,6 +267,19 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&dotnet_test.step);
     }
     {
+        const outer_wilds = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Outer Wilds";
+        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.dependOn(&install_dotnet_test.step);
+        dotnet_test.addArg(outer_wilds ++ "\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll");
+        dotnet_test.addArg("--assembly-path");
+        dotnet_test.addArg(outer_wilds ++ "\\OuterWilds_Data\\Managed");
+        b.step(
+            "test-outerwilds",
+            "run dotnet-test against Outer Wilds' mono runtime (Unity 2019, V1 gchandle API)",
+        ).dependOn(&dotnet_test.step);
+        test_step.dependOn(&dotnet_test.step);
+    }
+    {
         const schedule1 = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Schedule I";
         const dotnet_test = b.addRunArtifact(dotnet_test_exe);
         dotnet_test.step.dependOn(&install_dotnet_test.step);

@@ -9,6 +9,7 @@ const Method = struct {
     name: [*:0]const u8,
     params: u8,
     return_type: [:0]const u8,
+    param_type: ?[:0]const u8 = null,
     invoker: il2cppclass.InvokerMethod,
 };
 
@@ -86,6 +87,14 @@ const methods = [_]Method{
 
     .{ .name = "NullString", .params = 0, .return_type = "String", .invoker = &returnsNull },
     .{ .name = "NullObject", .params = 0, .return_type = "Object", .invoker = &returnsNull },
+
+    .{ .name = "Overload", .params = 1, .return_type = "Int32", .param_type = "Int32", .invoker = constant(i32, 1) },
+    .{ .name = "Overload", .params = 1, .return_type = "Int32", .param_type = "String", .invoker = constant(i32, 2) },
+    .{ .name = "Overload", .params = 1, .return_type = "Int32", .param_type = "Double", .invoker = constant(i32, 3) },
+    .{ .name = "OverloadIntUint", .params = 1, .return_type = "Int32", .param_type = "Int32", .invoker = constant(i32, 1) },
+    .{ .name = "OverloadIntUint", .params = 1, .return_type = "Int32", .param_type = "UInt32", .invoker = constant(i32, 2) },
+    .{ .name = "OverloadInt32And64", .params = 1, .return_type = "Int32", .param_type = "Int32", .invoker = constant(i32, 1) },
+    .{ .name = "OverloadInt32And64", .params = 1, .return_type = "Int32", .param_type = "Int64", .invoker = constant(i32, 2) },
 };
 
 fn findClass(
@@ -132,10 +141,14 @@ pub fn install(
             return error.MissingClass;
         };
         const return_type = funcs.class_get_type(return_class);
-        // every echo method's parameter type is its return type; one slot each, so a method's
-        // parameter list is param_storage[i..i+1]
         std.debug.assert(m.params <= 1);
-        param_storage[i] = return_type;
+        param_storage[i] = if (m.param_type) |param_type| blk: {
+            const param_class = findClass(funcs, assemblies, "System", param_type.ptr) orelse {
+                std.log.err("il2cpp fixture: no System.{s} for '{s}'", .{ param_type, m.name });
+                return error.MissingClass;
+            };
+            break :blk funcs.class_get_type(param_class);
+        } else return_type;
         method_ptrs[i] = method_storage[i].init(layouts.method, .{
             .name = m.name,
             .return_type = return_type,

@@ -21,6 +21,14 @@ public class Test
 
     public static string NullString() { return null; }
     public static object NullObject() { return null; }
+
+    public static int Overload(int v) { return 1; }
+    public static int Overload(string v) { return 2; }
+    public static int Overload(double v) { return 3; }
+    public static int OverloadIntUint(int v) { return 1; }
+    public static int OverloadIntUint(uint v) { return 2; }
+    public static int OverloadInt32And64(int v) { return 1; }
+    public static int OverloadInt32And64(long v) { return 2; }
 }
 
 namespace MutinyTest

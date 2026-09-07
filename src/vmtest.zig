@@ -120,7 +120,39 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
             \\@Assert(@IsNull(Test.NullString()))
             \\@Assert(@IsNull(Test.NullObject()))
         );
+        try Vm.testCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Assert(Test.Overload(5) == 1)
+            \\@Assert(Test.Overload("x") == 2)
+            \\@Assert(Test.Overload(1.5) == 3)
+        );
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.OverloadIntUint(5))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: ambiguous overloads for OverloadIntUint(integer) on class 'Test', candidates: OverloadIntUint(i4) OverloadIntUint(u4)",
+            .il2cpp => "2: ambiguous overloads for OverloadIntUint(integer) on class 'Object', candidates: OverloadIntUint(i4) OverloadIntUint(u4)",
+        });
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.OverloadInt32And64(5))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: ambiguous overloads for OverloadInt32And64(integer) on class 'Test', candidates: OverloadInt32And64(i4) OverloadInt32And64(i8)",
+            .il2cpp => "2: ambiguous overloads for OverloadInt32And64(integer) on class 'Object', candidates: OverloadInt32And64(i4) OverloadInt32And64(i8)",
+        });
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.Overload(Test))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: no overload matches for Overload(other) on class 'Test', candidates: Overload(i4) Overload(string) Overload(r8)",
+            .il2cpp => "2: no overload matches for Overload(other) on class 'Object', candidates: Overload(i4) Overload(string) Overload(r8)",
+        });
     }
+    try Vm.testBadCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var String = @Class(mscorlib.System.String)
+        \\@Discard(String.IsNullOrEmpty(5))
+    , "3: no overload matches for IsNullOrEmpty(integer) on class 'String', candidates: IsNullOrEmpty(string)");
     try Vm.testUpdateMod(dotnet_funcs,
         \\@UpdateResult("health is ", 100, " of ", 100)
     , .{ .result = "health is 100 of 100" });

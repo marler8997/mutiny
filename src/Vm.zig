@@ -1123,27 +1123,21 @@ fn callMethod(
 
     // NOTE: we could push the args on the vm.mem stack, but, having a reasonable
     //       max like 100 is probably fine right?
-    const max_arg_count = 100;
     if (args.count > max_arg_count) return vm.setError(.{ .static_error = .{
         .pos = after_lparen,
         .string = "too many args for managed function (current max is 100)",
     } });
 
-    const method = blk: {
-        var search = class;
-        while (true) {
-            if (vm.dotnet_funcs.class_get_method_from_name(
-                search,
-                method_id.slice(),
-                args.count,
-            )) |found| break :blk found;
-            search = vm.dotnet_funcs.class_get_parent(search) orelse return vm.setError(.{ .missing_method = .{
-                .class = class,
-                .id_extent = method_id_extent,
-                .arg_count = args.count,
-            } });
+    var arg_kinds: [max_arg_count]ArgKind = undefined;
+    {
+        var next_arg_addr = args_addr;
+        for (0..args.count) |arg_index| {
+            const arg_type, const value_addr = vm.readValue(Type, next_arg_addr);
+            _, next_arg_addr = vm.readAnyValue(arg_type, value_addr);
+            arg_kinds[arg_index] = ArgKind.of(arg_type);
         }
-    };
+    }
+    const method = try vm.resolveMethod(class, method_id_extent, method_id.slice(), &arg_kinds, args.count);
     const return_type = blk: switch (vm.dotnet_funcs.kind) {
         .mono => |*mono| {
             const method_sig = mono.method_signature(method) orelse @panic(
@@ -1168,7 +1162,7 @@ fn callMethod(
         const arg_value, next_arg_addr = vm.readAnyValue(arg_type, value_addr);
         managed_args_buf[arg_index] = blk: switch (arg_value) {
             .float => |f| {
-                const target = vm.paramTypeKind(method, arg_index);
+                const target = paramTypeKind(vm.dotnet_funcs, method, arg_index);
                 switch (target) {
                     .r4 => managed_arg_storage[arg_index] = .{
                         .r4 = narrowF64ToF32(f) orelse return vm.setError(.{ .lossy_conversion = .{
@@ -1186,7 +1180,7 @@ fn callMethod(
                 break :blk managed_arg_storage[arg_index].getPtr();
             },
             .integer => |i| {
-                const target = vm.paramTypeKind(method, arg_index);
+                const target = paramTypeKind(vm.dotnet_funcs, method, arg_index);
                 switch (target) {
                     .r4 => managed_arg_storage[arg_index] = .{
                         .r4 = exactI64ToF32(i) orelse return vm.setError(.{ .lossy_conversion = .{
@@ -3001,8 +2995,138 @@ const VmEat = struct {
     }
 };
 
-fn paramTypeKind(vm: *Vm, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
-    const param_type: *const dotnet.Type = switch (vm.dotnet_funcs.kind) {
+const max_arg_count = 100;
+
+const ArgKind = enum {
+    integer,
+    float,
+    string,
+    other,
+    fn of(t: Type) ArgKind {
+        return switch (t) {
+            .integer => .integer,
+            .float => .float,
+            .string_literal, .managed_string => .string,
+            else => .other,
+        };
+    }
+    pub fn format(kind: ArgKind, writer: *std.Io.Writer) error{WriteFailed}!void {
+        try writer.writeAll(@tagName(kind));
+    }
+};
+
+const Fit = enum {
+    exact,
+    convertible,
+    no,
+    fn of(arg: ArgKind, param: dotnet.TypeKind) Fit {
+        return switch (arg) {
+            .integer => switch (param) {
+                .boolean, .char, .i1, .u1, .i2, .u2, .i4, .u4, .i8, .u8, .i, .u => .exact,
+                .r4, .r8 => .convertible,
+                else => .no,
+            },
+            .float => switch (param) {
+                .r4, .r8 => .exact,
+                else => .no,
+            },
+            .string => if (param == .string) .exact else .no,
+            .other => .no,
+        };
+    }
+};
+
+fn methodFit(funcs: *const dotnet.Funcs, method: *const dotnet.Method, arg_kinds: []const ArgKind) Fit {
+    var fit: Fit = .exact;
+    for (arg_kinds, 0..) |kind, i| {
+        switch (Fit.of(kind, paramTypeKind(funcs, method, i))) {
+            .exact => {},
+            .convertible => fit = .convertible,
+            .no => return .no,
+        }
+    }
+    return fit;
+}
+
+fn resolveMethod(
+    vm: *Vm,
+    class: *const dotnet.Class,
+    method_id_extent: Extent,
+    name: []const u8,
+    all_arg_kinds: *const [max_arg_count]ArgKind,
+    arg_count: usize,
+) error{Vm}!*const dotnet.Method {
+    const arg_kinds = all_arg_kinds[0..arg_count];
+    var seen_candidate = false;
+    var level: ?*const dotnet.Class = class;
+    while (level) |search| : (level = vm.dotnet_funcs.class_get_parent(search)) {
+        var exact: ?*const dotnet.Method = null;
+        var exact_ambiguous = false;
+        var convertible: ?*const dotnet.Method = null;
+        var convertible_ambiguous = false;
+        var iterator: ?*anyopaque = null;
+        while (vm.dotnet_funcs.class_get_methods(search, &iterator)) |method| {
+            if (!std.mem.eql(u8, std.mem.span(vm.dotnet_funcs.method_get_name(method)), name)) continue;
+            if (paramCount(vm.dotnet_funcs, method) != arg_kinds.len) continue;
+            seen_candidate = true;
+            switch (methodFit(vm.dotnet_funcs, method, arg_kinds)) {
+                .exact => if (exact == null) {
+                    exact = method;
+                } else {
+                    exact_ambiguous = true;
+                },
+                .convertible => if (convertible == null) {
+                    convertible = method;
+                } else {
+                    convertible_ambiguous = true;
+                },
+                .no => {},
+            }
+        }
+        const match, const ambiguous = if (exact != null)
+            .{ exact, exact_ambiguous }
+        else
+            .{ convertible, convertible_ambiguous };
+        if (match) |method| {
+            if (ambiguous) return vm.setError(.{ .overload = .{
+                .kind = .ambiguous,
+                .class = class,
+                .id_extent = method_id_extent,
+                .arg_count = @intCast(arg_count),
+                .arg_kinds = all_arg_kinds.*,
+            } });
+            return method;
+        }
+    }
+    if (seen_candidate) return vm.setError(.{ .overload = .{
+        .kind = .none_match,
+        .class = class,
+        .id_extent = method_id_extent,
+        .arg_count = @intCast(arg_count),
+        .arg_kinds = all_arg_kinds.*,
+    } });
+    return vm.setError(.{ .missing_method = .{
+        .class = class,
+        .id_extent = method_id_extent,
+        .arg_count = @intCast(arg_count),
+    } });
+}
+
+fn paramCount(funcs: *const dotnet.Funcs, method: *const dotnet.Method) usize {
+    switch (funcs.kind) {
+        .mono => |*mono| {
+            const sig = mono.method_signature(method) orelse return 0;
+            var iter: ?*anyopaque = null;
+            var count: usize = 0;
+            while (mono.signature_get_params(sig, &iter)) |_| count += 1;
+            return count;
+        },
+        .il2cpp => |*il2cpp| return il2cpp.method_get_param_count(method),
+    }
+}
+
+fn paramTypeKind(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
+    const param_type: *const dotnet.Type = switch (funcs.kind) {
         .mono => |*mono| blk: {
             const sig = mono.method_signature(method) orelse return .end;
             var iter: ?*anyopaque = null;
@@ -3017,7 +3141,7 @@ fn paramTypeKind(vm: *Vm, method: *const dotnet.Method, index: usize) dotnet.Typ
             break :blk il2cpp.method_get_param(method, @intCast(index));
         },
     };
-    return vm.dotnet_funcs.type_get_type(param_type);
+    return funcs.type_get_type(param_type);
 }
 
 fn integerFitsKind(value: i64, kind: dotnet.TypeKind) bool {
@@ -3923,6 +4047,13 @@ pub const Error = union(enum) {
         id_extent: Extent,
         arg_count: u16,
     },
+    overload: struct {
+        kind: enum { none_match, ambiguous },
+        class: *const dotnet.Class,
+        id_extent: Extent,
+        arg_count: u16,
+        arg_kinds: [max_arg_count]ArgKind,
+    },
     overflow: struct {
         pos: usize,
         value: i64,
@@ -4192,6 +4323,35 @@ const ErrorFmt = struct {
                     m.arg_count,
                 },
             ),
+            .overload => |o| {
+                const name = f.text[o.id_extent.start..o.id_extent.end];
+                try writer.print("{d}: {s} for {s}(", .{
+                    getLineNum(f.text, o.id_extent.start),
+                    switch (o.kind) {
+                        .none_match => "no overload matches",
+                        .ambiguous => "ambiguous overloads",
+                    },
+                    name,
+                });
+                for (o.arg_kinds[0..o.arg_count], 0..) |kind, i| {
+                    try writer.print("{s}{f}", .{ if (i == 0) "" else ", ", kind });
+                }
+                try writer.print(") on class '{s}', candidates:", .{f.dotnet_funcs.class_get_name(o.class)});
+                var level: ?*const dotnet.Class = o.class;
+                while (level) |search| : (level = f.dotnet_funcs.class_get_parent(search)) {
+                    var iterator: ?*anyopaque = null;
+                    while (f.dotnet_funcs.class_get_methods(search, &iterator)) |method| {
+                        if (!std.mem.eql(u8, std.mem.span(f.dotnet_funcs.method_get_name(method)), name)) continue;
+                        const count = paramCount(f.dotnet_funcs, method);
+                        if (count != o.arg_count) continue;
+                        try writer.print(" {s}(", .{name});
+                        for (0..count) |i| {
+                            try writer.print("{s}{t}", .{ if (i == 0) "" else ", ", paramTypeKind(f.dotnet_funcs, method, i) });
+                        }
+                        try writer.writeAll(")");
+                    }
+                }
+            },
             .overflow => |o| try writer.print(
                 "{d}: integer overflow, value {d} to {}-bit {t} integer",
                 .{

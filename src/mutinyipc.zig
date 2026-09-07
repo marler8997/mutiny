@@ -7,7 +7,7 @@ pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
 pub const max_string_len = std.math.maxInt(u16);
 
-pub const start_export_name = "MutinyStart";
+pub const main_export_name = "MutinyMain";
 
 /// The default thread stack is too small when injecting into .NET assemblies, so always ask
 /// for a reasonable 2MB.

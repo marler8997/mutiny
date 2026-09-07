@@ -167,11 +167,11 @@ pub export fn _DllMainCRTStartup(
 // }
 
 comptime {
-    @export(&MutinyStart, .{ .name = mutinyipc.start_export_name });
+    @export(&MutinyMain, .{ .name = mutinyipc.main_export_name });
 }
-fn MutinyStart(context: ?*anyopaque) callconv(.winapi) u32 {
+fn MutinyMain(context: ?*anyopaque) callconv(.winapi) u32 {
     _ = context;
-    std.log.info("MutinyStart", .{});
+    std.log.info("MutinyMain", .{});
 
     const mutex = blk: {
         var mutex_name_buf: [40]u16 = undefined;

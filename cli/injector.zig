@@ -128,16 +128,16 @@ fn startThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16
         );
         const local_start = win32.GetProcAddress(
             local,
-            mutinyipc.start_export_name,
+            mutinyipc.main_export_name,
         ) orelse win32.panicWin32(
-            "GetProcAddress(" ++ mutinyipc.start_export_name ++ ")",
+            "GetProcAddress(" ++ mutinyipc.main_export_name ++ ")",
             win32.GetLastError(),
         );
         break :blk @intFromPtr(local_start) - @intFromPtr(local);
     };
     const remote_start = @intFromPtr(remote_base) + start_rva;
     std.log.info("calling {s} at 0x{x} in pid {}", .{
-        mutinyipc.start_export_name,
+        mutinyipc.main_export_name,
         remote_start,
         process.pid,
     });

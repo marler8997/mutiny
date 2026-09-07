@@ -16,7 +16,7 @@ const global = struct {
 };
 
 const TickMode = union(enum) {
-    init_update,
+    subclass_window,
     update_mods: struct {
         last_error: ?UpdateModsError,
     },
@@ -306,7 +306,7 @@ fn MutinyMain(context: ?*anyopaque) callconv(.winapi) u32 {
     global.last_post_result = .posted;
     defer global.last_post_result = .posted;
 
-    global.tick_mode = .init_update;
+    global.tick_mode = .subclass_window;
     if (0 == win32.SetTimer(
         hwnd,
         @intFromEnum(TimerId.tick),
@@ -768,7 +768,7 @@ fn wndProc(
 fn timerTick(hwnd: win32.HWND) void {
     mainthread.mutinyThreadOnTick(&global.last_post_result);
     switch (global.tick_mode) {
-        .init_update => switch (mainthread.mutinyThreadInitUpdate()) {
+        .subclass_window => switch (mainthread.mutinyThreadSubclassUpdate()) {
             .keep_calling => {},
             .done => {
                 if (0 == win32.SetTimer(

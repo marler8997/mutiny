@@ -16,28 +16,24 @@ const global = struct {
     var shared: struct {
         mutex: Mutex = .{},
         mutiny_hwnd: ?win32.HWND = null,
-        init_state: InitState = .idle,
     } = .{};
-    var state: State = .{ .initial = .{} };
-    var wnd_msg: u32 = undefined;
-    var hwnd: win32.HWND = undefined;
-    var subclass: struct {
-        mutex: std.Thread.Mutex = .{},
-        wndproc: win32.WNDPROC = undefined,
-    } = .{};
+
+    // state related to subclassing the main window
+    const subclass = struct {
+        var state: SubclassWindowState = .{ .initial = .{} };
+        var wnd_msg: u32 = undefined;
+        var hwnd: win32.HWND = undefined;
+        const wndproc = struct {
+            var mutex: std.Thread.Mutex = .{};
+            var ptr: win32.WNDPROC = undefined;
+        };
+    };
 
     var post_retry_enabled: std.atomic.Value(bool) = .init(false);
-    var run_mods_error: ?RunModsError = null;
+    var runtime: RuntimeState = .{ .find_lib = .{} };
     var dotnet_funcs_store: dotnet.Funcs = undefined;
-    var dotnet_funcs: ?*dotnet.Funcs = null;
     var inside_run: bool = false;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-};
-
-const InitState = union(enum) {
-    idle,
-    initializing,
-    complete,
 };
 
 pub const wm_schedule_rerun = win32.WM_USER + 0;
@@ -59,7 +55,7 @@ fn scheduleRerun(ms: u32) error{Schedule}!void {
     // NOTE: if we post too often it can cause starve the game
     //       so we still do the thread hop even in this case
     // if (ms == 0) {
-    //     const target: Target = .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } };
+    //     const target: Target = .{ .data = .{ .hwnd = global.subclass.hwnd, .msg = global.subclass.wnd_msg } };
     //     var err: PostError = undefined;
     //     target.post(.run, &err) catch {
     //         std.log.err("PostMessage(rerun) failed, error={f}", .{err});
@@ -78,20 +74,6 @@ fn scheduleRerun(ms: u32) error{Schedule}!void {
         return error.Schedule;
     }
 }
-
-const State = union(enum) {
-    initial: struct {
-        register_error: ?win32.WIN32_ERROR = null,
-    },
-    find_window: struct {
-        enum_windows_error: ?win32.WIN32_ERROR = null,
-        candidate_count: ?u32 = null,
-    },
-    subclass: struct {
-        set_wndproc_error: ?win32.WIN32_ERROR = null,
-    },
-    ready,
-};
 
 fn coalescedLog(
     comptime T: type,
@@ -134,10 +116,10 @@ pub fn mutinyThreadOnTick(last_post_result: *PostResult) void {
     }
 }
 pub fn mutinyThreadPostRun(last_post_result: *PostResult) void {
-    const new_result: PostResult = blk: switch (global.state) {
+    const new_result: PostResult = blk: switch (global.subclass.state) {
         .initial, .find_window, .subclass => .not_ready,
         .ready => {
-            const target: Target = .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } };
+            const target: Target = .{ .data = .{ .hwnd = global.subclass.hwnd, .msg = global.subclass.wnd_msg } };
             var err: PostError = undefined;
             target.post(.run, &err) catch break :blk .{ .post_error = err };
             break :blk .posted;
@@ -231,11 +213,24 @@ pub fn mutinyThreadDetach() bool {
     return false;
 }
 
-pub fn mutinyThreadInitUpdate() enum { keep_calling, done } {
-    state: switch (global.state) {
+const SubclassWindowState = union(enum) {
+    initial: struct {
+        register_error: ?win32.WIN32_ERROR = null,
+    },
+    find_window: struct {
+        enum_windows_error: ?win32.WIN32_ERROR = null,
+        candidate_count: ?u32 = null,
+    },
+    subclass: struct {
+        set_wndproc_error: ?win32.WIN32_ERROR = null,
+    },
+    ready,
+};
+pub fn mutinyThreadSubclassUpdate() enum { keep_calling, done } {
+    state: switch (global.subclass.state) {
         .initial => |*state| {
-            global.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
-            if (global.wnd_msg == 0) {
+            global.subclass.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
+            if (global.subclass.wnd_msg == 0) {
                 const err = win32.GetLastError();
                 coalescedLog(
                     ?win32.WIN32_ERROR,
@@ -247,8 +242,8 @@ pub fn mutinyThreadInitUpdate() enum { keep_calling, done } {
                 );
                 return .keep_calling;
             }
-            global.state = .{ .find_window = .{} };
-            continue :state global.state;
+            global.subclass.state = .{ .find_window = .{} };
+            continue :state global.subclass.state;
         },
         .find_window => |*state| {
             var ctx: FindContext = .{ .pid = win32.GetCurrentProcessId() };
@@ -278,22 +273,22 @@ pub fn mutinyThreadInitUpdate() enum { keep_calling, done } {
             }
             const window = &ctx.first_candidate.?;
             std.log.info("found unity window 0x{x} on thread {}", .{ @intFromPtr(window.hwnd), window.tid });
-            global.hwnd = window.hwnd;
-            global.state = .{ .subclass = .{} };
-            continue :state global.state;
+            global.subclass.hwnd = window.hwnd;
+            global.subclass.state = .{ .subclass = .{} };
+            continue :state global.subclass.state;
         },
         .subclass => |*state| {
             const old_wndproc, const set_error = blk: {
-                global.subclass.mutex.lock();
-                defer global.subclass.mutex.unlock();
+                global.subclass.wndproc.mutex.lock();
+                defer global.subclass.wndproc.mutex.unlock();
                 win32.SetLastError(.NO_ERROR);
                 const old_wndproc = win32.setWindowLongPtrW(
-                    global.hwnd,
+                    global.subclass.hwnd,
                     @intFromEnum(win32.GWLP_WNDPROC),
                     @intFromPtr(&subclassProc),
                 );
                 const err = win32.GetLastError();
-                if (old_wndproc != 0) global.subclass.wndproc = @ptrFromInt(old_wndproc);
+                if (old_wndproc != 0) global.subclass.wndproc.ptr = @ptrFromInt(old_wndproc);
                 break :blk .{ old_wndproc, err };
             };
             if (old_wndproc == 0) {
@@ -307,19 +302,19 @@ pub fn mutinyThreadInitUpdate() enum { keep_calling, done } {
                 );
                 switch (set_error) {
                     .ERROR_INVALID_WINDOW_HANDLE => {
-                        global.state = .{ .find_window = .{} };
-                        continue :state global.state;
+                        global.subclass.state = .{ .find_window = .{} };
+                        continue :state global.subclass.state;
                     },
                     else => {},
                 }
                 return .keep_calling;
             }
             std.log.info("mainthread: subclassed window 0x{x} (original wndproc 0x{x})", .{
-                @intFromPtr(global.hwnd),
+                @intFromPtr(global.subclass.hwnd),
                 old_wndproc,
             });
-            global.state = .ready;
-            continue :state global.state;
+            global.subclass.state = .ready;
+            continue :state global.subclass.state;
         },
         .ready => return .done,
     }
@@ -420,7 +415,7 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
 }
 
 fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
-    if (msg == global.wnd_msg) {
+    if (msg == global.subclass.wnd_msg) {
         const action = PostAction.deserialize(.{ .wparam = wparam, .lparam = lparam }) orelse {
             std.log.err("unknown wparam 0x{x} lparam 0x{x}", .{ wparam, lparam });
             return 0;
@@ -431,6 +426,7 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
                 .fail => true,
                 // next run above us in the stack will set this to true if needed
                 .recursed => false,
+                .unrecoverable_error => false, // no need to keep retrying
             }, .monotonic),
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
@@ -439,9 +435,9 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
         return 0;
     }
     const wndproc = blk: {
-        global.subclass.mutex.lock();
-        defer global.subclass.mutex.unlock();
-        break :blk global.subclass.wndproc;
+        global.subclass.wndproc.mutex.lock();
+        defer global.subclass.wndproc.mutex.unlock();
+        break :blk global.subclass.wndproc.ptr;
     };
     return win32.CallWindowProcW(wndproc, hwnd, msg, wparam, lparam);
 }
@@ -474,70 +470,174 @@ fn initIl2cpp() ?win32.HINSTANCE {
     }
 }
 
-const RunModsError = union(enum) {
-    no_dotnet_lib,
-    no_root_domain,
-    missing_proc: struct {
-        lib_kind: dotnet.Kind,
-        name: [:0]const u8,
+const RuntimeState = union(enum) {
+    find_lib: struct {
+        no_module_logged: bool = false,
     },
-};
+    init_funcs: struct {
+        lib: DotNetLib,
+    },
+    wait_domain: struct {
+        module: dynlib.Module,
+        no_domain_logged: bool = false,
+    },
+    bootstrap: struct {
+        module: dynlib.Module,
+        root_domain: *const dotnet.Domain,
+    },
+    unrecoverable_error: UnrecoverableError,
+    ready,
 
-fn run() enum { success, fail, recursed } {
+    const UnrecoverableError = union(enum) {
+        missing_proc: struct {
+            lib: DotNetLib,
+            name: [:0]const u8,
+        },
+        il2cpp_bootstrap: BootstrapIl2cppError,
+
+        pub fn format(err: UnrecoverableError, writer: *std.Io.Writer) error{WriteFailed}!void {
+            switch (err) {
+                .missing_proc => |e| try writer.print("{t} runtime is missing '{s}'", .{ e.lib.kind, e.name }),
+                .il2cpp_bootstrap => |e| try writer.print("il2cpp bootstrap failed with {t}", .{e}),
+            }
+        }
+    };
+};
+fn updateRuntime() union(enum) {
+    not_ready,
+    unrecoverable_error: RuntimeState.UnrecoverableError,
+    ready: *const dotnet.Funcs,
+} {
+    state: switch (global.runtime) {
+        .find_lib => |*runtime| {
+            const lib: DotNetLib = blk: {
+                if (initMono()) |module| break :blk .{ .kind = .mono, .module = module };
+                if (initIl2cpp()) |module| break :blk .{ .kind = .il2cpp, .module = module };
+                coalescedLog(
+                    bool,
+                    &runtime.no_module_logged,
+                    true,
+                    .info,
+                    "no mono nor il2cpp module yet",
+                    .{},
+                );
+                return .not_ready;
+            };
+            global.runtime = .{ .init_funcs = .{ .lib = lib } };
+            continue :state global.runtime;
+        },
+        .init_funcs => |*runtime| {
+            var missing_proc: [:0]const u8 = undefined;
+            global.dotnet_funcs_store = dotnet.Funcs.init(
+                &missing_proc,
+                runtime.lib.kind,
+                runtime.lib.module,
+            ) catch {
+                // I'm pretty sure a missing function is not recoverable,
+                // the library isn't going to magically spawn a new function
+                std.log.err(
+                    "{t} dotnet missing proc '{s}'",
+                    .{ runtime.lib.kind, missing_proc },
+                );
+                global.runtime = .{ .unrecoverable_error = .{ .missing_proc = .{
+                    .lib = runtime.lib,
+                    .name = missing_proc,
+                } } };
+                continue :state global.runtime;
+            };
+            // ensure runtime does not appear in the assignment as we're re-assigning it
+            const module = runtime.lib.module;
+            global.runtime = .{ .wait_domain = .{ .module = module } };
+            continue :state global.runtime;
+        },
+        .wait_domain => |*runtime| {
+            const root_domain = global.dotnet_funcs_store.get_root_domain() orelse {
+                coalescedLog(
+                    bool,
+                    &runtime.no_domain_logged,
+                    true,
+                    .info,
+                    "dotnet loaded but root domain not ready yet",
+                    .{},
+                );
+                return .not_ready;
+            };
+            // ensure runtime does not appear in the assignment as we're re-assigning it
+            const module = runtime.module;
+            global.runtime = switch (global.dotnet_funcs_store.kind) {
+                .mono => .ready,
+                .il2cpp => .{ .bootstrap = .{ .module = module, .root_domain = root_domain } },
+            };
+            continue :state global.runtime;
+        },
+        .bootstrap => |*runtime| {
+            bootstrapIl2cpp(
+                &global.dotnet_funcs_store,
+                runtime.module,
+                runtime.root_domain,
+            ) catch |err| {
+                std.log.err(
+                    "il2cpp bootstrap failed ({t}), refusing to run scripts on an unverified layout",
+                    .{err},
+                );
+                global.runtime = .{ .unrecoverable_error = .{ .il2cpp_bootstrap = err } };
+                continue :state global.runtime;
+            };
+            global.runtime = .ready;
+            continue :state global.runtime;
+        },
+        .unrecoverable_error => |e| return .{ .unrecoverable_error = e },
+        .ready => return .{ .ready = &global.dotnet_funcs_store },
+    }
+}
+
+const BootstrapIl2cppError = error{
+    UnityPlayerNotLoaded,
+    UnityVersionUnreadable,
+} || il2cppclass.DiscoverError || detour.FindError || detour.InstallError || il2cppclass.SelfTestError;
+
+fn bootstrapIl2cpp(
+    dotnet_funcs: *const dotnet.Funcs,
+    module: dynlib.Module,
+    root_domain: *const dotnet.Domain,
+) BootstrapIl2cppError!void {
+    const unity_version = blk: {
+        const player = win32.GetModuleHandleW(win32.L("UnityPlayer.dll")) orelse return error.UnityPlayerNotLoaded;
+        break :blk UnityVersion.fromLoadedModule(player) catch |err| {
+            std.log.err("could not read the unity version from UnityPlayer.dll ({t})", .{err});
+            return error.UnityVersionUnreadable;
+        };
+    };
+    std.log.info("unity version: {f}", .{unity_version});
+
+    const start = getNow();
+    const layouts = try il2cppclass.discover(dotnet_funcs, unity_version);
+    std.log.info("il2cpp layout verified in {} ms", .{getNow().since(start) / std.time.ns_per_ms});
+
+    const target = try detour.findFunction(module, "il2cpp_class_from_il2cpp_type");
+    const installed = try detour.install(target, @intFromPtr(&il2cppclass.fromIl2CppTypeHook));
+    il2cppclass.global.fromIl2CppTypeOrig = @ptrFromInt(installed.trampoline);
+
+    var assembly_count: usize = 0;
+    const assemblies = dotnet_funcs.kind.il2cpp.domain_get_assemblies(root_domain, &assembly_count);
+    try il2cppclass.subclassSelfTest(dotnet_funcs, assemblies[0..assembly_count], layouts, unity_version);
+    std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
+}
+
+fn run() enum { success, fail, recursed, unrecoverable_error } {
     if (global.inside_run) return .recursed;
     global.inside_run = true;
     defer global.inside_run = false;
     var rerun_schedule_failed = false;
 
-    if (global.dotnet_funcs == null) {
-        const lib: DotNetLib = blk: {
-            if (initMono()) |module| break :blk .{ .kind = .mono, .module = module };
-            if (initIl2cpp()) |module| break :blk .{ .kind = .il2cpp, .module = module };
-            coalescedLog(
-                ?RunModsError,
-                &global.run_mods_error,
-                .no_dotnet_lib,
-                .info,
-                "no mono nor il2cpp module yet",
-                .{},
-            );
-            return .fail;
-        };
-
-        global.dotnet_funcs_store = blk: {
-            var missing_proc: [:0]const u8 = undefined;
-            break :blk dotnet.Funcs.init(&missing_proc, lib.kind, lib.module) catch {
-                coalescedLog(
-                    ?RunModsError,
-                    &global.run_mods_error,
-                    .{ .missing_proc = .{
-                        .lib_kind = lib.kind,
-                        .name = missing_proc,
-                    } },
-                    .err,
-                    "{t} dotnet missing proc '{s}'",
-                    .{ lib.kind, missing_proc },
-                );
-                return .fail;
-            };
-        };
-        global.dotnet_funcs = &global.dotnet_funcs_store;
-    }
-    const dotnet_funcs = global.dotnet_funcs.?;
-
-    // "module loaded" doesn't mean "runtime up": if the root domain isn't ready yet, bail so
-    // the retry re-posts rather than invoking managed code against a null domain.
-    if (dotnet_funcs.get_root_domain() == null) {
-        coalescedLog(
-            ?RunModsError,
-            &global.run_mods_error,
-            .no_root_domain,
-            .info,
-            "dotnet loaded but root domain not ready yet",
-            .{},
-        );
-        return .fail;
-    }
+    const dotnet_funcs = switch (updateRuntime()) {
+        .ready => |funcs| funcs,
+        .unrecoverable_error => |err| {
+            failQueuedScripts(err);
+            return .unrecoverable_error;
+        },
+        .not_ready => return .fail,
+    };
 
     mods.applyUpdates();
     {
@@ -591,6 +691,27 @@ fn run() enum { success, fail, recursed } {
     }
 
     return if (rerun_schedule_failed) .fail else .success;
+}
+
+fn failQueuedScripts(err: RuntimeState.UnrecoverableError) void {
+    while (scripts.steal()) |script| {
+        defer script.deinit();
+        std.log.err("rejecting script '{s}': {f}", .{ script.name.slice(), err });
+        const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
+        var pipe_buf: [512]u8 = undefined;
+        var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
+        const write_error: ?error{WriteFailed} = blk: {
+            pipe_writer.interface.print(
+                "error: mutiny cannot run scripts in this process, {f}\n",
+                .{err},
+            ) catch |e| break :blk e;
+            pipe_writer.interface.flush() catch |e| break :blk e;
+            break :blk null;
+        };
+        if (write_error != null) {
+            std.log.err("write to pipe failed with {t}", .{pipe_writer.err.?});
+        }
+    }
 }
 
 fn getNow() std.time.Instant {
@@ -676,10 +797,13 @@ const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
 const builtins = @import("builtins.zig");
+const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
+const il2cppclass = mutiny.il2cppclass;
 const mods = @import("mods.zig");
 const scripts = @import("scripts.zig");
 
 const Mod = @import("Mod.zig");
+const UnityVersion = mutiny.UnityVersion;
 const Vm = mutiny.Vm;

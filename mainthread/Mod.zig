@@ -3,7 +3,12 @@ const Mod = @This();
 list_node: std.DoublyLinkedList.Node,
 name: BoundedArray(u8, ModNameSlice.max_len),
 text: ?[]u8,
-executed: bool,
+run: union(enum) {
+    pending,
+    done,
+    rerun: Rerun,
+},
+is_first_run: bool,
 
 pub fn create(mod_name: ModNameSlice, text: ?[]u8) error{OutOfMemory}!*Mod {
     const mod = try alloc.newMod();
@@ -11,7 +16,8 @@ pub fn create(mod_name: ModNameSlice, text: ?[]u8) error{OutOfMemory}!*Mod {
         .list_node = .{},
         .name = .{ .len = mod_name.len, .buffer = undefined },
         .text = text,
-        .executed = false,
+        .run = .pending,
+        .is_first_run = true,
     };
     @memcpy(mod.name.buffer[0..mod_name.len], mod_name.slice());
     return mod;
@@ -30,3 +36,4 @@ const alloc = @import("alloc.zig");
 
 const BoundedArray = mutiny.BoundedArray;
 const ModNameSlice = @import("ModNameSlice.zig");
+const Rerun = @import("Rerun.zig");

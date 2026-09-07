@@ -66,12 +66,16 @@ pub fn applyUpdates() void {
 
 pub const Iterator = struct {
     node: ?*std.DoublyLinkedList.Node,
-    pub fn next(it: *Iterator) ?*Mod {
+    pub fn next(it: *Iterator, now: std.time.Instant) ?*Mod {
         while (it.node) |node| {
             it.node = node.next;
             const mod: *Mod = @fieldParentPtr("list_node", node);
-            if (mod.executed) continue;
-            mod.executed = true;
+            switch (mod.run) {
+                .pending => {},
+                .done => continue,
+                .rerun => |rerun| if (!rerun.isDue(now)) continue,
+            }
+            mod.run = .done;
             return mod;
         }
         return null;
@@ -79,6 +83,22 @@ pub const Iterator = struct {
 };
 pub fn iterator() Iterator {
     return .{ .node = global.list.first };
+}
+
+pub fn nextRerunMs(now: std.time.Instant) ?u32 {
+    var earliest: ?u32 = null;
+    var maybe_node = global.list.first;
+    while (maybe_node) |node| : (maybe_node = node.next) {
+        const mod: *Mod = @fieldParentPtr("list_node", node);
+        switch (mod.run) {
+            .pending, .done => {},
+            .rerun => |rerun| {
+                const remaining = rerun.remainingMs(now);
+                earliest = @min(earliest orelse remaining, remaining);
+            },
+        }
+    }
+    return earliest;
 }
 
 const std = @import("std");

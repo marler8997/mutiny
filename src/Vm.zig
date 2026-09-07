@@ -5,6 +5,7 @@ error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
 out: ?*std.Io.Writer = null,
+is_first_run: bool = true,
 
 symbol_state: union(enum) {
     none,
@@ -51,6 +52,7 @@ pub const HandleTracker = struct {
 
 const ErrorResult = union(enum) {
     exit,
+    rerun_ms: u32,
     err: Error,
 };
 
@@ -375,19 +377,9 @@ const ManagedId = struct {
     }
 };
 
-pub const BlockResume = struct {
-    text_offset: usize = 0,
-    loop: ?Loop = null,
-};
-
-pub const Yield = struct {
-    millis: i64,
-    block_resume: BlockResume,
-};
-
-pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
-    var next_statement_offset: usize = block_resume.text_offset;
-    var maybe_loop: ?Loop = block_resume.loop;
+pub fn evalRoot(vm: *Vm) error{Vm}!void {
+    var next_statement_offset: usize = 0;
+    var maybe_loop: ?Loop = null;
     while (true) {
         std.debug.assert(next_statement_offset <= vm.text.len);
         const new_offset = blk: switch (try vm.evalStatement(next_statement_offset, &maybe_loop)) {
@@ -405,7 +397,6 @@ pub fn evalRoot(vm: *Vm, block_resume: BlockResume) error{Vm}!Yield {
                 std.debug.assert(end > next_statement_offset);
                 break :blk end;
             },
-            .yield => |yield| return yield,
             .@"continue" => |continue_pos| {
                 const loop = maybe_loop orelse return vm.setError(.{ .static_error = .{
                     .pos = continue_pos,
@@ -477,10 +468,6 @@ pub fn evalFunction(
                     std.debug.assert(end > offset);
                     break :blk end;
                 },
-                .yield => return vm.setError(.{ .static_error = .{
-                    .pos = lex(vm.text, offset).start,
-                    .string = "yield unsupported inside a function",
-                } }),
                 .@"continue" => {
                     const loop = maybe_loop.?;
                     std.debug.assert(loop.text_offset < offset);
@@ -536,9 +523,6 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
                 std.debug.assert(end > offset);
                 break :blk end;
             },
-            .yield => return vm.setError(.{
-                .not_implemented = "yield inside a " ++ @tagName(kind) ++ " block",
-            }),
             .@"continue" => |continue_pos| {
                 if (maybe_loop) |loop| {
                     vm.discardSymbolsUntil(loop.symbols);
@@ -571,7 +555,6 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
 fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(enum) {
     not_statement: Token,
     statement_end: usize,
-    yield: Yield,
     @"continue": usize,
     direct_break_no_loop: usize,
     child_block_break: BlockBreak,
@@ -719,30 +702,6 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
             } });
             try vm.endSymbol();
             return .{ .statement_end = after_expr };
-        },
-        .keyword_yield => {
-            const expr_first_token = lex(vm.text, first_token.end);
-            const expr_addr = vm.mem.top();
-            const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
-                .expected = "an expression after yield",
-                .token = expr_first_token,
-            } });
-            if (expr_addr.eql(vm.mem.top())) return vm.setError(.{ .unexpected_type = .{
-                .pos = expr_first_token.start,
-                .expected = "an integer expression after yield",
-                .actual = null,
-            } });
-            return .{ .yield = .{
-                .block_resume = .{ .text_offset = expr_end, .loop = maybe_loop_ref.* },
-                .millis = switch (vm.pop(expr_addr)) {
-                    .integer => |v| v,
-                    else => |t| return vm.setError(.{ .unexpected_type = .{
-                        .pos = expr_first_token.start,
-                        .expected = "an integer expression after yield",
-                        .actual = t.getType(),
-                    } }),
-                },
-            } };
         },
         else => {},
     }
@@ -1918,6 +1877,22 @@ fn evalBuiltin(
             vm.error_result = .exit;
             return error.Vm;
         },
+        .@"@Rerun" => {
+            const integer = switch (vm.pop(args_addr)) {
+                .integer => |i| i,
+                else => unreachable,
+            };
+            const ms = std.math.cast(u32, integer) orelse return vm.setError(.{ .static_error = .{
+                .pos = builtin_extent.start,
+                .string = "@Rerun delay must be between 0 and 4294967295 milliseconds",
+            } });
+            vm.error_result = .{ .rerun_ms = ms };
+            return error.Vm;
+        },
+        .@"@IsFirstRun" => {
+            (try vm.push(Type)).* = .integer;
+            (try vm.push(i64)).* = @intFromBool(vm.is_first_run);
+        },
         .@"@Log" => {
             const log_file, const maybe_get_log_error = logfile.global.get();
             var buffer: [1024]u8 = undefined;
@@ -2811,14 +2786,6 @@ const VmEat = struct {
                 } });
                 return .{ .statement_end = expr_end };
             },
-            .keyword_yield => {
-                const expr_first_token = lex(vm.text, first_token.end);
-                const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
-                    .expected = "an expression after yield",
-                    .token = expr_first_token,
-                } });
-                return .{ .statement_end = expr_end };
-            },
             else => {},
         }
 
@@ -3296,6 +3263,8 @@ const Builtin = enum {
     @"@Assert",
     @"@Nothing", // temporary builtin for testing, remove this later
     @"@Exit",
+    @"@Rerun",
+    @"@IsFirstRun",
     @"@Log",
     @"@LogClass",
     @"@Assembly",
@@ -3314,6 +3283,8 @@ const Builtin = enum {
             .@"@Assert" => &.{.{ .concrete = .integer }},
             .@"@Nothing" => &.{},
             .@"@Exit" => &.{},
+            .@"@Rerun" => &.{.{ .concrete = .integer }},
+            .@"@IsFirstRun" => &.{},
             .@"@Log" => null,
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
@@ -3334,6 +3305,8 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assert", .@"@Assert" },
     .{ "@Nothing", .@"@Nothing" },
     .{ "@Exit", .@"@Exit" },
+    .{ "@Rerun", .@"@Rerun" },
+    .{ "@IsFirstRun", .@"@IsFirstRun" },
     .{ "@Log", .@"@Log" },
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
@@ -3399,7 +3372,6 @@ const BinaryOp = enum {
             .keyword_set,
             .keyword_var,
             .keyword_loop,
-            .keyword_yield,
             => null,
             .plus => if (priority == .math) .@"+" else null,
             .minus => if (priority == .math) .@"-" else null,
@@ -3471,7 +3443,6 @@ const Token = struct {
         keyword_set,
         keyword_var,
         keyword_loop,
-        keyword_yield,
     };
     pub const Loc = struct {
         start: usize,
@@ -3487,7 +3458,6 @@ const Token = struct {
         .{ "new", .keyword_new },
         .{ "set", .keyword_set },
         .{ "var", .keyword_var },
-        .{ "yield", .keyword_yield },
     });
     pub fn getKeyword(bytes: []const u8) ?Tag {
         return keywords.get(bytes);
@@ -3531,7 +3501,6 @@ const TokenFmt = struct {
             .keyword_new => try writer.writeAll("the 'new' keyword"),
             .keyword_set => try writer.writeAll("the 'set' keyword"),
             .keyword_var => try writer.writeAll("the 'var' keyword"),
-            .keyword_yield => try writer.writeAll("the 'yield' keyword"),
         }
     }
 };
@@ -4295,23 +4264,18 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
 
     // run twice to make sure vm reset works
     for (0..2) |_| {
-        var block_resume: BlockResume = .{};
-        while (true) {
-            vm.verifyStack();
-            const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
-                .exit => return error.TestUnexpectedSuccess,
-                .err => |err| {
-                    var buf: [2000]u8 = undefined;
-                    const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)});
-                    if (!std.mem.eql(u8, expected_error, actual_error)) {
-                        std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
-                        return error.TestUnexpectedError;
-                    }
-                    break;
-                },
-            };
-            block_resume = yield.block_resume;
-        }
+        vm.verifyStack();
+        vm.evalRoot() catch switch (vm.error_result) {
+            .exit, .rerun_ms => return error.TestUnexpectedSuccess,
+            .err => |err| {
+                var buf: [2000]u8 = undefined;
+                const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)});
+                if (!std.mem.eql(u8, expected_error, actual_error)) {
+                    std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
+                    return error.TestUnexpectedError;
+                }
+            },
+        };
         vm.logStack();
         vm.verifyStack();
         vm.reset();
@@ -4411,9 +4375,6 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testBadCode(dotnet_funcs, "if(\"hello\")", "1: if requires an integer but got a string literal");
     try testBadCode(dotnet_funcs, "if(0)", "1: syntax error: expected an open brace '{' to start if block but got EOF");
     try testBadCode(dotnet_funcs, "if(0){", "1: syntax error: expected a statement but got EOF");
-    try testBadCode(dotnet_funcs, "yield", "1: syntax error: expected an expression after yield but got EOF");
-    try testBadCode(dotnet_funcs, "yield @Nothing()", "1: expected an integer expression after yield but got nothing");
-    try testBadCode(dotnet_funcs, "yield \"hello\"", "1: expected an integer expression after yield but got a string literal");
     try testBadCode(dotnet_funcs, "loop loop", "1: cannot loop inside loop (end with break or continue at the same depth as the original loop)");
     try testBadCode(dotnet_funcs, "break", "1: break must correspond to a loop");
     try testBadCode(dotnet_funcs, "continue", "1: continue must correspond to a loop");
@@ -4514,17 +4475,27 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     var tracker_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer tracker_arena.deinit();
     var handle_tracker: HandleTracker = .{ .allocator = tracker_arena.allocator() };
-    var vm: Vm = .{
-        .dotnet_funcs = dotnet_funcs,
-        .text = text,
-        .mem = .{ .allocator = vm_fixed_fba.allocator() },
-        .handle_tracker = &handle_tracker,
-    };
-    var block_resume: BlockResume = .{};
+    var is_first_run = true;
     while (true) {
+        var vm: Vm = .{
+            .dotnet_funcs = dotnet_funcs,
+            .text = text,
+            .mem = .{ .allocator = vm_fixed_fba.allocator() },
+            .handle_tracker = &handle_tracker,
+            .is_first_run = is_first_run,
+        };
+        defer vm.deinit();
         vm.verifyStack();
-        const yield = vm.evalRoot(block_resume) catch switch (vm.error_result) {
-            .exit => break,
+        vm.evalRoot() catch switch (vm.error_result) {
+            .exit => {
+                vm.logStack();
+                vm.verifyStack();
+                break;
+            },
+            .rerun_ms => {
+                is_first_run = false;
+                continue;
+            },
             .err => |err| {
                 std.debug.print(
                     "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
@@ -4533,11 +4504,7 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
                 return error.VmError;
             },
         };
-        block_resume = yield.block_resume;
     }
-    vm.logStack();
-    vm.verifyStack();
-    vm.deinit();
     handle_tracker.deinit();
 }
 
@@ -4661,7 +4628,7 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     try testCode(dotnet_funcs, "if(1){}");
     try testCode(dotnet_funcs, " if (0 > 1) { @Log(\"if statement!\") }");
     try testCode(dotnet_funcs, " if (0 < 1) { @Log(\"if statement!\") }");
-    try testCode(dotnet_funcs, "yield 0");
+    try testBadCode(dotnet_funcs, "yield 0", "1: undefined identifier 'yield'");
     try testCode(dotnet_funcs, "loop");
     try testCode(dotnet_funcs, "loop break");
     try testCode(dotnet_funcs, "loop break loop");
@@ -4674,7 +4641,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var counter = 0
         \\loop
         \\  @Log("default continue loop: ", counter)
-        \\  yield 0
         \\  set counter = counter + 1
         \\  if (counter == 5) { break }
         \\continue
@@ -4683,7 +4649,6 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var counter = 0
         \\loop
         \\  @Log("default break loop: ", counter)
-        \\  yield 0
         \\  set counter = counter + 1
         \\  if (counter < 5) { continue }
         \\break
@@ -4712,14 +4677,12 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var counter = 0
         \\loop
         \\  @Log("first loop, counter=", counter)
-        \\  yield 0
         \\  set counter = counter + 1
         \\  if (counter == 3) { break }
         \\continue
         \\set counter=0
         \\loop
         \\  @Log("second loop, counter=", counter)
-        \\  yield 0
         \\  set counter = counter + 1
         \\  if (counter == 7) { break }
         \\continue

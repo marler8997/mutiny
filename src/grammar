@@ -1,7 +1,6 @@
 Root <- Statement*
 Statement
    <- if LPAREN Expr RPAREN Block
-    / yield Expr
     / loop
     / break
     / continue

@@ -159,6 +159,16 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
         \\continue
         \\@Log(t)
     , "7: undefined identifier 't'");
+
+    try Vm.testCode(dotnet_funcs,
+        \\if (@IsFirstRun()) {
+        \\    @Rerun(500)
+        \\}
+        \\@Assert(@IsFirstRun() == 0)
+    );
+    try Vm.testBadCode(dotnet_funcs,
+        \\@Rerun(0 - 1)
+    , "1: @Rerun delay must be between 0 and 4294967295 milliseconds");
 }
 
 const std = @import("std");

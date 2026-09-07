@@ -24,6 +24,7 @@ const TickMode = union(enum) {
 
 const TimerId = enum(win32.WPARAM) {
     tick,
+    rerun,
     _,
 };
 const init_update_ms = 200;
@@ -654,11 +655,11 @@ fn wndProc(
 ) callconv(.winapi) win32.LRESULT {
     switch (msg) {
         win32.WM_CREATE => {
-            // mainthread.setHwnd(hwnd);
+            mainthread.mutinyThreadSetHwnd(hwnd);
             return 0;
         },
         win32.WM_DESTROY => {
-            // mainthread.unsetHwnd(hwnd);
+            mainthread.mutinyThreadUnsetHwnd(hwnd);
             return 0;
         },
         win32.WM_CLOSE => {
@@ -669,7 +670,20 @@ fn wndProc(
         win32.WM_TIMER => {
             switch (@as(TimerId, @enumFromInt(wparam))) {
                 .tick => timerTick(hwnd),
+                .rerun => {
+                    if (0 == win32.KillTimer(hwnd, @intFromEnum(TimerId.rerun))) win32.panicWin32("KillTimer", win32.GetLastError());
+                    mainthread.mutinyThreadPostRun(&global.last_post_result);
+                },
                 else => {},
+            }
+            return 0;
+        },
+        // WM_USER + ... (private messages)
+        mainthread.wm_schedule_rerun => {
+            const ms = std.math.cast(u32, wparam) orelse std.math.maxInt(u32);
+            if (0 == win32.SetTimer(hwnd, @intFromEnum(TimerId.rerun), ms, null)) {
+                std.log.err("SetTimer(rerun) failed, error={f}", .{win32.GetLastError()});
+                mainthread.mutinyThreadPostRun(&global.last_post_result);
             }
             return 0;
         },

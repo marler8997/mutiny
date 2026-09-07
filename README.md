@@ -46,14 +46,12 @@ Here's a hacky example script I created on the fly to make myself and a couple f
 var Steamworks = @Assembly("Facepunch.Steamworks.Win64")
 var SteamClient = @Class(Steamworks.Steamworks.SteamClient)
 
-@Log("waiting for steam id...")
-var attempt = 1
-loop
-    if (SteamClient.get_IsValid()) { break }
-    @Log("  no steam id yet, attempt ", attempt)
-    set attempt = attempt + 1
-    yield 2000
-continue
+if (SteamClient.get_IsValid() == 0) {
+    if (@IsFirstRun()) {
+        @Log("waiting for steam id...")
+    }
+    @Rerun(1000)
+}
 
 // comment/uncomment the following lines to re-run the script for Danny/Zach, their
 // upgrades won't apply until the next level.

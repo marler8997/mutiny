@@ -80,7 +80,7 @@ if (x < 10) { @Log("small") }   // no `else` yet
 
 loop
     if (done()) { break }
-    yield 1000              // sleep 1000ms, let other scripts run, then resume here
+    set n = n + 1
 continue                    // `continue` jumps back to `loop`; it ENDS the loop body
 
 fn name(a, b) { @Log(a) }   // functions
@@ -89,7 +89,13 @@ fn name(a, b) { @Log(a) }   // functions
 Things that will surprise you:
 
 - **`loop` ... `continue` is the loop.** `loop` marks the top, `continue` jumps back to it, and
-  `break` exits. The body is not brace-wrapped.
+  `break` exits. The body is not brace-wrapped. Variables declared in the body are dropped at
+  the end of every iteration; variables declared in an `if` block stay visible after it.
+- **There is no way to sleep or wait inside a script.** Scripts run on the game's main thread
+  and the game is frozen until the script finishes, so a loop that polls for a condition freezes
+  the game forever. To wait, a mod calls `@Rerun(ms)`: that ends the script and runs it again
+  from the top after `ms` milliseconds, with the game running in between. `@IsFirstRun()` is 1
+  on the first run and 0 on every rerun, so you can log once instead of every time.
 - **A second `loop` in the same block is rejected** with "cannot loop inside loop". Putting one
   inside an `if` block is not caught by that check, but nothing tests it and `break`/`continue`
   across that boundary is unexplored — so write one loop at a time.
@@ -112,7 +118,6 @@ Things that will surprise you:
 Root <- Statement*
 Statement
    <- if LPAREN Expr RPAREN Block
-    / yield Expr
     / loop
     / break
     / continue
@@ -188,6 +193,8 @@ memory — see the rules below on argument types.
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
 | `@Exit()` / `@Nothing()` | no arguments | |
+| `@Rerun(ms)` | an integer | mods only: exit now, run again from the top after `ms` milliseconds |
+| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on a rerun |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started
 with `run-script`.
@@ -208,8 +215,9 @@ These are not style advice. Each one is a way to take the game down.
    work.
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
-   script runs. Use `@IsNull` / `@NotNull` and `yield` in a loop until it appears, as in the
-   example below.
+   script runs. Check with `@IsNull` / `@NotNull`; in a mod, `@Rerun(2000)` to try again later,
+   as in the example below. Do not poll for it in a loop: the game is frozen while your script
+   runs.
 
 4. **Prefer reading before writing.** Read a value and `@Log` it first to confirm you have the
    right object and the units you expect, then write.
@@ -234,19 +242,16 @@ A `mods\` file that waits for the player to exist, then heals them:
 var game = @Assembly("Assembly-CSharp")
 var SemiFunc = @Class(game.SemiFunc)
 
-@Log("waiting for the player...")
-loop
-    var p = SemiFunc.PlayerAvatarGetFromSteamID("76561197960287930")
-    if (@NotNull(p)) { break }
-    yield 2000
-continue
-
 var player = SemiFunc.PlayerAvatarGetFromSteamID("76561197960287930")
+if (@IsNull(player)) {
+    if (@IsFirstRun()) { @Log("waiting for the player...") }
+    @Rerun(2000)
+}
 @LogClass(@ClassOf(player.playerHealth))
 player.playerHealth.Heal(99999999, 0)
 @Log("healed")
 ```
 
 Note what it does before touching anything: names the assembly, resolves the class explicitly,
-waits for the object instead of assuming it exists, and logs the class so the member names are
+checks the object exists instead of assuming it, and logs the class so the member names are
 confirmed rather than guessed.

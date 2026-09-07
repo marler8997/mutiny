@@ -15,8 +15,7 @@ pub const ScriptRequest = scripts.Request;
 const global = struct {
     var shared: struct {
         mutex: Mutex = .{},
-        // uncomment if/when we need to send messages back to the mutiny thread
-        // mutiny_hwnd: ?win32.HWND = null,
+        mutiny_hwnd: ?win32.HWND = null,
         init_state: InitState = .idle,
     } = .{};
     var state: State = .{ .initial = .{} };
@@ -41,18 +40,44 @@ const InitState = union(enum) {
     complete,
 };
 
-// pub fn setHwnd(hwnd: win32.HWND) void {
-//     global.shared.mutex.lock();
-//     defer global.shared.mutex.unlock();
-//     std.debug.assert(global.shared.mutiny_hwnd == null);
-//     global.shared.mutiny_hwnd = hwnd;
-// }
-// pub fn unsetHwnd(hwnd: win32.HWND) void {
-//     global.shared.mutex.lock();
-//     defer global.shared.mutex.unlock();
-//     std.debug.assert(global.shared.mutiny_hwnd == hwnd);
-//     global.shared.mutiny_hwnd = null;
-// }
+pub const wm_schedule_rerun = win32.WM_USER + 0;
+
+pub fn mutinyThreadSetHwnd(hwnd: win32.HWND) void {
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    std.debug.assert(global.shared.mutiny_hwnd == null);
+    global.shared.mutiny_hwnd = hwnd;
+}
+pub fn mutinyThreadUnsetHwnd(hwnd: win32.HWND) void {
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    std.debug.assert(global.shared.mutiny_hwnd == hwnd);
+    global.shared.mutiny_hwnd = null;
+}
+
+fn scheduleRerun(ms: u32) error{Schedule}!void {
+    // NOTE: if we post too often it can cause starve the game
+    //       so we still do the thread hop even in this case
+    // if (ms == 0) {
+    //     const target: Target = .{ .data = .{ .hwnd = global.hwnd, .msg = global.wnd_msg } };
+    //     var err: PostError = undefined;
+    //     target.post(.run, &err) catch {
+    //         std.log.err("PostMessage(rerun) failed, error={f}", .{err});
+    //         return error.Schedule;
+    //     };
+    //     return;
+    // }
+    global.shared.mutex.lock();
+    defer global.shared.mutex.unlock();
+    const hwnd = global.shared.mutiny_hwnd orelse {
+        std.log.err("cannot schedule a rerun in {} ms, the mutiny window is gone", .{ms});
+        return error.Schedule;
+    };
+    if (0 == win32.PostMessageW(hwnd, wm_schedule_rerun, ms, 0)) {
+        std.log.err("PostMessage(schedule rerun) failed, error={f}", .{win32.GetLastError()});
+        return error.Schedule;
+    }
+}
 
 const State = union(enum) {
     initial: struct {
@@ -462,6 +487,7 @@ fn run() enum { success, fail, recursed } {
     if (global.inside_run) return .recursed;
     global.inside_run = true;
     defer global.inside_run = false;
+    var rerun_schedule_failed = false;
 
     if (global.dotnet_funcs == null) {
         const lib: DotNetLib = blk: {
@@ -515,12 +541,20 @@ fn run() enum { success, fail, recursed } {
 
     mods.applyUpdates();
     {
+        const now = getNow();
         var it = mods.iterator();
-        while (it.next()) |mod| {
-            runOne(dotnet_funcs, mod.name.slice(), mod.text.?, null) catch |err| switch (err) {
+        while (it.next(now)) |mod| {
+            const maybe_rerun_ms = runOne(dotnet_funcs, mod.name.slice(), mod.text.?, mod.is_first_run, null) catch |err| switch (err) {
                 error.WriteFailed => unreachable, // did not pass a writer
             };
+            mod.is_first_run = false;
+            if (maybe_rerun_ms) |ms| {
+                mod.run = .{ .rerun = .{ .scheduled = now, .delay_ms = ms } };
+            }
         }
+        if (mods.nextRerunMs(getNow())) |ms| scheduleRerun(ms) catch |err| switch (err) {
+            error.Schedule => rerun_schedule_failed = true,
+        };
     }
 
     while (scripts.steal()) |script| {
@@ -537,10 +571,11 @@ fn run() enum { success, fail, recursed } {
             ) catch |e| {
                 write_error = e;
             },
-            .file => |*file| runOne(
+            .file => |*file| _ = runOne(
                 dotnet_funcs,
                 script.name.slice(),
                 file.text,
+                true,
                 &pipe_writer.interface,
             ) catch |e| {
                 write_error = e;
@@ -555,15 +590,20 @@ fn run() enum { success, fail, recursed } {
         }
     }
 
-    return .success;
+    return if (rerun_schedule_failed) .fail else .success;
+}
+
+fn getNow() std.time.Instant {
+    return std.time.Instant.now() catch |err| std.debug.panic("Instant.now failed with {t}", .{err});
 }
 
 fn runOne(
     dotnet_funcs: *const dotnet.Funcs,
     name: []const u8,
     text: []const u8,
+    is_first_run: bool,
     out: ?*std.Io.Writer,
-) error{WriteFailed}!void {
+) error{WriteFailed}!?u32 {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
 
@@ -572,14 +612,19 @@ fn runOne(
         .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
         .out = out,
+        .is_first_run = is_first_run,
     };
     defer vm.deinit();
-    if (vm.evalRoot(.{})) |yield| {
-        _ = yield;
-        std.log.info("{s} has yielded, but yield is not implemented, exiting instead", .{name});
-        if (out) |w| try w.print("error: yield not implemented\n", .{});
-    } else |_| switch (vm.error_result) {
+    var rerun_ms: ?u32 = null;
+    vm.evalRoot() catch switch (vm.error_result) {
         .exit => std.log.info("{s} has exited", .{name}),
+        .rerun_ms => |ms| if (out) |w| {
+            std.log.err("{s}: @Rerun is only supported in mods", .{name});
+            try w.print("{s}: error: @Rerun is only supported in mods\n", .{name});
+        } else {
+            std.log.debug("{s} will rerun in {} ms", .{ name, ms });
+            rerun_ms = ms;
+        },
         .err => |err| switch (err) {
             .vm_out => return error.WriteFailed,
             else => {
@@ -587,8 +632,9 @@ fn runOne(
                 if (out) |w| try w.print("{s}: error:{f}\n", .{ name, err.fmt(text, dotnet_funcs) });
             },
         },
-    }
+    };
     if (out) |w| try w.flush();
+    return rerun_ms;
 }
 
 fn runBuiltin(

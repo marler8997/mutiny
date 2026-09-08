@@ -269,42 +269,25 @@ pub fn build(b: *std.Build) void {
         b.step("dotnet-test", "run dotnet-test on the given DLL/PATH").dependOn(&dotnet_test.step);
     }
 
-    {
-        const peak = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\PEAK";
+    for (test_games) |game| {
+        const game_dir = b.fmt("{s}\\{s}", .{ steam_common, game.dir });
         const dotnet_test = b.addRunArtifact(dotnet_test_exe);
         dotnet_test.step.dependOn(&install_dotnet_test.step);
-        dotnet_test.addArg(peak ++ "\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll");
-        dotnet_test.addArg("--assembly-path");
-        dotnet_test.addArg(peak ++ "\\PEAK_Data\\Managed");
+        switch (game.runtime) {
+            .mono => {
+                dotnet_test.addArg(b.fmt("{s}\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll", .{game_dir}));
+                dotnet_test.addArg("--assembly-path");
+                dotnet_test.addArg(b.fmt("{s}\\{s}\\Managed", .{ game_dir, game.data }));
+            },
+            .il2cpp => {
+                dotnet_test.addArg(b.fmt("{s}\\GameAssembly.dll", .{game_dir}));
+                dotnet_test.addArg("--data-dir");
+                dotnet_test.addArg(b.fmt("{s}\\{s}\\il2cpp_data", .{ game_dir, game.data }));
+            },
+        }
         b.step(
-            "test-peak",
-            "run dotnet-test against PEAK's mono runtime",
-        ).dependOn(&dotnet_test.step);
-        test_step.dependOn(&dotnet_test.step);
-    }
-    {
-        const outer_wilds = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Outer Wilds";
-        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
-        dotnet_test.step.dependOn(&install_dotnet_test.step);
-        dotnet_test.addArg(outer_wilds ++ "\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll");
-        dotnet_test.addArg("--assembly-path");
-        dotnet_test.addArg(outer_wilds ++ "\\OuterWilds_Data\\Managed");
-        b.step(
-            "test-outerwilds",
-            "run dotnet-test against Outer Wilds' mono runtime (Unity 2019, V1 gchandle API)",
-        ).dependOn(&dotnet_test.step);
-        test_step.dependOn(&dotnet_test.step);
-    }
-    {
-        const schedule1 = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Schedule I";
-        const dotnet_test = b.addRunArtifact(dotnet_test_exe);
-        dotnet_test.step.dependOn(&install_dotnet_test.step);
-        dotnet_test.addArg(schedule1 ++ "\\GameAssembly.dll");
-        dotnet_test.addArg("--data-dir");
-        dotnet_test.addArg(schedule1 ++ "\\Schedule I_Data\\il2cpp_data");
-        b.step(
-            "test-schedule1",
-            "run dotnet-test against Schedule I's il2cpp runtime",
+            b.fmt("test-{s}", .{game.step}),
+            b.fmt("run dotnet-test against {s}'s {t} runtime{s}", .{ game.dir, game.runtime, game.note }),
         ).dependOn(&dotnet_test.step);
         test_step.dependOn(&dotnet_test.step);
     }
@@ -330,6 +313,20 @@ pub fn build(b: *std.Build) void {
         b.step("dumpty", "").dependOn(&run.step);
     }
 }
+
+const steam_common = "C:\\Program Files (x86)\\Steam\\steamapps\\common";
+const TestGame = struct {
+    step: []const u8,
+    dir: []const u8,
+    data: []const u8,
+    runtime: enum { mono, il2cpp },
+    note: []const u8 = "",
+};
+const test_games = [_]TestGame{
+    .{ .step = "peak", .dir = "PEAK", .data = "PEAK_Data", .runtime = .mono },
+    .{ .step = "outerwilds", .dir = "Outer Wilds", .data = "OuterWilds_Data", .runtime = .mono, .note = " (Unity 2019, V1 gchandle API)" },
+    .{ .step = "schedule1", .dir = "Schedule I", .data = "Schedule I_Data", .runtime = .il2cpp },
+};
 
 fn createZydisModule(
     b: *std.Build,

@@ -67,6 +67,7 @@ pub const MonoFuncs = struct {
         status: *MonoImageOpenStatus,
     ) callconv(.c) ?*const Assembly,
     add_internal_call: *const fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void,
+    class_is_enum: *const fn (*const Class) callconv(.c) c_int,
 
     pub fn gchandle_new(mono: *const MonoFuncs, object: *const Object, pinned: i32) GcHandleV2 {
         return switch (mono.gchandle) {
@@ -126,6 +127,7 @@ const Il2cppFuncs = struct {
     gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
     object_new: *const fn (*const Class) callconv(.c) ?*const Object,
     string_new_len: *const fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
+    class_is_enum: *const fn (*const Class) callconv(.c) bool,
 };
 
 pub const Funcs = struct {
@@ -175,6 +177,7 @@ pub const Funcs = struct {
     free: *const fn (*anyopaque) callconv(.c) void,
 
     class_from_type: *const fn (*const Type) callconv(.c) ?*const Class,
+    class_enum_basetype: *const fn (*const Class) callconv(.c) *const Type,
 
     pub fn object_new(f: *const Funcs, class: *const Class) ?*const Object {
         return switch (f.kind) {
@@ -186,6 +189,12 @@ pub const Funcs = struct {
         return switch (f.kind) {
             .mono => |mono| mono.string_new_len(f.domain_get().?, text, len),
             .il2cpp => |il2cpp| il2cpp.string_new_len(text, len),
+        };
+    }
+    pub fn class_is_enum(f: *const Funcs, class: *const Class) bool {
+        return switch (f.kind) {
+            .mono => |mono| mono.class_is_enum(class) != 0,
+            .il2cpp => |il2cpp| il2cpp.class_is_enum(class),
         };
     }
     pub fn type_get_object(f: *const Funcs, t: *const Type) ?*const Object {
@@ -209,6 +218,7 @@ pub const Funcs = struct {
             }, proc_ref),
             .class_get_name = try funcs.sharedGet(kind, mod, .class_get_name, proc_ref),
             .class_get_parent = try funcs.sharedGet(kind, mod, .class_get_parent, proc_ref),
+            .class_enum_basetype = try funcs.sharedGet(kind, mod, .class_enum_basetype, proc_ref),
             .class_get_type = try funcs.sharedGet(kind, mod, .class_get_type, proc_ref),
             .class_get_namespace = try funcs.sharedGet(kind, mod, .class_get_namespace, proc_ref),
             .class_get_fields = try funcs.sharedGet(kind, mod, .class_get_fields, proc_ref),
@@ -264,6 +274,7 @@ pub const Funcs = struct {
                     .image_open_from_data = try mono_funcs.monoGet(mod, .image_open_from_data, proc_ref),
                     .assembly_load_from = try mono_funcs.monoGet(mod, .assembly_load_from, proc_ref),
                     .add_internal_call = try mono_funcs.monoGet(mod, .add_internal_call, proc_ref),
+                    .class_is_enum = try mono_funcs.monoGet(mod, .class_is_enum, proc_ref),
                 } },
                 .il2cpp => .{
                     .il2cpp = .{
@@ -285,6 +296,7 @@ pub const Funcs = struct {
                         .gchandle_get_target = try il2cpp_funcs.il2cppGet(mod, .gchandle_get_target, proc_ref),
                         .object_new = try il2cpp_funcs.il2cppGet(mod, .object_new, proc_ref),
                         .string_new_len = try il2cpp_funcs.il2cppGet(mod, .string_new_len, proc_ref),
+                        .class_is_enum = try il2cpp_funcs.il2cppGet(mod, .class_is_enum, proc_ref),
                     },
                 },
             },

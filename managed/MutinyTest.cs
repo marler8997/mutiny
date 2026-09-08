@@ -29,6 +29,9 @@ public class Test
     public static int OverloadIntUint(uint v) { return 2; }
     public static int OverloadInt32And64(int v) { return 1; }
     public static int OverloadInt32And64(long v) { return 2; }
+    public static int EchoEnum(System.DayOfWeek v) { return (int)v; }
+    public static int OverloadIntEnum(int v) { return 1; }
+    public static int OverloadIntEnum(System.DayOfWeek v) { return 2; }
 }
 
 namespace MutinyTest

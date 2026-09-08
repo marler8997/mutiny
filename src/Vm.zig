@@ -1202,6 +1202,13 @@ fn callMethod(
                             .value = .{ .integer = i },
                             .target = target,
                         } });
+                        if (paramEnum(vm.dotnet_funcs, paramType(vm.dotnet_funcs, method, arg_index).?)) |enum_class| {
+                            if (!vm.enumDefinesValue(enum_class, i)) return vm.setError(.{ .undefined_enum_value = .{
+                                .pos = after_lparen,
+                                .class = enum_class,
+                                .value = i,
+                            } });
+                        }
                         break :blk vm.mem.toPointer(i64, value_addr);
                     },
                 }
@@ -1381,6 +1388,20 @@ const MarshalValue = union(enum) {
             inline else => |*typed| @ptrCast(typed),
         };
     }
+    pub fn toI64(value: MarshalValue) ?i64 {
+        return switch (value) {
+            .boolean => |v| v,
+            .i1 => |v| v,
+            .u1 => |v| v,
+            .i2 => |v| v,
+            .u2 => |v| v,
+            .i4 => |v| v,
+            .u4 => |v| v,
+            .i8 => |v| v,
+            .u8 => |v| std.math.cast(i64, v),
+            .r4, .r8, .maybe_object => null,
+        };
+    }
     pub fn getPtrConst(value: *const MarshalValue) *const anyopaque {
         return switch (value.*) {
             inline else => |*typed| @ptrCast(typed),
@@ -1471,17 +1492,7 @@ fn pushMonoField(
         .msg = "class field of this type",
     } });
     switch (method) {
-        .static => switch (vm.dotnet_funcs.kind) {
-            .mono => |*mono| {
-                const vtable = mono.class_vtable(vm.dotnet_funcs.domain_get().?, class);
-                mono.runtime_class_init(vtable);
-                mono.field_static_get_value(vtable, field, value.getPtr());
-            },
-            .il2cpp => |*il2cpp| {
-                il2cpp.runtime_class_init(class);
-                il2cpp.field_static_get_value(field, value.getPtr());
-            },
-        },
+        .static => vm.readStaticField(class, field, &value),
         .instance => |obj| vm.dotnet_funcs.field_get_value(
             obj,
             field,
@@ -3125,23 +3136,61 @@ fn paramCount(funcs: *const dotnet.Funcs, method: *const dotnet.Method) usize {
     }
 }
 
-fn paramTypeKind(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
-    const param_type: *const dotnet.Type = switch (funcs.kind) {
-        .mono => |*mono| blk: {
-            const sig = mono.method_signature(method) orelse return .end;
+fn paramType(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) ?*const dotnet.Type {
+    switch (funcs.kind) {
+        .mono => |*mono| {
+            const sig = mono.method_signature(method) orelse return null;
             var iter: ?*anyopaque = null;
             var i: usize = 0;
             while (mono.signature_get_params(sig, &iter)) |param_type| : (i += 1) {
-                if (i == index) break :blk param_type;
+                if (i == index) return param_type;
             }
-            return .end;
+            return null;
         },
-        .il2cpp => |*il2cpp| blk: {
-            if (index >= il2cpp.method_get_param_count(method)) return .end;
-            break :blk il2cpp.method_get_param(method, @intCast(index));
+        .il2cpp => |*il2cpp| {
+            if (index >= il2cpp.method_get_param_count(method)) return null;
+            return il2cpp.method_get_param(method, @intCast(index));
         },
-    };
+    }
+}
+
+fn paramEnum(funcs: *const dotnet.Funcs, param_type: *const dotnet.Type) ?*const dotnet.Class {
+    if (funcs.type_get_type(param_type) != .valuetype) return null;
+    const class = funcs.class_from_type(param_type) orelse return null;
+    return if (funcs.class_is_enum(class)) class else null;
+}
+
+fn paramTypeKind(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
+    const param_type = paramType(funcs, method, index) orelse return .end;
+    if (paramEnum(funcs, param_type)) |enum_class| return funcs.type_get_type(funcs.class_enum_basetype(enum_class));
     return funcs.type_get_type(param_type);
+}
+
+fn readStaticField(vm: *Vm, class: *const dotnet.Class, field: *const dotnet.ClassField, value: *MarshalValue) void {
+    switch (vm.dotnet_funcs.kind) {
+        .mono => |*mono| {
+            const vtable = mono.class_vtable(vm.dotnet_funcs.domain_get().?, class);
+            mono.runtime_class_init(vtable);
+            mono.field_static_get_value(vtable, field, value.getPtr());
+        },
+        .il2cpp => |*il2cpp| {
+            il2cpp.runtime_class_init(class);
+            il2cpp.field_static_get_value(field, value.getPtr());
+        },
+    }
+}
+
+fn enumDefinesValue(vm: *Vm, enum_class: *const dotnet.Class, value: i64) bool {
+    const base_kind = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.class_enum_basetype(enum_class));
+    var iterator: ?*anyopaque = null;
+    while (vm.dotnet_funcs.class_get_fields(enum_class, &iterator)) |field| {
+        const flags = vm.dotnet_funcs.field_get_flags(field);
+        if (!flags.static or !flags.literal) continue;
+        var member = MarshalValue.initUndefined(base_kind) orelse return false;
+        vm.readStaticField(enum_class, field, &member);
+        if (member.toI64() == value) return true;
+    }
+    return false;
 }
 
 fn integerFitsKind(value: i64, kind: dotnet.TypeKind) bool {
@@ -4047,6 +4096,11 @@ pub const Error = union(enum) {
         id_extent: Extent,
         arg_count: u16,
     },
+    undefined_enum_value: struct {
+        pos: usize,
+        class: *const dotnet.Class,
+        value: i64,
+    },
     overload: struct {
         kind: enum { none_match, ambiguous },
         class: *const dotnet.Class,
@@ -4323,6 +4377,10 @@ const ErrorFmt = struct {
                     m.arg_count,
                 },
             ),
+            .undefined_enum_value => |e| try writer.print(
+                "{d}: {d} is not a defined value of enum '{s}'",
+                .{ getLineNum(f.text, e.pos), e.value, f.dotnet_funcs.class_get_name(e.class) },
+            ),
             .overload => |o| {
                 const name = f.text[o.id_extent.start..o.id_extent.end];
                 try writer.print("{d}: {s} for {s}(", .{
@@ -4346,7 +4404,13 @@ const ErrorFmt = struct {
                         if (count != o.arg_count) continue;
                         try writer.print(" {s}(", .{name});
                         for (0..count) |i| {
-                            try writer.print("{s}{t}", .{ if (i == 0) "" else ", ", paramTypeKind(f.dotnet_funcs, method, i) });
+                            if (i != 0) try writer.writeAll(", ");
+                            const param_type = paramType(f.dotnet_funcs, method, i).?;
+                            if (paramEnum(f.dotnet_funcs, param_type)) |enum_class| {
+                                try writer.print("{s}", .{f.dotnet_funcs.class_get_name(enum_class)});
+                            } else {
+                                try writer.print("{t}", .{f.dotnet_funcs.type_get_type(param_type)});
+                            }
                         }
                         try writer.writeAll(")");
                     }

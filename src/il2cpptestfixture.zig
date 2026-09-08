@@ -95,6 +95,9 @@ const methods = [_]Method{
     .{ .name = "OverloadIntUint", .params = 1, .return_type = "Int32", .param_type = "UInt32", .invoker = constant(i32, 2) },
     .{ .name = "OverloadInt32And64", .params = 1, .return_type = "Int32", .param_type = "Int32", .invoker = constant(i32, 1) },
     .{ .name = "OverloadInt32And64", .params = 1, .return_type = "Int32", .param_type = "Int64", .invoker = constant(i32, 2) },
+    .{ .name = "EchoEnum", .params = 1, .return_type = "Int32", .param_type = "DayOfWeek", .invoker = echo(i32) },
+    .{ .name = "OverloadIntEnum", .params = 1, .return_type = "Int32", .param_type = "Int32", .invoker = constant(i32, 1) },
+    .{ .name = "OverloadIntEnum", .params = 1, .return_type = "Int32", .param_type = "DayOfWeek", .invoker = constant(i32, 2) },
 };
 
 fn findClass(

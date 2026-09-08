@@ -125,7 +125,25 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
             \\@Assert(Test.Overload(5) == 1)
             \\@Assert(Test.Overload("x") == 2)
             \\@Assert(Test.Overload(1.5) == 3)
+            \\@Assert(Test.EchoEnum(3) == 3)
+            \\@Assert(Test.EchoEnum(0) == 0)
+            \\@Assert(Test.EchoEnum(6) == 6)
         );
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.EchoEnum(7))
+        , "2: 7 is not a defined value of enum 'DayOfWeek'");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.EchoEnum(0 - 1))
+        , "2: -1 is not a defined value of enum 'DayOfWeek'");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.OverloadIntEnum(3))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: ambiguous overloads for OverloadIntEnum(integer) on class 'Test', candidates: OverloadIntEnum(i4) OverloadIntEnum(DayOfWeek)",
+            .il2cpp => "2: ambiguous overloads for OverloadIntEnum(integer) on class 'Object', candidates: OverloadIntEnum(i4) OverloadIntEnum(DayOfWeek)",
+        });
         try Vm.testBadCode(dotnet_funcs,
             \\var Test = @TestClass()
             \\@Discard(Test.OverloadIntUint(5))

@@ -743,7 +743,7 @@ fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
                 const entry = vm.lookup(vm.text[token.start..token.end]) orelse return vm.setError(.{
                     .undefined_identifier = token.extent(),
                 });
-                break :blk .{ .{ .symbol_entry = entry }, token.end };
+                break :blk .{ .{ .symbol_entry = .{ .id_extent = token.extent(), .type_addr = entry.type_addr } }, token.end };
             },
             else => return vm.setError(.{ .unexpected_token = .{
                 .expected = "an identifier to set",
@@ -805,6 +805,11 @@ fn resolveFieldForSet(
             .pos = extent.start,
             .msg = msg,
         } }),
+        .not_implemented_kind => |kind| return vm.setError(.{ .not_implemented_for_kind = .{
+            .pos = extent.start,
+            .what = "set a field",
+            .kind = kind,
+        } }),
         .value => |v| v,
         .unexpected_type => |u| return vm.setError(.{ .unexpected_type = .{
             .pos = extent.start,
@@ -831,10 +836,18 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
             switch (value.*) {
                 .integer => |int| vm.mem.toPointer(i64, symbol_value_addr).* = int,
                 .float => |f| vm.mem.toPointer(f64, symbol_value_addr).* = f,
-                else => {
-                    std.log.err("todo: implement set value of type {t}", .{value.*});
-                    return vm.setError(.{ .not_implemented = "set value of this type" });
+                .object, .managed_string => |handle| {
+                    const slot = vm.mem.toPointer(dotnet.GcHandleV2, symbol_value_addr);
+                    const target = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
+                    const new_handle = gchandleNew(vm.dotnet_funcs, target, vm.handle_tracker);
+                    gchandleFree(vm.dotnet_funcs, slot.*, vm.handle_tracker);
+                    slot.* = new_handle;
                 },
+                else => return vm.setError(.{ .not_implemented_for_type = .{
+                    .pos = entry.id_extent.start,
+                    .what = "set",
+                    .type = symbol_type,
+                } }),
             }
         },
         .object_field => |*field| {
@@ -874,13 +887,11 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
                     .class_addr = symbol_value_addr,
                     .extent = id_extent,
                 } },
-                else => {
-                    std.log.err(
-                        "todo: get field '{s}' on type {t}",
-                        .{ vm.text[id_extent.start..id_extent.end], symbol_type },
-                    );
-                    return vm.setError(.{ .not_implemented = "get field on this type" });
-                },
+                else => return vm.setError(.{ .not_implemented_for_type = .{
+                    .pos = id_extent.start,
+                    .what = "field access",
+                    .type = symbol_type,
+                } }),
             }
         },
         .object_field => |*field| {
@@ -1176,10 +1187,11 @@ fn callMethod(
                         } }),
                     },
                     .r8 => managed_arg_storage[arg_index] = .{ .r8 = f },
-                    else => {
-                        std.log.info("TODO: pass a float to a '{t}' parameter", .{target});
-                        return vm.setError(.{ .not_implemented = "pass a float to this parameter type" });
-                    },
+                    else => return vm.setError(.{ .not_implemented_for_kind = .{
+                        .pos = after_lparen,
+                        .what = "passing a float to a parameter",
+                        .kind = target,
+                    } }),
                 }
                 break :blk managed_arg_storage[arg_index].getPtr();
             },
@@ -1239,10 +1251,11 @@ fn callMethod(
                 managed_arg_storage[arg_index] = .{ .i8 = value };
                 break :blk managed_arg_storage[arg_index].getPtr();
             },
-            else => |a| {
-                std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
-                return vm.setError(.{ .not_implemented = "call method with this kind of arg" });
-            },
+            else => |a| return vm.setError(.{ .not_implemented_for_type = .{
+                .pos = after_lparen,
+                .what = "passing an argument",
+                .type = a.getType(),
+            } }),
         };
     }
     std.debug.assert(next_arg_addr.eql(vm.mem.top()));
@@ -1256,37 +1269,38 @@ fn callMethod(
     );
     vm.discardValues(args_addr);
     _ = vm.mem.discardFrom(args_addr);
-    if (false) std.log.warn(
-        "Result=0x{x} Exception=0x{x}",
-        .{ @intFromPtr(maybe_result), @intFromPtr(maybe_exception) },
-    );
     if (maybe_exception) |exception| {
         const exception_class = vm.dotnet_funcs.object_get_class(exception);
-        std.log.err("{s} exception!", .{vm.dotnet_funcs.class_get_name(exception_class)});
-        return vm.setError(.{ .not_implemented = "handle exception" });
+        return vm.setError(.{ .managed_exception = .{
+            .pos = method_id_extent.start,
+            .class_name = vm.dotnet_funcs.class_get_name(exception_class),
+        } });
     }
 
     const return_type_kind = vm.dotnet_funcs.type_get_type(return_type);
     if (maybe_result) |result| {
-        const object_type = MonoObjectType.init(return_type_kind) orelse {
-            std.log.warn("unsupported return type kind {t}", .{return_type_kind});
-            return vm.setError(.{ .not_implemented = "error message for bad or unsupported return type" });
-        };
+        const object_type = MonoObjectType.init(return_type_kind) orelse return vm.setError(.{ .not_implemented_for_kind = .{
+            .pos = method_id_extent.start,
+            .what = "a return value",
+            .kind = return_type_kind,
+        } });
         try vm.pushMonoObject(object_type, result);
     } else switch (return_type_kind) {
         .void => {},
         .string, .class, .array, .genericinst, .object, .szarray => {
-            const return_class = vm.dotnet_funcs.class_from_type(return_type) orelse {
-                std.log.warn("class_from_type returned null for kind {t}", .{return_type_kind});
-                return vm.setError(.{ .not_implemented = "null return value whose type has no class" });
-            };
+            const return_class = vm.dotnet_funcs.class_from_type(return_type) orelse return vm.setError(.{ .not_implemented_for_kind = .{
+                .pos = method_id_extent.start,
+                .what = "a null return value whose type has no class",
+                .kind = return_type_kind,
+            } });
             (try vm.push(Type)).* = .null_object;
             (try vm.push(*const dotnet.Class)).* = return_class;
         },
-        else => {
-            std.log.warn("unexpected return type kind {t} for null return value", .{return_type_kind});
-            return vm.setError(.{ .not_implemented = "non-void return type with null value" });
-        },
+        else => return vm.setError(.{ .not_implemented_for_kind = .{
+            .pos = method_id_extent.start,
+            .what = "a null return value",
+            .kind = return_type_kind,
+        } }),
     }
     return args.end;
 }
@@ -1332,10 +1346,7 @@ const MonoObjectType = enum {
             .valuetype => .valuetype,
             .class => .class,
             .object => .object,
-            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
-                std.log.warn("unsure if type '{s}' should be supported (MonoObjectType)", .{@tagName(t)});
-                return null;
-            },
+            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => null,
             _ => null,
         };
     }
@@ -1383,10 +1394,7 @@ const MarshalValue = union(enum) {
             .genericinst => .{ .maybe_object = undefined },
             .object => .{ .maybe_object = undefined },
             .szarray => .{ .maybe_object = undefined },
-            .char, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => |t| {
-                std.log.warn("unsure if type '{s}' should be supported (MarshalValue)", .{@tagName(t)});
-                return null;
-            },
+            .char, .ptr, .valuetype, .byref, .@"var", .array, .typedbyref, .i, .u, .fnptr, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => null,
             _ => null,
         };
     }
@@ -1455,8 +1463,7 @@ fn pushMarshalValue(vm: *Vm, class: *const dotnet.Class, value: *const MarshalVa
                 if (sanity_check) {
                     const obj_class: ?*const dotnet.Class = vm.dotnet_funcs.object_get_class(object);
                     if (obj_class == null) {
-                        std.log.err("pushMarshalValue: object_get_class returned null for {*}", .{object});
-                        @panic("invalid object!?!");
+                        std.debug.panic("pushMarshalValue: object_get_class returned null for {*}", .{object});
                         // return vm.setError(.{ .invalid_object = {} });
                     }
                 }
@@ -1554,10 +1561,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
             (try vm.push(Type)).* = .object;
             (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
-        else => {
-            std.log.warn("todo: support pushing mono type {t}", .{object_type});
-            return vm.setError(.{ .not_implemented = "managed return value of this type" });
-        },
+        inline else => |t| return vm.setError(.{ .not_implemented = "a managed value of type " ++ @tagName(t) }),
     }
 }
 
@@ -2650,6 +2654,7 @@ const Value = union(enum) {
 
     pub fn getMarshalConst(value: *const Value, kind: dotnet.TypeKind) union(enum) {
         not_implemented: [:0]const u8,
+        not_implemented_kind: dotnet.TypeKind,
         overflow: struct {
             value: i64,
             int: std.builtin.Type.Int,
@@ -2718,10 +2723,7 @@ const Value = union(enum) {
                 } },
                 else => return .{ .unexpected_type = .{ .expected = "a number", .actual = value.getType() } },
             },
-            else => {
-                std.log.err("todo: getMarshalConst mono type kind {t}", .{kind});
-                return .{ .not_implemented = "marshal this mono type" };
-            },
+            else => return .{ .not_implemented_kind = kind },
         }
     }
 };
@@ -3240,8 +3242,6 @@ fn readStaticField(vm: *Vm, class: *const dotnet.Class, field: *const dotnet.Cla
     }
 }
 
-
-
 fn integerFitsKind(value: i64, kind: dotnet.TypeKind) bool {
     return switch (kind) {
         .boolean => value == 0 or value == 1,
@@ -3436,17 +3436,8 @@ fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callcon
     const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
     const ctx: *FindAssemblyMono = @ptrCast(@alignCast(user_data));
     defer ctx.index += 1;
-    const name = ctx.vm.dotnet_funcs.kind.mono.assembly_get_name(assembly) orelse {
-        std.log.err("  assembly[{}] get name failed", .{ctx.index});
-        return;
-    };
-    const str = ctx.vm.dotnet_funcs.kind.mono.assembly_name_get_name(name) orelse {
-        std.log.err(
-            "  assembly[{}] mono_assembly_name_get_name failed (assembly_ptr=0x{x}, name_ptr=0x{x})",
-            .{ ctx.index, @intFromPtr(assembly), @intFromPtr(name) },
-        );
-        return;
-    };
+    const name = ctx.vm.dotnet_funcs.kind.mono.assembly_get_name(assembly) orelse return;
+    const str = ctx.vm.dotnet_funcs.kind.mono.assembly_name_get_name(name) orelse return;
     const slice = std.mem.span(str);
     if (std.mem.eql(u8, slice, ctx.needle)) {
         ctx.match = assembly;
@@ -3461,10 +3452,7 @@ fn gchandleNew(
 ) dotnet.GcHandleV2 {
     const handle = dotnet_funcs.gchandle_new(object, false);
     gchandlelog.info("new  {*} {}", .{ object, handle });
-    if (handle == .null) {
-        std.log.err("NULL HANDLE?!? from ptr {*}", .{object});
-        @panic("gchandle_new returned 0");
-    }
+    if (handle == .null) std.debug.panic("gchandle_new returned a null handle for {*}", .{object});
 
     const sanity_check = true;
     if (sanity_check) {
@@ -4038,6 +4026,20 @@ pub const Error = union(enum) {
         pos: usize,
         msg: [:0]const u8,
     },
+    not_implemented_for_type: struct {
+        pos: usize,
+        what: [:0]const u8,
+        type: Type,
+    },
+    not_implemented_for_kind: struct {
+        pos: usize,
+        what: [:0]const u8,
+        kind: dotnet.TypeKind,
+    },
+    managed_exception: struct {
+        pos: usize,
+        class_name: [*:0]const u8,
+    },
     assert: usize,
     log_error: struct {
         pos: usize,
@@ -4223,6 +4225,18 @@ const ErrorFmt = struct {
             .not_implemented2 => |e| try writer.print(
                 "{d}: {s} not implemented",
                 .{ getLineNum(f.text, e.pos), e.msg },
+            ),
+            .not_implemented_for_type => |e| try writer.print(
+                "{d}: {s} on {s} not implemented",
+                .{ getLineNum(f.text, e.pos), e.what, e.type.what() },
+            ),
+            .not_implemented_for_kind => |e| try writer.print(
+                "{d}: {s} of .NET type kind {t} not implemented",
+                .{ getLineNum(f.text, e.pos), e.what, e.kind },
+            ),
+            .managed_exception => |e| try writer.print(
+                "{d}: the method threw {s}",
+                .{ getLineNum(f.text, e.pos), e.class_name },
             ),
             .assert => |e| try writer.print("{d}: assert", .{getLineNum(f.text, e)}),
             .log_error => |e| try writer.print(
@@ -5174,6 +5188,30 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\var real = Instances.New()
         \\@Assert(@NotNull(real))
     );
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Instances = @Class(t.MutinyTest.Instances)
+        \\var a = Instances.New()
+        \\set a.I32Field = 1
+        \\var b = Instances.New()
+        \\set b.I32Field = 2
+        \\set a = b
+        \\@Assert(a.I32Field == 2)
+        \\set b.I32Field = 3
+        \\@Assert(a.I32Field == 3)
+        \\var i = 0
+        \\loop
+        \\    if (i == 3) { break }
+        \\    set a = Instances.New()
+        \\    set i = i + 1
+        \\continue
+        \\@Assert(a.I32Field == 0 - 32)
+    );
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Instances = @Class(t.MutinyTest.Instances)
+        \\set Instances = Instances
+    , "3: set on a class not implemented");
     if (enable_mutiny_test_class) try testCode(dotnet_funcs,
         \\var Test = @TestClass()
         \\var s = Test.NullString()

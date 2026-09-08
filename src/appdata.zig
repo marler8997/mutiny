@@ -1,23 +1,56 @@
 const global = struct {
     var localappdata: union(enum) {
         unresolved,
-        resolved: ?[:0]const u16,
+        resolved: ?PathLen,
     } = .unresolved;
+    // The value is copied out of the process environment block into this
+    // buffer. The OS frees and reallocates that block whenever anyone calls
+    // SetEnvironmentVariable (games and their launchers do), so a slice into
+    // it goes stale; an earlier version cached exactly such a slice.
+    var localappdata_buf: [max_path + 1]u16 = undefined;
 };
 
 pub fn get() ?[:0]const u16 {
     if (builtin.os.tag != .windows) @panic("todo");
-    switch (global.localappdata) {
+    blk: switch (global.localappdata) {
         .unresolved => {
             @branchHint(.unlikely);
-            global.localappdata = .{ .resolved = findEnv(win32.L("LOCALAPPDATA")) };
-            return global.localappdata.resolved;
+            global.localappdata = .{ .resolved = resolve() };
+            continue :blk global.localappdata;
         },
-        .resolved => |p| return p,
+        .resolved => |maybe_len| return if (maybe_len) |len|
+            global.localappdata_buf[0..len :0]
+        else
+            null,
     }
 }
 
+fn resolve() ?PathLen {
+    // GetEnvironmentVariableW copies out of the environment block while holding
+    // the PEB lock, so it cannot race a concurrent SetEnvironmentVariable the
+    // way walking the block by hand does.
+    const len = win32.GetEnvironmentVariableW(
+        win32.L("LOCALAPPDATA"),
+        @ptrCast(&global.localappdata_buf),
+        global.localappdata_buf.len,
+    );
+    if (len == 0) switch (win32.GetLastError()) {
+        .ERROR_ENVVAR_NOT_FOUND => return null,
+        else => |e| std.debug.panic(
+            "GetEnvironmentVariable LOCALAPPDATA failed, error={}",
+            .{@intFromEnum(e)},
+        ),
+    };
+    if (len >= global.localappdata_buf.len) std.debug.panic(
+        "LOCALAPPDATA is {} chars which exceeds the {} char limit",
+        .{ len - 1, max_path },
+    );
+    std.debug.assert(global.localappdata_buf[len] == 0);
+    return @intCast(len);
+}
+
 pub const max_path = 350;
+pub const PathLen = std.math.IntFittingRange(0, max_path);
 
 pub fn format(
     path_buf: *[max_path]u16,
@@ -84,30 +117,6 @@ pub fn parentDirLen(path: []const u16) usize {
         return end;
     }
     return 0;
-}
-
-fn findEnv(name: []const u16) ?[:0]const u16 {
-    var p: [*:0]const u16 = std.os.windows.peb().ProcessParameters.Environment;
-    while (p[0] != 0) {
-        const entry: [:0]const u16 = std.mem.span(p); // "NAME=VALUE", excludes the \0
-        p += entry.len + 1; // step to the next entry
-        // Separator is the first '=' at index >= 1. Starting at 1 keeps the
-        // special drive/exit entries intact, e.g. "=C:=C:\\dir", "=ExitCode=0".
-        const eq = std.mem.indexOfScalarPos(u16, entry, 1, '=') orelse continue;
-        if (eqlNameAsciiCI(entry[0..eq], name))
-            return entry[eq + 1 ..]; // open-ended reslice keeps the sentinel
-    }
-    return null;
-}
-fn eqlNameAsciiCI(left: []const u16, right: []const u16) bool {
-    if (left.len != right.len) return false;
-    for (left, right) |l, r| {
-        if (toUpper(l) != toUpper(r)) return false;
-    }
-    return true;
-}
-fn toUpper(c: u16) u16 {
-    return if (c < 128) std.ascii.toUpper(@intCast(c)) else c;
 }
 
 const builtin = @import("builtin");

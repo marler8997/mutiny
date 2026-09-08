@@ -210,7 +210,8 @@ pub fn build(b: *std.Build) void {
         b.step("gui", "").dependOn(&run.step);
     }
 
-    const test_step = b.step("test", "");
+    const unittest_step = b.step("unittest", "");
+
     {
         const t = b.addTest(.{
             .root_module = b.createModule(.{
@@ -223,9 +224,22 @@ pub fn build(b: *std.Build) void {
             t.root_module.addImport("win32", win32_mod);
         }
         const run = b.addRunArtifact(t);
-        b.step("unittest", "").dependOn(&run.step);
-        test_step.dependOn(&run.step);
+        unittest_step.dependOn(&run.step);
     }
+    {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("cli/steam.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run = b.addRunArtifact(t);
+        unittest_step.dependOn(&run.step);
+    }
+
+    const test_step = b.step("test", "");
+    test_step.dependOn(unittest_step);
 
     const dotnet_test_exe = b.addExecutable(.{
         .name = "dotnet-test",

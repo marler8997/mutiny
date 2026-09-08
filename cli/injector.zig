@@ -77,7 +77,7 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
             ) orelse errExit("OpenProcess pid {} failed, error={f}", .{ pid, win32.GetLastError() });
             break :blk .{ .created = false, .pid = pid, .process = process, .maybe_suspended_thread = null };
         },
-        .start => |start| break :blk try createProcess(start.name, start.exe),
+        .start => |start| break :blk try createProcess(arena, start.name, start.exe),
     };
     defer process.deinit();
     errdefer {
@@ -244,7 +244,24 @@ const ProcessResult = struct {
     }
 };
 
-fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
+fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]const u16) !ProcessResult {
+    const env_block: ?[*]u16 = blk: {
+        const app_id = (steam.findAppId(arena, game_exe) catch |err| {
+            std.log.warn(
+                "could not read the steam app id for '{f}' ({t}), the game may relaunch itself through Steam",
+                .{ std.unicode.fmtUtf16Le(game_exe), err },
+            );
+            break :blk null;
+        }) orelse break :blk null;
+        var id_buf: [10]u8 = undefined;
+        const id = std.fmt.bufPrint(&id_buf, "{d}", .{app_id}) catch unreachable;
+        var env = try std.process.getEnvMap(arena);
+        try env.put("SteamAppId", id);
+        try env.put("SteamGameId", id);
+        std.log.info("steam app id {d}: SteamAppId is set so the game does not relaunch itself through Steam", .{app_id});
+        break :blk (try std.process.createWindowsEnvBlock(arena, &env)).ptr;
+    };
+
     const localappdata = appdata.get() orelse errExit(
         "no LOCALAPPDATA environment variable",
         .{},
@@ -370,8 +387,8 @@ fn createProcess(name: []const u16, game_exe: [:0]const u16) !ProcessResult {
         null,
         null,
         1, // bInheritHandles
-        win32.CREATE_SUSPENDED,
-        null,
+        .{ .CREATE_SUSPENDED = 1, .CREATE_UNICODE_ENVIRONMENT = 1 },
+        env_block,
         // game_dir_w.ptr,
         null,
         &si,
@@ -480,3 +497,4 @@ const mutiny = @import("mutiny");
 const appdata = mutiny.appdata;
 const getname = mutiny.getname;
 const mutinyipc = mutiny.mutinyipc;
+const steam = @import("steam.zig");

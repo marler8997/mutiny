@@ -109,7 +109,7 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
     }
 
     var count: usize = 0;
-    var it = mods.onUpdateIterator();
+    var it = mods.modIterator();
     while (it.next()) |_| count += 1;
     if (count == 0) return;
 
@@ -169,7 +169,7 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
     if (panel.minimized) return;
 
     var y = box.y + title_height + margin;
-    var it = mods.onUpdateIterator();
+    var it = mods.modIterator();
     while (it.next()) |mod| : (y += line_height) {
         const strings = context.modStrings(mod) orelse return;
         context.color(.mod_name);
@@ -224,7 +224,7 @@ const Context = struct {
         _ = context.call(context.gui.label, null, @ptrCast(&args));
     }
 
-    fn modStrings(context: *Context, mod: *UpdateMod) ?struct { name: dotnet.GcHandleV2, status: dotnet.GcHandleV2 } {
+    fn modStrings(context: *Context, mod: *Mod) ?struct { name: dotnet.GcHandleV2, status: dotnet.GcHandleV2 } {
         const dotnet_funcs = context.dotnet_funcs;
         if (mod.label.name == .null) {
             mod.label.name = newString(dotnet_funcs, mod.name.slice()) orelse return null;
@@ -440,4 +440,4 @@ const mutiny = @import("mutiny");
 const dotnet = mutiny.dotnet;
 const mods = @import("mods.zig");
 
-const UpdateMod = @import("UpdateMod.zig");
+const Mod = @import("Mod.zig");

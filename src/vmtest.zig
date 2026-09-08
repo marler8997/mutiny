@@ -195,19 +195,20 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
         \\var String = @Class(mscorlib.System.String)
         \\@Discard(String.IsNullOrEmpty(5))
     , "3: no overload matches for IsNullOrEmpty(integer) on class 'String', candidates: IsNullOrEmpty(string)");
-    try Vm.testUpdateMod(dotnet_funcs,
-        \\@UpdateResult("health is ", 100, " of ", 100)
+    try Vm.testMod(dotnet_funcs,
+        \\@Exit("health is ", 100, " of ", 100)
     , .{ .result = "health is 100 of 100" });
-    try Vm.testUpdateMod(dotnet_funcs,
+    try Vm.testMod(dotnet_funcs,
         \\var n = 1
-        \\if (n == 2) { @UpdateResult("never") }
+        \\if (n == 2) { @Exit("never") }
     , .done);
-    try Vm.testUpdateMod(dotnet_funcs,
+    try Vm.testMod(dotnet_funcs,
         \\@Log("every frame")
-    , .{ .err = "1: @Log is not supported in on-update mods, use @UpdateResult" });
-    try Vm.testBadCode(dotnet_funcs,
-        \\@UpdateResult("not an update mod")
-    , "1: @UpdateResult is only supported in on-update mods");
+    , .{ .err = "1: @Log is not supported in mods, use @Exit" });
+    try Vm.testCode(dotnet_funcs,
+        \\@Exit("not a mod, so this is logged")
+        \\@Assert(0)
+    );
     try Vm.testCode(dotnet_funcs,
         \\var n = 0
         \\loop

@@ -24,6 +24,7 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              what the injected DLL logs, including @Log output from your scripts
+  mods\<name>      mods, run from the top on every frame
   mods\scheduled-<name>  mods autoscheduled once, can reschedule themselves
   scripts\<name>   one-off scripts, inert until you ask for them by name
   stdout.txt       captured only when Mutiny starts the game for you

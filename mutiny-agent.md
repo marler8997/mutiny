@@ -32,8 +32,8 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              everything the injected DLL logs, including @Log output from scripts
-  mods\on-update-<name>  a mod that runs from the top on every frame of the game (see below)
-  mods\scheduled-<name>  a mod that runs once when written, and again only when it asks with @Reschedule(ms) (see below)
+  mods\<name>            a mod: runs from the top on every frame of the game (see below)
+  mods\scheduled-<name>  a scheduled mod: runs once when written, and again only when it asks with @Reschedule(ms) (see below)
   scripts\<name>   unliks mods, only executed when requested via `mutiny <PID> run-script <SCRIPT_NAME>`.
 ```
 
@@ -46,20 +46,20 @@ Which directory to use is decided by *lifetime*, not content - both hold the sam
   it runs exactly once, when asked, and its output comes back on stdout. A one-shot must not be
   a mod: a mod file persists, so it would run again on every game start.
 - **An effect** ("keep me at full health", "unlimited jumps", "3x world speed") goes in `mods\`
-  as an **update mod**, `mods\on-update-<name>`. This is the default for anything a player asks
-  to *have*. See "Update mods" below.
+  as a **mod**, `mods\<name>`. This is the default for anything a player asks to *have*. See
+  "Mods" below.
 - **A scheduled mod**, `mods\scheduled-<name>`, runs once when the file is written, and again
   whenever its text changes; since the file persists, that includes every game start. Each run
   goes from the top to completion. A run can end with `@Reschedule(ms)`, which schedules one
   more run `ms` milliseconds later; otherwise nothing runs it again until the file changes.
 
-Writing a file into `mods\` starts it immediately. Deleting it stops it; for an update mod,
-so does adding `@UpdateResult("disabled")` as its first line, which keeps the file and logs
+Writing a file into `mods\` starts it immediately. Deleting it stops it; for a mod,
+so does adding `@Exit("disabled")` as its first line, which keeps the file and logs
 `disabled` once.
 
-## Update mods
+## Mods
 
-An update mod runs from the top on **every frame of the game**, inside Unity's `Update`. That
+A mod runs from the top on **every frame of the game**, inside Unity's `Update`. That
 is all the mechanism is. One way to use it - and the one the examples below follow - is to
 check what exists, put the value where you want it, and report; written that way it behaves
 like an effect you have *added to the game* rather than a script you run:
@@ -71,44 +71,44 @@ like an effect you have *added to the game* rather than a script you run:
   frame looks again;
 - its status reaches the log only when it **changes**, so the log reads like an event history,
   not a trace;
-- it is on while the file exists; to turn it off, add `@UpdateResult("disabled")` as its first
+- it is on while the file exists; to turn it off, add `@Exit("disabled")` as its first
   line, or delete the file. Nothing to manage.
 
-Here's an example of an update mod for "infinit stamina" in the game PEAK:
+Here's an example of a mod for "infinit stamina" in the game PEAK:
 
 ```
 var game = @Assembly("Assembly-CSharp")
 var Character = @Class(game.Character)
-if (Character.get_localCharacterExists() == 0) { @UpdateResult("no character") }
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
 var me = Character.localCharacter
 me.data.set_currentStamina(me.GetMaxStamina())
-@UpdateResult("enabled")
+@Exit("enabled")
 ```
 
-When this is written to "mods/on-update-stamina", here's what it can look like in the log:
+When this is written to "mods/stamina", here's what it can look like in the log:
 
 ```
-13:54:46.239|98308|107484|PEAK|info|update mod 'on-update-stamina' loaded (266 bytes)
-13:55:01.418|98308|107484|PEAK|info|on-update-stamina: no character
-13:55:01.799|98308|107484|PEAK|info|on-update-stamina: enabled
+13:54:46.239|98308|107484|PEAK|info|mod 'stamina' loaded (266 bytes)
+13:55:01.418|98308|107484|PEAK|info|stamina: no character
+13:55:01.799|98308|107484|PEAK|info|stamina: enabled
 ```
 
 Rules that differ from a scheduled mod:
 
-- **`@Log` is an error** - a line per frame would bury the log. `@UpdateResult(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's.
-- **Result text should be stable unless you want something in the log.** `@UpdateResult("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
-- `@Reschedule` is an error (the next frame comes by itself). `@IsFirstRun()` is always 0. `@Exit` ends the frame silently.
+- **`@Log` is an error** - a line per frame would bury the log. `@Exit(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's. `@Exit()` with no arguments ends the frame silently.
+- **Result text should be stable unless you want something in the log.** `@Exit("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
+- `@Reschedule` is an error (the next frame comes by itself). `@IsFirstRun()` is always 0.
 - Nothing survives between frames; state lives in the game.
-- **An error never stops it.** The error is logged once just like `@UpdateResult()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@UpdateResult` is better, because it names the state instead of showing an error.
+- **An error never stops it.** The error is logged once just like `@Exit()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@Exit` is better, because it names the state instead of showing an error.
 - Keep it short: its cost is paid every frame, on the main thread.
 
 ### Examples
 
-Real update mods from three games, as written. They show the shape; they are not rules. Note
-that none of them puts its own name in an `@UpdateResult`: the log prefixes every result with
+Real mods from three games, as written. They show the shape; they are not rules. Note
+that none of them puts its own name in an `@Exit`: the log prefixes every result with
 the mod's name already.
 
-PEAK, fly - an update mod sees every frame, so "while the button is held" is an `if` on the
+PEAK, fly - a mod sees every frame, so "while the button is held" is an `if` on the
 input state; the result carries the one thing the player has to know:
 
 ```
@@ -117,7 +117,7 @@ var jumpImpulse = 1080
 var game = @Assembly("Assembly-CSharp")
 var Character = @Class(game.Character)
 var CharacterInput = @Class(game.CharacterInput)
-if (Character.get_localCharacterExists() == 0) { @UpdateResult("no character") }
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
 var me = Character.localCharacter
 var d = me.data
 var a = me.refs.afflictions
@@ -136,7 +136,7 @@ if (CharacterInput.action_jump.IsPressed() == 1) {
     set d.sinceJump = 10
     mv.TryToJump()
 }
-@UpdateResult("enabled: hold jump to fly")
+@Exit("enabled: hold jump to fly")
 ```
 
 Outer Wilds, jetpack - the knobs are `var`s at the top with the game's defaults noted; the
@@ -151,22 +151,22 @@ var boostThrust = 70
 var game = @Assembly("Assembly-CSharp")
 var Locator = @Class(game.Locator)
 var ctrl = Locator.GetPlayerController()
-if (@IsNull(ctrl)) { @UpdateResult("waiting for player") }
+if (@IsNull(ctrl)) { @Exit("waiting for player") }
 
 var jet = ctrl._jetpackModel
-if (@IsNull(jet)) { @UpdateResult("waiting for jetpack") }
+if (@IsNull(jet)) { @Exit("waiting for jetpack") }
 
 set jet._maxTranslationalThrust = transThrust
 set jet._boostThrust = boostThrust
 
-@UpdateResult("enabled")
+@Exit("enabled")
 ```
 
 Outer Wilds, world speed - the mod's own header explains why it skips frames where
 `timeScale` is 0:
 
 ```
-// === TIME LORD === (update mod: runs every frame)
+// === TIME LORD === (runs every frame)
 // World-speed dial for the whole physics-simulated solar system.
 // EDIT `speed` below, then SAVE.  1 = normal, 2-10 = fast-forward, 0.2 = slow-mo.
 //
@@ -183,14 +183,14 @@ var cur = Time.get_timeScale()
 // leave 0 alone (that is the pause menu); otherwise hold it at `speed`
 if (cur != 0) { Time.set_timeScale(speed) }
 
-@UpdateResult("enabled")
+@Exit("enabled")
 ```
 
 Outer Wilds, god mode - the header says what it does, what it does not, and what stays
 behind when it is turned off:
 
 ```
-// === GOD MODE === (update mod: runs every frame, survives time-loop resets)
+// === GOD MODE === (runs every frame, survives time-loop resets)
 //   1. Invincibility   - no damage / impact / suffocation death
 //   2. Infinite fuel   - jetpack never runs dry
 //   3. Infinite oxygen - never suffocate
@@ -203,10 +203,10 @@ behind when it is turned off:
 var game = @Assembly("Assembly-CSharp")
 var Locator = @Class(game.Locator)
 var ctrl = Locator.GetPlayerController()
-if (@IsNull(ctrl)) { @UpdateResult("waiting for player") }
+if (@IsNull(ctrl)) { @Exit("waiting for player") }
 
 var pr = ctrl._playerResources
-if (@IsNull(pr)) { @UpdateResult("waiting for resources") }
+if (@IsNull(pr)) { @Exit("waiting for resources") }
 
 var PR = @ClassOf(pr)
 
@@ -219,7 +219,7 @@ var jet = ctrl._jetpackModel
 if (@NotNull(jet)) {
     set jet._boostChargeFraction = 1
 }
-@UpdateResult("enabled")
+@Exit("enabled")
 ```
 
 
@@ -374,15 +374,15 @@ memory — see the rules below on argument types.
 | `@TryClass(a.B)` | an **assembly field** | same; returns nothing instead of erroring if the class is absent |
 | `@ClassOf(o)` | an object | the class of a live object |
 | `@LogClass(c)` | a class | prints its fields and methods |
-| `@Log(...)` | any number of anything | concatenates them; an error in an update mod |
-| `@UpdateResult(...)` | any number of anything | update mods only: ends the run with the concatenation as this frame's result, logged only when it changes |
+| `@Log(...)` | any number of anything | concatenates them; an error in a mod |
+| `@Exit(...)` | any number of anything | ends the run; with arguments, the concatenation is the run's outcome: in a mod this frame's result (logged only when it changes), elsewhere a log line |
 | `@ToString(v)` | anything | |
 | `@IsNull(v)` / `@NotNull(v)` | anything | return an integer 0 or 1 |
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
-| `@Exit()` / `@Nothing()` | no arguments | |
+| `@Nothing()` | no arguments | |
 | `@Reschedule(ms)` | an integer | scheduled mods only: exit now, run again from the top after `ms` milliseconds |
-| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on every run after that (always 0 in an update mod) |
+| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on every run after that (always 0 in a mod) |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started
@@ -414,8 +414,8 @@ These are not style advice. Each one is a way to take the game down.
    written yet.)
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
-   script runs. Check with `@IsNull` / `@NotNull`; in an update mod, exit the frame with
-   `@UpdateResult("waiting for player")`; in a scheduled mod, `@Reschedule(2000)` to try again later,
+   script runs. Check with `@IsNull` / `@NotNull`; in a mod, exit the frame with
+   `@Exit("waiting for player")`; in a scheduled mod, `@Reschedule(2000)` to try again later,
    as in the example below. Do not poll for it in a loop: the game is frozen while your script
    runs.
 
@@ -427,8 +427,8 @@ These are not style advice. Each one is a way to take the game down.
 
 ## Tell the player about these
 
-- **How to turn an effect off.** Add `@UpdateResult("disabled")` as the first line of
-  `mods\on-update-<name>` and save; remove the line to turn it back on. Deleting the file also
+- **How to turn an effect off.** Add `@Exit("disabled")` as the first line of
+  `mods\<name>` and save; remove the line to turn it back on. Deleting the file also
   works. To tune one, edit the numbers at the top and save. Say which of its changes the game
   keeps after it is turned off.
 - **`mutiny run-script` always exits 0**, even when the script failed. Read the output to find out

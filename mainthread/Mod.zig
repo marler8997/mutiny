@@ -1,4 +1,4 @@
-const UpdateMod = @This();
+const Mod = @This();
 
 list_node: std.DoublyLinkedList.Node,
 name: BoundedArray(u8, ModNameSlice.max_len),
@@ -17,8 +17,8 @@ pub const State = union(enum) {
     },
 };
 
-pub fn create(name: BoundedArray(u8, ModNameSlice.max_len), text: []u8) error{OutOfMemory}!*UpdateMod {
-    const mod = try alloc.newUpdateMod();
+pub fn create(name: BoundedArray(u8, ModNameSlice.max_len), text: []u8) error{OutOfMemory}!*Mod {
+    const mod = try alloc.newMod();
     mod.* = .{
         .list_node = .{},
         .name = name,
@@ -31,7 +31,7 @@ pub fn create(name: BoundedArray(u8, ModNameSlice.max_len), text: []u8) error{Ou
     return mod;
 }
 
-pub fn formatStatus(mod: *UpdateMod, comptime fmt: []const u8, args: anytype) void {
+pub fn formatStatus(mod: *Mod, comptime fmt: []const u8, args: anytype) void {
     const ellipsis = "...";
     const text = std.fmt.bufPrint(mod.status.buffer[0 .. status_max_len - ellipsis.len], fmt, args) catch |e| switch (e) {
         error.NoSpaceLeft => truncated: {
@@ -42,11 +42,11 @@ pub fn formatStatus(mod: *UpdateMod, comptime fmt: []const u8, args: anytype) vo
     mod.status.len = @intCast(text.len);
 }
 
-pub fn destroy(mod: *UpdateMod, dotnet_funcs: *const dotnet.Funcs) void {
+pub fn destroy(mod: *Mod, dotnet_funcs: *const dotnet.Funcs) void {
     mod.label.deinit(dotnet_funcs);
     alloc.general().free(mod.text);
     mod.* = undefined;
-    alloc.freeUpdateMod(mod);
+    alloc.freeMod(mod);
 }
 
 const std = @import("std");

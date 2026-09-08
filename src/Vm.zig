@@ -53,13 +53,13 @@ pub const HandleTracker = struct {
 pub const Out = union(enum) {
     log,
     pipe: *std.Io.Writer,
-    update_result: []u8,
+    result: []u8,
 };
 
 const ErrorResult = union(enum) {
     exit,
     reschedule_ms: u32,
-    update_result: []const u8,
+    result: []const u8,
     err: Error,
 };
 
@@ -1907,8 +1907,31 @@ fn evalBuiltin(
         },
         .@"@Nothing" => {},
         .@"@Exit" => {
-            vm.error_result = .exit;
-            return error.Vm;
+            if (args_addr.eql(vm.mem.top())) {
+                vm.error_result = .exit;
+                return error.Vm;
+            }
+            switch (vm.out) {
+                .result => |buf| {
+                    const ellipsis = "...";
+                    var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - ellipsis.len]);
+                    const text: []const u8 = if (vm.logValues(&writer, args_addr)) writer.buffered() else |err| switch (err) {
+                        error.WriteFailed => truncated: {
+                            @memcpy(buf[buf.len - ellipsis.len ..], ellipsis);
+                            break :truncated buf;
+                        },
+                    };
+                    vm.discardValues(args_addr);
+                    _ = vm.mem.discardFrom(args_addr);
+                    vm.error_result = .{ .result = text };
+                    return error.Vm;
+                },
+                .log, .pipe => {
+                    try vm.logBuiltin(builtin_extent, args_addr);
+                    vm.error_result = .exit;
+                    return error.Vm;
+                },
+            }
         },
         .@"@Reschedule" => {
             const integer = switch (vm.pop(args_addr)) {
@@ -1945,49 +1968,15 @@ fn evalBuiltin(
             (try vm.push(Type)).* = .integer;
             (try vm.push(i64)).* = @intFromBool(has_field);
         },
-        .@"@UpdateResult" => {
-            const buf = switch (vm.out) {
-                .update_result => |buf| buf,
-                .log, .pipe => return vm.setError(.{ .static_error = .{
-                    .pos = builtin_extent.start,
-                    .string = "@UpdateResult is only supported in on-update mods",
-                } }),
-            };
-            const ellipsis = "...";
-            var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - ellipsis.len]);
-            const text: []const u8 = if (vm.logValues(&writer, args_addr)) writer.buffered() else |err| switch (err) {
-                error.WriteFailed => truncated: {
-                    @memcpy(buf[buf.len - ellipsis.len ..], ellipsis);
-                    break :truncated buf;
-                },
-            };
-            vm.discardValues(args_addr);
-            _ = vm.mem.discardFrom(args_addr);
-            vm.error_result = .{ .update_result = text };
-            return error.Vm;
-        },
         .@"@Log" => {
             switch (vm.out) {
                 .log, .pipe => {},
-                .update_result => return vm.setError(.{ .static_error = .{
+                .result => return vm.setError(.{ .static_error = .{
                     .pos = builtin_extent.start,
-                    .string = "@Log is not supported in on-update mods, use @UpdateResult",
+                    .string = "@Log is not supported in mods, use @Exit",
                 } }),
             }
-            const log_file, const maybe_get_log_error = logfile.global.get();
-            var buffer: [1024]u8 = undefined;
-            var file_writer = log_file.writer(&buffer);
-            vm.log(&file_writer.interface, maybe_get_log_error, args_addr) catch |err| switch (err) {
-                error.WriteFailed => return vm.setError(.{ .log_error = .{
-                    .pos = builtin_extent.start,
-                    .err = file_writer.err.?,
-                } }),
-            };
-            if (vm.out == .pipe) vm.logOut(vm.out.pipe, args_addr) catch |err| switch (err) {
-                error.WriteFailed => return vm.setError(.{ .vm_out = .{
-                    .pos = builtin_extent.start,
-                } }),
-            };
+            try vm.logBuiltin(builtin_extent, args_addr);
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
         },
@@ -2279,6 +2268,23 @@ fn logOut(
     try vm.logValues(writer, args_addr);
     try writer.writeAll("\n");
     try writer.flush();
+}
+
+fn logBuiltin(vm: *Vm, builtin_extent: Extent, args_addr: Memory.Addr) error{Vm}!void {
+    const log_file, const maybe_get_log_error = logfile.global.get();
+    var buffer: [1024]u8 = undefined;
+    var file_writer = log_file.writer(&buffer);
+    vm.log(&file_writer.interface, maybe_get_log_error, args_addr) catch |err| switch (err) {
+        error.WriteFailed => return vm.setError(.{ .log_error = .{
+            .pos = builtin_extent.start,
+            .err = file_writer.err.?,
+        } }),
+    };
+    if (vm.out == .pipe) vm.logOut(vm.out.pipe, args_addr) catch |err| switch (err) {
+        error.WriteFailed => return vm.setError(.{ .vm_out = .{
+            .pos = builtin_extent.start,
+        } }),
+    };
 }
 
 fn logValues(
@@ -3520,7 +3526,6 @@ const Builtin = enum {
     @"@IsFirstRun",
     @"@HasField",
     @"@Log",
-    @"@UpdateResult",
     @"@LogClass",
     @"@Assembly",
     @"@TryAssembly",
@@ -3537,12 +3542,11 @@ const Builtin = enum {
         return switch (builtin) {
             .@"@Assert" => &.{.{ .concrete = .integer }},
             .@"@Nothing" => &.{},
-            .@"@Exit" => &.{},
+            .@"@Exit" => null,
             .@"@Reschedule" => &.{.{ .concrete = .integer }},
             .@"@IsFirstRun" => &.{},
             .@"@HasField" => &.{ .{ .concrete = .object }, .{ .concrete = .string_literal } },
             .@"@Log" => null,
-            .@"@UpdateResult" => null,
             .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@TryAssembly" => &.{.{ .concrete = .string_literal }},
@@ -3566,7 +3570,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@IsFirstRun", .@"@IsFirstRun" },
     .{ "@HasField", .@"@HasField" },
     .{ "@Log", .@"@Log" },
-    .{ "@UpdateResult", .@"@UpdateResult" },
     .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@TryAssembly", .@"@TryAssembly" },
@@ -4576,7 +4579,7 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
         vm.verifyStack();
         vm.evalRoot() catch switch (vm.error_result) {
             .exit, .reschedule_ms => return error.TestUnexpectedSuccess,
-            .update_result => unreachable, // out is .log
+            .result => unreachable, // out is .log
             .err => |err| {
                 var buf: [2000]u8 = undefined;
                 const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)});
@@ -4806,7 +4809,7 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
                 is_first_run = false;
                 continue;
             },
-            .update_result => unreachable, // out is .log
+            .result => unreachable, // out is .log
             .err => |err| {
                 std.debug.print(
                     "Failed to interpret the following code:\n---\n{s}\n---\nerror: {f}\n",
@@ -4819,14 +4822,14 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     handle_tracker.deinit();
 }
 
-pub const UpdateModExpect = union(enum) {
+pub const ModExpect = union(enum) {
     done,
     result: []const u8,
     err: []const u8,
 };
 
-pub fn testUpdateMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect: UpdateModExpect) !void {
-    std.debug.print("testing update mod:\n---\n{s}\n---\n", .{text});
+pub fn testMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect: ModExpect) !void {
+    std.debug.print("testing mod:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
     test_domain.init(dotnet_funcs);
@@ -4845,13 +4848,13 @@ pub fn testUpdateMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
         .handle_tracker = &handle_tracker,
         .is_first_run = false,
-        .out = .{ .update_result = &result_buf },
+        .out = .{ .result = &result_buf },
     };
     defer vm.deinit();
-    const actual: UpdateModExpect = if (vm.evalRoot()) .done else |_| switch (vm.error_result) {
+    const actual: ModExpect = if (vm.evalRoot()) .done else |_| switch (vm.error_result) {
         .exit => .done,
         .reschedule_ms => return error.TestUnexpectedReschedule,
-        .update_result => |r| .{ .result = r },
+        .result => |r| .{ .result = r },
         .err => |err| blk: {
             var buf: [2000]u8 = undefined;
             break :blk .{ .err = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)}) };
@@ -4864,11 +4867,11 @@ pub fn testUpdateMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect
     };
     if (!matches) {
         switch (actual) {
-            .done => std.log.err("update mod finished without a result", .{}),
-            .result => |r| std.log.err("update mod result\n\"{f}\"\n", .{std.zig.fmtString(r)}),
-            .err => |e| std.log.err("update mod error\n\"{f}\"\n", .{std.zig.fmtString(e)}),
+            .done => std.log.err("mod finished without a result", .{}),
+            .result => |r| std.log.err("mod result\n\"{f}\"\n", .{std.zig.fmtString(r)}),
+            .err => |e| std.log.err("mod error\n\"{f}\"\n", .{std.zig.fmtString(e)}),
         }
-        return error.TestUnexpectedUpdateModOutcome;
+        return error.TestUnexpectedModOutcome;
     }
     vm.logStack();
     vm.verifyStack();

@@ -1,6 +1,6 @@
 const global = struct {
     var scheduled_mods: Pool(ScheduledMod) = .{};
-    var update_mods: Pool(UpdateMod) = .{};
+    var mods: Pool(Mod) = .{};
     var scripts: Pool(Script) = .{};
     var general_instance: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
 };
@@ -16,11 +16,11 @@ pub fn freeScheduledMod(mod: *ScheduledMod) void {
     global.scheduled_mods.destroy(mod);
 }
 
-pub fn newUpdateMod() error{OutOfMemory}!*UpdateMod {
-    return global.update_mods.create();
+pub fn newMod() error{OutOfMemory}!*Mod {
+    return global.mods.create();
 }
-pub fn freeUpdateMod(mod: *UpdateMod) void {
-    global.update_mods.destroy(mod);
+pub fn freeMod(mod: *Mod) void {
+    global.mods.destroy(mod);
 }
 
 pub fn newScript() error{OutOfMemory}!*Script {
@@ -36,4 +36,4 @@ const mutiny = @import("mutiny");
 const ScheduledMod = @import("ScheduledMod.zig");
 const Pool = mutiny.Pool;
 const Script = @import("Script.zig");
-const UpdateMod = @import("UpdateMod.zig");
+const Mod = @import("Mod.zig");

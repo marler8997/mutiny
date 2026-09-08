@@ -536,7 +536,7 @@ fn updateUpdateHook(
         .pending => switch (dotnet_funcs.kind) {
             .mono => {
                 const ticker = mutinymono.load(dotnet_funcs) catch |err| {
-                    std.log.err("loading the embedded MutinyMono.dll failed ({t}), on-update mods will not run", .{err});
+                    std.log.err("loading the embedded MutinyMono.dll failed ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
                     return .settled;
                 };
@@ -545,7 +545,7 @@ fn updateUpdateHook(
             },
             .il2cpp => {
                 bootstrapIl2cpp(dotnet_funcs, module, root_domain) catch |err| {
-                    std.log.err("il2cpp Update hook failed to install ({t}), on-update mods will not run", .{err});
+                    std.log.err("il2cpp Update hook failed to install ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .il2cpp = err } } };
                     return .settled;
                 };
@@ -567,7 +567,7 @@ fn updateUpdateHook(
                     return .retry;
                 },
                 else => {
-                    std.log.err("mono Update hook failed to install ({t}), on-update mods will not run", .{err});
+                    std.log.err("mono Update hook failed to install ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
                     return .settled;
                 },
@@ -577,11 +577,11 @@ fn updateUpdateHook(
         },
         .installed => return .settled,
         .failed => |*hook| {
-            const has_update_mods = mods.hasUpdateMods();
-            if (has_update_mods and !hook.update_mods_warned) {
-                std.log.err("on-update mods will not run: the Update hook failed to install (see the error above)", .{});
+            const has_mods = mods.hasMods();
+            if (has_mods and !hook.update_mods_warned) {
+                std.log.err("mods will not run: the Update hook failed to install (see the error above)", .{});
             }
-            hook.update_mods_warned = has_update_mods;
+            hook.update_mods_warned = has_mods;
             return .settled;
         },
     }
@@ -703,8 +703,8 @@ pub fn onUpdate() callconv(.c) void {
         .ready => |funcs| funcs,
         .unrecoverable_error, .not_ready => return,
     };
-    var it = mods.onUpdateIterator();
-    while (it.next()) |mod| runUpdateMod(dotnet_funcs, mod);
+    var it = mods.modIterator();
+    while (it.next()) |mod| runMod(dotnet_funcs, mod);
 }
 pub fn onGui() callconv(.c) void {
     const dotnet_funcs = switch (updateRuntime()) {
@@ -714,25 +714,25 @@ pub fn onGui() callconv(.c) void {
     unitygui.draw(dotnet_funcs);
 }
 
-fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
+fn runMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = mod.text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = .{ .update_result = &mod.status.buffer },
+        .out = .{ .result = &mod.status.buffer },
         .is_first_run = false,
     };
     defer vm.deinit();
     const name = mod.name.slice();
-    const new_state: UpdateMod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
+    const new_state: Mod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
         .reschedule_ms => blk: {
-            mod.formatStatus("@Reschedule is invalid in update mods", .{});
+            mod.formatStatus("@Reschedule is only supported in scheduled mods", .{});
             break :blk .{ .err = .{ .error_wyhash = std.hash.Wyhash.hash(0, mod.status.slice()) } };
         },
-        .update_result => |result| blk: {
+        .result => |result| blk: {
             std.debug.assert(result.ptr == &mod.status.buffer);
             mod.status.len = @intCast(result.len);
             break :blk .{ .result = .{ .wyhash = std.hash.Wyhash.hash(0, result) } };
@@ -886,7 +886,7 @@ fn runOne(
     var reschedule_ms: ?u32 = null;
     vm.evalRoot() catch switch (vm.error_result) {
         .exit => std.log.info("{s} has exited", .{name}),
-        .update_result => unreachable, // out is never .update_result here
+        .result => unreachable, // out is never .result here
         .reschedule_ms => |ms| if (out) |w| {
             std.log.err("{s}: @Reschedule is only supported in scheduled mods", .{name});
             try w.print("{s}: error: @Reschedule is only supported in scheduled mods\n", .{name});
@@ -955,6 +955,6 @@ const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
 
 const ScheduledMod = @import("ScheduledMod.zig");
-const UpdateMod = @import("UpdateMod.zig");
+const Mod = @import("Mod.zig");
 const UnityVersion = mutiny.UnityVersion;
 const Vm = mutiny.Vm;

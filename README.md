@@ -25,7 +25,6 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              what the injected DLL logs, including @Log output from your scripts
   mods\<name>      mods, run from the top on every frame
-  mods\scheduled-<name>  mods autoscheduled once, can reschedule themselves
   scripts\<name>   one-off scripts, inert until you ask for them by name
   stdout.txt       captured only when Mutiny starts the game for you
   stderr.txt
@@ -38,87 +37,28 @@ A name starting with `@` is a builtin that needs no file at all:
 
 The difference between the two directories is *when they run*, not what's in them — both hold the same script language. A file in `mods\` runs by itself and re-runs whenever you edit it, which is what you want for a persistent effect like godmode. A file in `scripts\` does nothing until `mutiny run-script` names it, and its output comes back to your terminal instead of only going to the log, which is what you want for a one-off question like "which assemblies are loaded".
 
-# Example Script
+# Example Mod
 
-Here's a hacky example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".
+A mod runs from the top on every frame of the game. This one keeps the player's stamina full in
+the game "PEAK":
 
 ```typescript
-// save this script to %LOCALAPPDATA%\mutiny\app\REPO\mods\scheduled-godmode
-var Steamworks = @Assembly("Facepunch.Steamworks.Win64")
-var SteamClient = @Class(Steamworks.Steamworks.SteamClient)
-
-if (SteamClient.get_IsValid() == 0) {
-    if (@IsFirstRun()) {
-        @Log("waiting for steam id...")
-    }
-    @Reschedule(1000)
-}
-
-// comment/uncomment the following lines to re-run the script for Danny/Zach, their
-// upgrades won't apply until the next level.
-var steam_id = @ToString(SteamClient.get_SteamId().Value)
-//var steam_id = @ToString(76561197963995344) // danny
-//var steam_id = @ToString(76561199195454462) // Zach
-@Log("steam id is '", steam_id, "'")
-
+// save this to %LOCALAPPDATA%\mutiny\app\PEAK\mods\stamina
 var game = @Assembly("Assembly-CSharp")
-
-var PunManager = @Class(game.PunManager)
-var punManagerInstance = PunManager.instance
-
-var value = 0
-var diff = 0
-
-set value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, 0)
-@Log("Sprint current=", value)
-set diff = 7 - value
-set value = punManagerInstance.UpgradePlayerSprintSpeed(steam_id, diff)
-@Log("Sprint new   =", value)
-
-set value = punManagerInstance.UpgradePlayerEnergy(steam_id, 0)
-@Log("Stamina current=", value)
-set diff = 1000 - value
-set value = punManagerInstance.UpgradePlayerEnergy(steam_id, diff)
-@Log("Stamina new    =", value)
-
-set value = punManagerInstance.UpgradePlayerHealth(steam_id, 0)
-@Log("Health current=", value)
-set diff = 1000 - value
-set value = punManagerInstance.UpgradePlayerHealth(steam_id, diff)
-@Log("Health new    =", value)
-
-set value = punManagerInstance.UpgradePlayerExtraJump(steam_id, 0)
-@Log("Jump current=", value)
-set diff = 1000 - value
-set value = punManagerInstance.UpgradePlayerExtraJump(steam_id, diff)
-@Log("Jump new    =", value)
-
-set value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, 0)
-@Log("Throw current=", value)
-set diff = 1 - value
-set value = punManagerInstance.UpgradePlayerThrowStrength(steam_id, diff)
-@Log("Throw new    =", value)
-
-set value = punManagerInstance.UpgradePlayerGrabRange(steam_id, 0)
-@Log("Range current=", value)
-set diff = 3 - value
-set value = punManagerInstance.UpgradePlayerGrabRange(steam_id, diff)
-@Log("Range new    =", value)
-
-set value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, 0)
-@Log("Strength current=", value)
-set diff = 50 - value
-set value = punManagerInstance.UpgradePlayerGrabStrength(steam_id, diff)
-@Log("Strength new    =", value)
-
-var SemiFunc = @Class(game.SemiFunc)
-var player = SemiFunc.PlayerAvatarGetFromSteamID(steam_id)
-//@LogClass(@ClassOf(player.playerHealth))
-player.playerHealth.Heal(99999999, 0)
-
-// It's annoying to have to keep giving health to Danny/Zach so here you go guys!
-var danny = SemiFunc.PlayerAvatarGetFromSteamID("76561197963995344")
-danny.playerHealth.HealOther(99999999, 0)
-var zach = SemiFunc.PlayerAvatarGetFromSteamID("76561199195454462")
-zach.playerHealth.HealOther(99999999, 0)
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
+var me = Character.localCharacter
+me.data.set_currentStamina(me.GetMaxStamina())
+@Exit("enabled")
 ```
+
+`@Exit(...)` ends the frame's run and the text is the mod's status, shown in the in-game panel
+and logged whenever it changes:
+
+```
+info|mod 'stamina' loaded (250 bytes)
+info|stamina: no character
+info|stamina: enabled
+```
+
+To turn a mod off, add `@Exit("disabled")` as its first line and save, or delete the file.

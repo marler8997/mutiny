@@ -14,11 +14,6 @@ pub const mutinyThreadQueueScript = scripts.mutinyThreadQueue;
 pub const ScriptRequest = scripts.Request;
 
 const global = struct {
-    var shared: struct {
-        mutex: Mutex = .{},
-        mutiny_hwnd: ?win32.HWND = null,
-    } = .{};
-
     // state related to subclassing the main window
     const subclass = struct {
         var state: SubclassWindowState = .{ .initial = .{} };
@@ -39,45 +34,6 @@ const global = struct {
     var vm_pass_active: bool = false;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
-
-pub const wm_schedule_rerun = win32.WM_USER + 0;
-
-pub fn mutinyThreadSetHwnd(hwnd: win32.HWND) void {
-    global.shared.mutex.lock();
-    defer global.shared.mutex.unlock();
-    std.debug.assert(global.shared.mutiny_hwnd == null);
-    global.shared.mutiny_hwnd = hwnd;
-}
-pub fn mutinyThreadUnsetHwnd(hwnd: win32.HWND) void {
-    global.shared.mutex.lock();
-    defer global.shared.mutex.unlock();
-    std.debug.assert(global.shared.mutiny_hwnd == hwnd);
-    global.shared.mutiny_hwnd = null;
-}
-
-fn scheduleRerun(ms: u32) error{Schedule}!void {
-    // NOTE: if we post too often it can cause starve the game
-    //       so we still do the thread hop even in this case
-    // if (ms == 0) {
-    //     const target: Target = .{ .data = .{ .hwnd = global.subclass.hwnd, .msg = global.subclass.wnd_msg } };
-    //     var err: PostError = undefined;
-    //     target.post(.run, &err) catch {
-    //         std.log.err("PostMessage(rerun) failed, error={f}", .{err});
-    //         return error.Schedule;
-    //     };
-    //     return;
-    // }
-    global.shared.mutex.lock();
-    defer global.shared.mutex.unlock();
-    const hwnd = global.shared.mutiny_hwnd orelse {
-        std.log.err("cannot schedule a rerun in {} ms, the mutiny window is gone", .{ms});
-        return error.Schedule;
-    };
-    if (0 == win32.PostMessageW(hwnd, wm_schedule_rerun, ms, 0)) {
-        std.log.err("PostMessage(schedule rerun) failed, error={f}", .{win32.GetLastError()});
-        return error.Schedule;
-    }
-}
 
 fn coalescedLog(
     comptime T: type,
@@ -722,16 +678,11 @@ fn runMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
         .text = mod.text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
         .out = .{ .result = &mod.status.buffer },
-        .is_first_run = false,
     };
     defer vm.deinit();
     const name = mod.name.slice();
     const new_state: Mod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
-        .reschedule_ms => blk: {
-            mod.formatStatus("@Reschedule is only supported in scheduled mods", .{});
-            break :blk .{ .err = .{ .error_wyhash = std.hash.Wyhash.hash(0, mod.status.slice()) } };
-        },
         .result => |result| blk: {
             std.debug.assert(result.ptr == &mod.status.buffer);
             mod.status.len = @intCast(result.len);
@@ -765,7 +716,6 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
     if (global.vm_pass_active) return .recursed;
     global.vm_pass_active = true;
     defer global.vm_pass_active = false;
-    var rerun_schedule_failed = false;
 
     const dotnet_funcs = switch (updateRuntime()) {
         .ready => |funcs| funcs,
@@ -786,23 +736,6 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
         .retry => true,
     };
 
-    {
-        const now = getNow();
-        var it = mods.scheduledIterator();
-        while (it.next(now)) |mod| {
-            const maybe_reschedule_ms = runOne(dotnet_funcs, mod.name.slice(), mod.text.?, mod.is_first_run, null) catch |err| switch (err) {
-                error.WriteFailed => unreachable, // did not pass a writer
-            };
-            mod.is_first_run = false;
-            if (maybe_reschedule_ms) |ms| {
-                mod.run = .{ .reschedule = .{ .scheduled = now, .delay_ms = ms } };
-            }
-        }
-        if (mods.nextRescheduleMs(getNow())) |ms| scheduleRerun(ms) catch |err| switch (err) {
-            error.Schedule => rerun_schedule_failed = true,
-        };
-    }
-
     while (scripts.steal()) |script| {
         defer script.deinit();
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
@@ -817,11 +750,10 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
             ) catch |e| {
                 write_error = e;
             },
-            .file => |*file| _ = runOne(
+            .file => |*file| runOne(
                 dotnet_funcs,
                 script.name.slice(),
                 file.text,
-                true,
                 &pipe_writer.interface,
             ) catch |e| {
                 write_error = e;
@@ -836,7 +768,7 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
         }
     }
 
-    return if (rerun_schedule_failed or update_hook_retry) .retry else .success;
+    return if (update_hook_retry) .retry else .success;
 }
 
 fn failQueuedScripts(err: RuntimeState.UnrecoverableError) void {
@@ -868,10 +800,8 @@ fn runOne(
     dotnet_funcs: *const dotnet.Funcs,
     name: []const u8,
     text: []const u8,
-    is_first_run: bool,
-    out: ?*std.Io.Writer,
-) error{WriteFailed}!?u32 {
-    const vm_out: Vm.Out = if (out) |pipe| .{ .pipe = pipe } else .log;
+    out: *std.Io.Writer,
+) error{WriteFailed}!void {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
 
@@ -879,31 +809,21 @@ fn runOne(
         .dotnet_funcs = dotnet_funcs,
         .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = vm_out,
-        .is_first_run = is_first_run,
+        .out = .{ .pipe = out },
     };
     defer vm.deinit();
-    var reschedule_ms: ?u32 = null;
     vm.evalRoot() catch switch (vm.error_result) {
         .exit => std.log.info("{s} has exited", .{name}),
         .result => unreachable, // out is never .result here
-        .reschedule_ms => |ms| if (out) |w| {
-            std.log.err("{s}: @Reschedule is only supported in scheduled mods", .{name});
-            try w.print("{s}: error: @Reschedule is only supported in scheduled mods\n", .{name});
-        } else {
-            std.log.debug("{s} rescheduled in {} ms", .{ name, ms });
-            reschedule_ms = ms;
-        },
         .err => |err| switch (err) {
             .vm_out => return error.WriteFailed,
             else => {
                 std.log.err("{s}:{f}", .{ name, err.fmt(text, dotnet_funcs) });
-                if (out) |w| try w.print("{s}: error:{f}\n", .{ name, err.fmt(text, dotnet_funcs) });
+                try out.print("{s}: error:{f}\n", .{ name, err.fmt(text, dotnet_funcs) });
             },
         },
     };
-    if (out) |w| try w.flush();
-    return reschedule_ms;
+    try out.flush();
 }
 
 fn runBuiltin(
@@ -954,7 +874,6 @@ const unitygui = @import("unitygui.zig");
 const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
 
-const ScheduledMod = @import("ScheduledMod.zig");
 const Mod = @import("Mod.zig");
 const UnityVersion = mutiny.UnityVersion;
 const Vm = mutiny.Vm;

@@ -5,7 +5,6 @@ error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
 out: Out = .log,
-is_first_run: bool = true,
 
 symbol_state: union(enum) {
     none,
@@ -58,7 +57,6 @@ pub const Out = union(enum) {
 
 const ErrorResult = union(enum) {
     exit,
-    reschedule_ms: u32,
     result: []const u8,
     err: Error,
 };
@@ -1937,22 +1935,6 @@ fn evalBuiltin(
                 },
             }
         },
-        .@"@Reschedule" => {
-            const integer = switch (vm.pop(args_addr)) {
-                .integer => |i| i,
-                else => unreachable,
-            };
-            const ms = std.math.cast(u32, integer) orelse return vm.setError(.{ .static_error = .{
-                .pos = builtin_extent.start,
-                .string = "@Reschedule delay must be between 0 and 4294967295 milliseconds",
-            } });
-            vm.error_result = .{ .reschedule_ms = ms };
-            return error.Vm;
-        },
-        .@"@IsFirstRun" => {
-            (try vm.push(Type)).* = .integer;
-            (try vm.push(i64)).* = @intFromBool(vm.is_first_run);
-        },
         .@"@HasField" => {
             var object_value, const name_addr = vm.read(args_addr);
             defer object_value.discard(vm.dotnet_funcs, vm.handle_tracker);
@@ -3510,8 +3492,6 @@ const Builtin = enum {
     @"@Assert",
     @"@Nothing", // temporary builtin for testing, remove this later
     @"@Exit",
-    @"@Reschedule",
-    @"@IsFirstRun",
     @"@HasField",
     @"@Log",
     @"@LogClass",
@@ -3531,8 +3511,6 @@ const Builtin = enum {
             .@"@Assert" => &.{.{ .concrete = .integer }},
             .@"@Nothing" => &.{},
             .@"@Exit" => null,
-            .@"@Reschedule" => &.{.{ .concrete = .integer }},
-            .@"@IsFirstRun" => &.{},
             .@"@HasField" => &.{ .{ .concrete = .object }, .{ .concrete = .string_literal } },
             .@"@Log" => null,
             .@"@LogClass" => &.{.{ .concrete = .class }},
@@ -3554,8 +3532,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assert", .@"@Assert" },
     .{ "@Nothing", .@"@Nothing" },
     .{ "@Exit", .@"@Exit" },
-    .{ "@Reschedule", .@"@Reschedule" },
-    .{ "@IsFirstRun", .@"@IsFirstRun" },
     .{ "@HasField", .@"@HasField" },
     .{ "@Log", .@"@Log" },
     .{ "@LogClass", .@"@LogClass" },
@@ -4592,7 +4568,7 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
     for (0..2) |_| {
         vm.verifyStack();
         vm.evalRoot() catch switch (vm.error_result) {
-            .exit, .reschedule_ms => return error.TestUnexpectedSuccess,
+            .exit => return error.TestUnexpectedSuccess,
             .result => unreachable, // out is .log
             .err => |err| {
                 var buf: [2000]u8 = undefined;
@@ -4802,14 +4778,12 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
     var tracker_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer tracker_arena.deinit();
     var handle_tracker: HandleTracker = .{ .allocator = tracker_arena.allocator() };
-    var is_first_run = true;
-    while (true) {
+    {
         var vm: Vm = .{
             .dotnet_funcs = dotnet_funcs,
             .text = text,
             .mem = .{ .allocator = vm_fixed_fba.allocator() },
             .handle_tracker = &handle_tracker,
-            .is_first_run = is_first_run,
         };
         defer vm.deinit();
         vm.verifyStack();
@@ -4817,11 +4791,6 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
             .exit => {
                 vm.logStack();
                 vm.verifyStack();
-                break;
-            },
-            .reschedule_ms => {
-                is_first_run = false;
-                continue;
             },
             .result => unreachable, // out is .log
             .err => |err| {
@@ -4861,13 +4830,11 @@ pub fn testMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect: ModE
         .text = text,
         .mem = .{ .allocator = vm_fixed_fba.allocator() },
         .handle_tracker = &handle_tracker,
-        .is_first_run = false,
         .out = .{ .result = &result_buf },
     };
     defer vm.deinit();
     const actual: ModExpect = if (vm.evalRoot()) .done else |_| switch (vm.error_result) {
         .exit => .done,
-        .reschedule_ms => return error.TestUnexpectedReschedule,
         .result => |r| .{ .result = r },
         .err => |err| blk: {
             var buf: [2000]u8 = undefined;

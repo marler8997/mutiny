@@ -32,8 +32,7 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              everything the injected DLL logs, including @Log output from scripts
-  mods\<name>            a mod: runs from the top on every frame of the game (see below)
-  mods\scheduled-<name>  a scheduled mod: runs once when written, and again only when it asks with @Reschedule(ms) (see below)
+  mods\<name>      a mod: runs from the top on every frame of the game (see below)
   scripts\<name>   unliks mods, only executed when requested via `mutiny <PID> run-script <SCRIPT_NAME>`.
 ```
 
@@ -48,10 +47,6 @@ Which directory to use is decided by *lifetime*, not content - both hold the sam
 - **An effect** ("keep me at full health", "unlimited jumps", "3x world speed") goes in `mods\`
   as a **mod**, `mods\<name>`. This is the default for anything a player asks to *have*. See
   "Mods" below.
-- **A scheduled mod**, `mods\scheduled-<name>`, runs once when the file is written, and again
-  whenever its text changes; since the file persists, that includes every game start. Each run
-  goes from the top to completion. A run can end with `@Reschedule(ms)`, which schedules one
-  more run `ms` milliseconds later; otherwise nothing runs it again until the file changes.
 
 Writing a file into `mods\` starts it immediately. Deleting it stops it; for a mod,
 so does adding `@Exit("disabled")` as its first line, which keeps the file and logs
@@ -93,11 +88,10 @@ When this is written to "mods/stamina", here's what it can look like in the log:
 13:55:01.799|98308|107484|PEAK|info|stamina: enabled
 ```
 
-Rules that differ from a scheduled mod:
+Rules that differ from a script:
 
 - **`@Log` is an error** - a line per frame would bury the log. `@Exit(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's. `@Exit()` with no arguments ends the frame silently.
 - **Result text should be stable unless you want something in the log.** `@Exit("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
-- `@Reschedule` is an error (the next frame comes by itself). `@IsFirstRun()` is always 0.
 - Nothing survives between frames; state lives in the game.
 - **An error never stops it.** The error is logged once just like `@Exit()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@Exit` is better, because it names the state instead of showing an error.
 - Keep it short: its cost is paid every frame, on the main thread.
@@ -277,9 +271,8 @@ Things that will surprise you:
   the end of every iteration; variables declared in an `if` block stay visible after it.
 - **There is no way to sleep or wait inside a script.** Scripts run on the game's main thread
   and the game is frozen until the script finishes, so a loop that polls for a condition freezes
-  the game forever. To wait, a scheduled mod calls `@Reschedule(ms)`: that ends the script and
-  runs it again from the top after `ms` milliseconds, with the game running in between.
-  `@IsFirstRun()` is 1 on the first run and 0 on every run after that, so you can log once.
+  the game forever. Waiting is what a mod is for: it runs again next frame, so it checks for the
+  condition and ends the frame with `@Exit("waiting for ...")` until it holds.
 - **A second `loop` in the same block is rejected** with "cannot loop inside loop". Putting one
   inside an `if` block is not caught by that check, but nothing tests it and `break`/`continue`
   across that boundary is unexplored — so write one loop at a time.
@@ -381,8 +374,6 @@ memory — see the rules below on argument types.
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
 | `@Nothing()` | no arguments | |
-| `@Reschedule(ms)` | an integer | scheduled mods only: exit now, run again from the top after `ms` milliseconds |
-| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on every run after that (always 0 in a mod) |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started
@@ -415,9 +406,8 @@ These are not style advice. Each one is a way to take the game down.
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
    script runs. Check with `@IsNull` / `@NotNull`; in a mod, exit the frame with
-   `@Exit("waiting for player")`; in a scheduled mod, `@Reschedule(2000)` to try again later,
-   as in the example below. Do not poll for it in a loop: the game is frozen while your script
-   runs.
+   `@Exit("waiting for player")`, as in the example below; in a script, report it and exit. Do
+   not poll for it in a loop: the game is frozen while your script runs.
 
 4. **Prefer reading before writing.** Read a value and `@Log` it first to confirm you have the
    right object and the units you expect, then write.
@@ -436,25 +426,23 @@ These are not style advice. Each one is a way to take the game down.
 - **A syntax error stops the whole script**, and the message names a line number and what was
   expected. Read it - the messages are specific.
 
-## A worked example of a scheduled mod
+## A worked example of a mod
 
-A `mods\scheduled-<name>` file that waits for the player to exist, then heals them once per
-game session.
+A `mods\<name>` file that keeps the player at full health once they exist.
 
 ```
 var game = @Assembly("Assembly-CSharp")
 var SemiFunc = @Class(game.SemiFunc)
 
 var player = SemiFunc.PlayerAvatarGetFromSteamID("76561197960287930")
-if (@IsNull(player)) {
-    if (@IsFirstRun()) { @Log("waiting for the player...") }
-    @Reschedule(2000)
+if (@IsNull(player)) { @Exit("waiting for the player") }
+var health = player.playerHealth
+if (health.health < health.maxHealth) {
+    health.Heal(health.maxHealth - health.health, 0)
 }
-@LogClass(@ClassOf(player.playerHealth))
-player.playerHealth.Heal(99999999, 0)
-@Log("healed")
+@Exit("enabled")
 ```
 
 Note what it does before touching anything: names the assembly, resolves the class explicitly,
-checks the object exists instead of assuming it, and logs the class so the member names are
-confirmed rather than guessed.
+checks the object exists instead of assuming it, and only writes when the value is off, so a
+frame where nothing needs doing costs a comparison and no call into the game.

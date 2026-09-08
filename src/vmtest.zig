@@ -288,16 +288,6 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
     , "7: undefined identifier 't'");
 
     try Vm.testCode(dotnet_funcs,
-        \\if (@IsFirstRun()) {
-        \\    @Reschedule(500)
-        \\}
-        \\@Assert(@IsFirstRun() == 0)
-    );
-    try Vm.testBadCode(dotnet_funcs,
-        \\@Reschedule(0 - 1)
-    , "1: @Reschedule delay must be between 0 and 4294967295 milliseconds");
-
-    try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
         \\var ts = TimeSpan.FromSeconds(1)

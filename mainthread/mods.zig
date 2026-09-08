@@ -3,29 +3,26 @@ const global = struct {
     var queue: std.DoublyLinkedList = .{};
 
     // no need to lock list, only accessed by the main thread
-    var scheduled_list: std.DoublyLinkedList = .{};
     var mod_list: std.DoublyLinkedList = .{};
 };
-
-pub const scheduled_prefix = "scheduled-";
 
 pub fn mutinyThreadQueueUpdate(name: ModNameSlice, content: []const u8) error{OutOfMemory}!void {
     const text = try alloc.general().dupe(u8, content);
     errdefer alloc.general().free(text);
-    queue(try ScheduledMod.create(name, text));
+    queue(try ModEvent.create(name, text));
 }
 
 pub fn mutinyThreadQueueRemove(name: ModNameSlice) error{OutOfMemory}!void {
-    queue(try ScheduledMod.create(name, null));
+    queue(try ModEvent.create(name, null));
 }
 
-fn queue(mod: *ScheduledMod) void {
+fn queue(event: *ModEvent) void {
     global.queue_mutex.lock();
     defer global.queue_mutex.unlock();
-    global.queue.append(&mod.list_node);
+    global.queue.append(&event.list_node);
 }
 
-fn stealUpdate() ?*ScheduledMod {
+fn stealUpdate() ?*ModEvent {
     global.queue_mutex.lock();
     defer global.queue_mutex.unlock();
     const node = global.queue.first orelse return null;
@@ -43,39 +40,10 @@ fn find(comptime T: type, list: *const std.DoublyLinkedList, mod_name: []const u
 }
 
 pub fn applyUpdates(dotnet_funcs: *const dotnet.Funcs) void {
-    while (stealUpdate()) |update| {
-        if (std.mem.startsWith(u8, update.name.slice(), scheduled_prefix)) {
-            applyScheduledModEvent(update);
-        } else {
-            applyModEvent(dotnet_funcs, update);
-        }
-    }
+    while (stealUpdate()) |update| applyModEvent(dotnet_funcs, update);
 }
 
-fn applyScheduledModEvent(update: *ScheduledMod) void {
-    const existing = find(ScheduledMod, &global.scheduled_list, update.name.slice());
-    if (update.text) |new_text| {
-        if (existing) |old_mod| {
-            std.log.info(
-                "scheduled mod '{s}' updated ({} to {} bytes)",
-                .{ old_mod.name.slice(), old_mod.text.?.len, new_text.len },
-            );
-            global.scheduled_list.remove(&old_mod.list_node);
-            old_mod.destroy();
-        } else {
-            std.log.info("scheduled mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
-        }
-        global.scheduled_list.append(&update.list_node);
-    } else {
-        defer update.destroy();
-        const mod = existing orelse std.debug.panic("remove for unknown scheduled mod '{s}'", .{update.name.slice()});
-        std.log.info("deleting scheduled mod '{s}'", .{mod.name.slice()});
-        global.scheduled_list.remove(&mod.list_node);
-        mod.destroy();
-    }
-}
-
-fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ScheduledMod) void {
+fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ModEvent) void {
     defer update.destroy();
     const existing = find(Mod, &global.mod_list, update.name.slice());
     if (update.text) |new_text| {
@@ -105,27 +73,6 @@ fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ScheduledMod) void 
     }
 }
 
-pub const ScheduledIterator = struct {
-    node: ?*std.DoublyLinkedList.Node,
-    pub fn next(it: *ScheduledIterator, now: std.time.Instant) ?*ScheduledMod {
-        while (it.node) |node| {
-            it.node = node.next;
-            const mod: *ScheduledMod = @fieldParentPtr("list_node", node);
-            switch (mod.run) {
-                .pending => {},
-                .done => continue,
-                .reschedule => |reschedule| if (!reschedule.isDue(now)) continue,
-            }
-            mod.run = .done;
-            return mod;
-        }
-        return null;
-    }
-};
-pub fn scheduledIterator() ScheduledIterator {
-    return .{ .node = global.scheduled_list.first };
-}
-
 pub const ModIterator = struct {
     node: ?*std.DoublyLinkedList.Node,
     pub fn next(it: *ModIterator) ?*Mod {
@@ -144,22 +91,6 @@ pub fn modIterator() ModIterator {
     return .{ .node = global.mod_list.first };
 }
 
-pub fn nextRescheduleMs(now: std.time.Instant) ?u32 {
-    var earliest: ?u32 = null;
-    var maybe_node = global.scheduled_list.first;
-    while (maybe_node) |node| : (maybe_node = node.next) {
-        const mod: *ScheduledMod = @fieldParentPtr("list_node", node);
-        switch (mod.run) {
-            .pending, .done => {},
-            .reschedule => |reschedule| {
-                const remaining = reschedule.remainingMs(now);
-                earliest = @min(earliest orelse remaining, remaining);
-            },
-        }
-    }
-    return earliest;
-}
-
 const std = @import("std");
 const mutiny = @import("mutiny");
 
@@ -167,7 +98,7 @@ const alloc = @import("alloc.zig");
 const dotnet = mutiny.dotnet;
 const mainthread = @import("mainthread.zig");
 
-const ScheduledMod = @import("ScheduledMod.zig");
+const ModEvent = @import("ModEvent.zig");
 const Mod = @import("Mod.zig");
 const ModNameSlice = @import("ModNameSlice.zig");
 const Mutex = mainthread.Mutex;

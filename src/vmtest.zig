@@ -21,7 +21,12 @@ fn testIl2cppUpdate(funcs: *const dotnet.Funcs) !void {
         return error.SubclassUpdateThrew;
     }
     if (!@import("root").testMutinyUpdateCalled(cursor)) return error.SubclassUpdateNotInvoked;
-    std.log.info("il2cpp synthetic subclass: Update reached the invoker and onUpdate", .{});
+    const gui = funcs.class_get_method_from_name(sub_class, "OnGUI", 0) orelse return error.SubclassGuiNotFound;
+    const gui_cursor = @import("root").testMutinyGuiCursor();
+    _ = funcs.runtime_invoke(gui, null, null, &exception);
+    if (exception != null) return error.SubclassGuiThrew;
+    if (!@import("root").testMutinyGuiCalled(gui_cursor)) return error.SubclassGuiNotInvoked;
+    std.log.info("il2cpp synthetic subclass: Update and OnGUI reached the invoker and the root hooks", .{});
 }
 
 fn testMonoUpdate(funcs: *const dotnet.Funcs) !void {
@@ -36,7 +41,15 @@ fn testMonoUpdate(funcs: *const dotnet.Funcs) !void {
         return error.TickerUpdateThrew;
     }
     if (!@import("root").testMutinyUpdateCalled(cursor)) return error.TickerUpdateNotInvoked;
-    std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, Ticker.Update reached the OnUpdate internal call", .{});
+    const gui = funcs.class_get_method_from_name(ticker, "OnGUI", 0) orelse return error.TickerGuiNotFound;
+    const gui_cursor = @import("root").testMutinyGuiCursor();
+    _ = funcs.runtime_invoke(gui, ticker_instance, null, &exception);
+    if (exception) |e| {
+        std.log.err("Ticker.OnGUI threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
+        return error.TickerGuiThrew;
+    }
+    if (!@import("root").testMutinyGuiCalled(gui_cursor)) return error.TickerGuiNotInvoked;
+    std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, Ticker.Update and OnGUI reached their internal calls", .{});
 }
 
 pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {

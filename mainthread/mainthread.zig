@@ -555,7 +555,7 @@ fn updateUpdateHook(
         },
         .mono_instantiate => |*hook| {
             mutinymono.instantiate(dotnet_funcs, hook.ticker) catch |err| switch (err) {
-                error.MissingAssembly, error.ManagedException => {
+                error.MissingAssembly => {
                     coalescedLog(
                         ?mutinymono.InstantiateError,
                         &hook.not_ready_logged,
@@ -706,56 +706,56 @@ pub fn onUpdate() callconv(.c) void {
     var it = mods.onUpdateIterator();
     while (it.next()) |mod| runUpdateMod(dotnet_funcs, mod);
 }
+pub fn onGui() callconv(.c) void {
+    const dotnet_funcs = switch (updateRuntime()) {
+        .ready => |funcs| funcs,
+        .unrecoverable_error, .not_ready => return,
+    };
+    unitygui.draw(dotnet_funcs);
+}
+
 fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
-    var text_buf: [1024]u8 = undefined;
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = mod.text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = .{ .update_result = &text_buf },
+        .out = .{ .update_result = &mod.status.buffer },
         .is_first_run = false,
     };
     defer vm.deinit();
     const name = mod.name.slice();
-    var text: []const u8 = undefined;
     const new_state: UpdateMod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
         .rerun_ms => .rerun_requested,
         .update_result => |result| blk: {
-            text = result;
+            std.debug.assert(result.ptr == &mod.status.buffer);
+            mod.status.len = @intCast(result.len);
             break :blk .{ .result = .{ .wyhash = std.hash.Wyhash.hash(0, result) } };
         },
         .err => |err| switch (err) {
             .vm_out => unreachable, // no writer
             else => blk: {
-                const ellipsis = "...";
-                text = std.fmt.bufPrint(
-                    text_buf[0 .. text_buf.len - ellipsis.len],
-                    "{f}",
-                    .{err.fmt(mod.text, dotnet_funcs)},
-                ) catch |e| switch (e) {
-                    error.NoSpaceLeft => truncated: {
-                        @memcpy(text_buf[text_buf.len - ellipsis.len ..], ellipsis);
-                        break :truncated &text_buf;
-                    },
-                };
+                mod.formatStatus("{f}", .{err.fmt(mod.text, dotnet_funcs)});
                 break :blk .{ .err = .{
-                    .error_wyhash = std.hash.Wyhash.hash(0, text),
+                    .error_wyhash = std.hash.Wyhash.hash(0, mod.status.slice()),
                 } };
             },
         },
     };
     if (!std.meta.eql(new_state, mod.state)) {
         switch (new_state) {
-            .ok => std.log.info("{s}: recovered", .{name}),
-            .result => std.log.info("{s}: {s}", .{ name, text }),
-            .err => std.log.err("{s}:{s}", .{ name, text }),
-            .rerun_requested => std.log.err(
-                "{s}: @Rerun is invalid in on-update mods",
-                .{name},
-            ),
+            .ok => {
+                std.log.info("{s}: recovered", .{name});
+                mod.formatStatus("enabled", .{});
+            },
+            .result => std.log.info("{s}: {s}", .{ name, mod.status.slice() }),
+            .err => std.log.err("{s}:{s}", .{ name, mod.status.slice() }),
+            .rerun_requested => {
+                std.log.err("{s}: @Rerun is invalid in on-update mods", .{name});
+                mod.formatStatus("error: @Rerun is invalid in on-update mods", .{});
+            },
         }
         mod.state = new_state;
         std.debug.assert(std.meta.eql(new_state, mod.state));
@@ -777,7 +777,7 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
         .not_ready => return .retry,
     };
 
-    mods.applyUpdates();
+    mods.applyUpdates(dotnet_funcs);
     const update_hook_retry = switch (updateUpdateHook(
         dotnet_funcs,
         global.runtime.ready.module,
@@ -951,6 +951,7 @@ const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
 const mods = @import("mods.zig");
+const unitygui = @import("unitygui.zig");
 const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
 

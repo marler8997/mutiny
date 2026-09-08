@@ -716,7 +716,8 @@ pub const global = struct {
     var selftest_class: ?SyntheticClass = null;
 
     var subclass_method: SyntheticMethod = undefined;
-    var subclass_methods: [1]*const dotnet.Method = undefined;
+    var subclass_gui_method: SyntheticMethod = undefined;
+    var subclass_methods: [2]*const dotnet.Method = undefined;
     var subclass_class: ?SyntheticClass = null;
     pub fn subclassClass() ?*const dotnet.Class {
         return if (subclass_class) |*sub| sub.class() else null;
@@ -892,6 +893,7 @@ pub fn selfTest(
 }
 
 const subclass_update_name = "Update";
+const subclass_gui_name = "OnGUI";
 
 const SubclassUpdate = *const fn (this: ?*anyopaque, method: *const dotnet.Method) callconv(.c) void;
 
@@ -899,6 +901,11 @@ fn subclassUpdate(this: ?*anyopaque, method: *const dotnet.Method) callconv(.c) 
     _ = this;
     _ = method;
     mutiny.options.onUpdate();
+}
+fn subclassGui(this: ?*anyopaque, method: *const dotnet.Method) callconv(.c) void {
+    _ = this;
+    _ = method;
+    mutiny.options.onGui();
 }
 fn subclassUpdateInvoke(
     method_pointer: MethodPointer,
@@ -996,6 +1003,7 @@ pub fn subclassSelfTest(
             if (std.mem.eql(u8, name, ".ctor")) continue;
             if (std.mem.eql(u8, name, ".cctor")) continue;
             if (std.mem.eql(u8, name, subclass_update_name)) continue;
+            if (std.mem.eql(u8, name, subclass_gui_name)) continue;
             break :blk m;
         }
         std.log.err("il2cpp synthetic subclass: MonoBehaviour exposed no method to inherit", .{});
@@ -1011,6 +1019,13 @@ pub fn subclassSelfTest(
         .invoker = &subclassUpdateInvoke,
         .parameters_count = 0,
     });
+    global.subclass_methods[1] = global.subclass_gui_method.init(layouts.method, .{
+        .name = subclass_gui_name,
+        .return_type = funcs.class_get_type(void_class),
+        .method_pointer = @ptrCast(&subclassGui),
+        .invoker = &subclassUpdateInvoke,
+        .parameters_count = 0,
+    });
     var sub = try SyntheticClass.buildSubclass(
         global.arena.allocator(),
         layouts.class,
@@ -1020,6 +1035,7 @@ pub fn subclassSelfTest(
     );
     const sub_class = sub.class();
     global.subclass_method.setKlass(layouts.method, sub_class);
+    global.subclass_gui_method.setKlass(layouts.method, sub_class);
 
     // real IsAssignableFrom reads the typeHierarchy we wrote: ours is-a MonoBehaviour, but not the
     // reverse, since ours is a distinct subclass rather than MonoBehaviour itself.
@@ -1028,6 +1044,8 @@ pub fn subclassSelfTest(
 
     const update = funcs.class_get_method_from_name(sub_class, subclass_update_name, 0) orelse return error.SubclassMethodNotFound;
     if (update != global.subclass_methods[0]) return error.SubclassFoundWrongMethod;
+    const gui = funcs.class_get_method_from_name(sub_class, subclass_gui_name, 0) orelse return error.SubclassMethodNotFound;
+    if (gui != global.subclass_methods[1]) return error.SubclassFoundWrongMethod;
     const found_inherited = funcs.class_get_method_from_name(sub_class, inherited_name, inherited_params) orelse return error.InheritedMethodNotFound;
     if (found_inherited != inherited) return error.InheritedMethodWrong;
 
@@ -1102,6 +1120,15 @@ pub fn instantiate(
         if (component_class == sub_class) " (ours)" else " (NOT ours)",
     });
     if (component_class != sub_class) return error.AddComponentWrongClass;
+
+    const behaviour_class = findClass(funcs, assemblies, "UnityEngine", "MonoBehaviour") orelse return error.MissingClass;
+    if (funcs.class_get_method_from_name(behaviour_class, "set_useGUILayout", 1)) |set_use_gui_layout| {
+        var value: bool = false;
+        var args = [_]*anyopaque{@ptrCast(&value)};
+        _ = try invoke(funcs, "MonoBehaviour.set_useGUILayout", set_use_gui_layout, component, @ptrCast(&args));
+    } else {
+        std.log.warn("MonoBehaviour.set_useGUILayout is missing, the GUI layout pass stays enabled", .{});
+    }
 }
 
 const builtin = @import("builtin");

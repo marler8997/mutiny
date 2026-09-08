@@ -17,6 +17,7 @@ pub const mutinyipc = @import("mutinyipc.zig");
 
 pub const Options = struct {
     onUpdate: fn () callconv(.c) void,
+    onGui: fn () callconv(.c) void,
 };
 
 const root = @import("root");

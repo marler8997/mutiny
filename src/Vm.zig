@@ -3453,10 +3453,7 @@ fn gchandleNew(
     object: *const dotnet.Object,
     maybe_tracker: ?*HandleTracker,
 ) dotnet.GcHandleV2 {
-    const handle: dotnet.GcHandleV2 = switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_new(object, 0),
-        .il2cpp => |*il2cpp| il2cpp.gchandle_new(object, 0).toV2(),
-    };
+    const handle = dotnet_funcs.gchandle_new(object, false);
     gchandlelog.info("new  {*} {}", .{ object, handle });
     if (handle == .null) {
         std.log.err("NULL HANDLE?!? from ptr {*}", .{object});
@@ -3465,10 +3462,7 @@ fn gchandleNew(
 
     const sanity_check = true;
     if (sanity_check) {
-        const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-            .mono => |*mono| mono.gchandle_get_target(handle),
-            .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
-        };
+        const target = dotnet_funcs.gchandle_get_target(handle);
         std.debug.assert(target != null);
         // if (target == object) {
         //     std.log.info("  --> target object still matches", .{});
@@ -3488,17 +3482,11 @@ fn gchandleFree(
     std.debug.assert(handle != .null);
     if (maybe_tracker) |tracker| tracker.untrack(handle);
     {
-        const target: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-            .mono => |*mono| mono.gchandle_get_target(handle),
-            .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
-        };
+        const target = dotnet_funcs.gchandle_get_target(handle);
         std.debug.assert(target != null);
         // gchandlelog.info("    --> free target is {*}", .{target.?});
     }
-    switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_free(handle),
-        .il2cpp => |*il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
-    }
+    dotnet_funcs.gchandle_free(handle);
 }
 fn gchandleTarget(
     dotnet_funcs: *const dotnet.Funcs,
@@ -3506,10 +3494,7 @@ fn gchandleTarget(
     maybe_tracker: ?*HandleTracker,
 ) *const dotnet.Object {
     if (maybe_tracker) |tracker| tracker.assertLive(handle);
-    const obj: ?*const dotnet.Object = switch (dotnet_funcs.kind) {
-        .mono => |*mono| mono.gchandle_get_target(handle),
-        .il2cpp => |*il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
-    };
+    const obj = dotnet_funcs.gchandle_get_target(handle);
     std.debug.assert(obj != null);
     gchandlelog.info("get_target {} > {*}", .{ handle, obj.? });
     return obj.?;
@@ -4853,7 +4838,7 @@ pub fn testUpdateMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect
     defer tracker_arena.deinit();
     var handle_tracker: HandleTracker = .{ .allocator = tracker_arena.allocator() };
     defer handle_tracker.deinit();
-    var result_buf: [1024]u8 = undefined;
+    var result_buf: [std.math.maxInt(u8)]u8 = undefined;
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
         .text = text,

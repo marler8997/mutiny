@@ -139,7 +139,10 @@ fn writeStackTrace(
     try writer.flush();
 }
 
-pub const mutiny_options: mainthread.Options = .{ .onUpdate = mainthread.onUpdate };
+pub const mutiny_options: mainthread.Options = .{
+    .onUpdate = mainthread.onUpdate,
+    .onGui = mainthread.onGui,
+};
 
 pub const std_options: std.Options = .{
     .logFn = log,

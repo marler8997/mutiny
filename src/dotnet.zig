@@ -197,6 +197,24 @@ pub const Funcs = struct {
             .il2cpp => |il2cpp| il2cpp.class_is_enum(class),
         };
     }
+    pub fn gchandle_new(f: *const Funcs, object: *const Object, pinned: bool) GcHandleV2 {
+        return switch (f.kind) {
+            .mono => |*mono| mono.gchandle_new(object, @intFromBool(pinned)),
+            .il2cpp => |il2cpp| il2cpp.gchandle_new(object, @intFromBool(pinned)).toV2(),
+        };
+    }
+    pub fn gchandle_free(f: *const Funcs, handle: GcHandleV2) void {
+        switch (f.kind) {
+            .mono => |*mono| mono.gchandle_free(handle),
+            .il2cpp => |il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
+        }
+    }
+    pub fn gchandle_get_target(f: *const Funcs, handle: GcHandleV2) ?*const Object {
+        return switch (f.kind) {
+            .mono => |*mono| mono.gchandle_get_target(handle),
+            .il2cpp => |il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
+        };
+    }
     pub fn type_get_object(f: *const Funcs, t: *const Type) ?*const Object {
         return switch (f.kind) {
             .mono => |mono| mono.type_get_object(f.domain_get().?, t),

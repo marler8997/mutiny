@@ -2,6 +2,7 @@ pub const enable_mutiny_test_class = true;
 
 pub const mutiny_options: @import("mutiny.zig").Options = .{
     .onUpdate = onMutinyUpdate,
+    .onGui = onMutinyGui,
 };
 
 var mutiny_update_called: bool = false;
@@ -18,6 +19,21 @@ pub fn testMutinyUpdateCalled(cursor: UpdateCursor) bool {
 fn onMutinyUpdate() callconv(.c) void {
     std.debug.assert(!mutiny_update_called);
     mutiny_update_called = true;
+}
+var mutiny_gui_called: bool = false;
+const GuiCursor = struct {};
+pub fn testMutinyGuiCursor() GuiCursor {
+    std.debug.assert(!mutiny_gui_called);
+    return .{};
+}
+pub fn testMutinyGuiCalled(cursor: GuiCursor) bool {
+    _ = cursor;
+    return mutiny_gui_called;
+}
+
+fn onMutinyGui() callconv(.c) void {
+    std.debug.assert(!mutiny_gui_called);
+    mutiny_gui_called = true;
 }
 
 pub fn main() !void {

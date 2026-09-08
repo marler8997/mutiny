@@ -33,6 +33,8 @@ pub fn load(dotnet_funcs: *const dotnet.Funcs) LoadError!*const dotnet.Class {
     }
     const on_update: *const fn () callconv(.c) void = options.onUpdate;
     mono.add_internal_call("Mutiny.Ticker::OnUpdate", @ptrCast(on_update));
+    const on_gui: *const fn () callconv(.c) void = options.onGui;
+    mono.add_internal_call("Mutiny.Ticker::OnGui", @ptrCast(on_gui));
 
     return dotnet_funcs.class_from_name(image, "Mutiny", "Ticker") orelse {
         std.log.err("MutinyMono.dll has no Mutiny.Ticker class", .{});
@@ -77,6 +79,15 @@ pub fn instantiate(funcs: *const dotnet.Funcs, ticker: *const dotnet.Class) Inst
         if (component_class == ticker) " (ours)" else " (NOT ours)",
     });
     if (component_class != ticker) return error.AddComponentWrongClass;
+
+    const behaviour_class = findClass(funcs, core, "UnityEngine", "MonoBehaviour") orelse return error.MissingClass;
+    if (funcs.class_get_method_from_name(behaviour_class, "set_useGUILayout", 1)) |set_use_gui_layout| {
+        var value: bool = false;
+        var args = [_]*anyopaque{@ptrCast(&value)};
+        _ = try invoke(funcs, "MonoBehaviour.set_useGUILayout", set_use_gui_layout, component, @ptrCast(&args));
+    } else {
+        std.log.warn("MonoBehaviour.set_useGUILayout is missing, the GUI layout pass stays enabled", .{});
+    }
 }
 
 fn findClass(funcs: *const dotnet.Funcs, image: *const dotnet.Image, namespace: [*:0]const u8, name: [*:0]const u8) ?*const dotnet.Class {

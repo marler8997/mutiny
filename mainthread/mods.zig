@@ -42,10 +42,10 @@ fn find(comptime T: type, list: *const std.DoublyLinkedList, mod_name: []const u
     return null;
 }
 
-pub fn applyUpdates() void {
+pub fn applyUpdates(dotnet_funcs: *const dotnet.Funcs) void {
     while (stealUpdate()) |update| {
         if (std.mem.startsWith(u8, update.name.slice(), on_update_prefix)) {
-            applyUpdateModEvent(update);
+            applyUpdateModEvent(dotnet_funcs, update);
         } else {
             applyModEvent(update);
         }
@@ -75,7 +75,7 @@ fn applyModEvent(update: *Mod) void {
     }
 }
 
-fn applyUpdateModEvent(update: *Mod) void {
+fn applyUpdateModEvent(dotnet_funcs: *const dotnet.Funcs, update: *Mod) void {
     defer update.destroy();
     const existing = find(UpdateMod, &global.on_update_list, update.name.slice());
     if (update.text) |new_text| {
@@ -92,7 +92,7 @@ fn applyUpdateModEvent(update: *Mod) void {
                 .{ old_mod.name.slice(), old_mod.text.len, new_text.len },
             );
             global.on_update_list.remove(&old_mod.list_node);
-            old_mod.destroy();
+            old_mod.destroy(dotnet_funcs);
         } else {
             std.log.info("update mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
         }
@@ -101,7 +101,7 @@ fn applyUpdateModEvent(update: *Mod) void {
         const mod = existing orelse std.debug.panic("remove for unknown update mod '{s}'", .{update.name.slice()});
         std.log.info("deleting update mod '{s}'", .{mod.name.slice()});
         global.on_update_list.remove(&mod.list_node);
-        mod.destroy();
+        mod.destroy(dotnet_funcs);
     }
 }
 
@@ -161,9 +161,12 @@ pub fn nextRerunMs(now: std.time.Instant) ?u32 {
 }
 
 const std = @import("std");
-const mainthread = @import("mainthread.zig");
+const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
+const dotnet = mutiny.dotnet;
+const mainthread = @import("mainthread.zig");
+
 const Mod = @import("Mod.zig");
 const UpdateMod = @import("UpdateMod.zig");
 const ModNameSlice = @import("ModNameSlice.zig");

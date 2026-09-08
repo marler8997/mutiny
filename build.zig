@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
         "mutiny-agent.md",
     ).step);
 
-    {
+    const install_appdata = blk: {
         const tool = b.addExecutable(.{
             .name = "installappdata",
             .root_module = b.createModule(.{
@@ -124,7 +124,8 @@ pub fn build(b: *std.Build) void {
             "install-appdata",
             "install this build to %LOCALAPPDATA%\\mutiny",
         ).dependOn(&run.step);
-    }
+        break :blk run;
+    };
 
     const install_mutiny_native_dll = b.addInstallArtifact(mutiny_native_dll, .{
         .dest_dir = .{ .override = .{ .custom = "appdata/dll" } },
@@ -270,26 +271,42 @@ pub fn build(b: *std.Build) void {
     }
 
     for (test_games) |game| {
-        const game_dir = b.fmt("{s}\\{s}", .{ steam_common, game.dir });
+        const game_dir = b.fmt("{s}\\{s}", .{ steam_common, game.steam_dir });
         const dotnet_test = b.addRunArtifact(dotnet_test_exe);
         dotnet_test.step.dependOn(&install_dotnet_test.step);
         switch (game.runtime) {
             .mono => {
                 dotnet_test.addArg(b.fmt("{s}\\MonoBleedingEdge\\EmbedRuntime\\mono-2.0-bdwgc.dll", .{game_dir}));
                 dotnet_test.addArg("--assembly-path");
-                dotnet_test.addArg(b.fmt("{s}\\{s}\\Managed", .{ game_dir, game.data }));
+                dotnet_test.addArg(b.fmt("{s}\\{s}_Data\\Managed", .{ game_dir, game.name }));
             },
             .il2cpp => {
                 dotnet_test.addArg(b.fmt("{s}\\GameAssembly.dll", .{game_dir}));
                 dotnet_test.addArg("--data-dir");
-                dotnet_test.addArg(b.fmt("{s}\\{s}\\il2cpp_data", .{ game_dir, game.data }));
+                dotnet_test.addArg(b.fmt("{s}\\{s}_Data\\il2cpp_data", .{ game_dir, game.name }));
             },
         }
         b.step(
             b.fmt("test-{s}", .{game.step}),
-            b.fmt("run dotnet-test against {s}'s {t} runtime{s}", .{ game.dir, game.runtime, game.note }),
+            b.fmt(
+                "run dotnet-test against {s}'s {t} runtime{s}",
+                .{ game.name, game.runtime, game.note },
+            ),
         ).dependOn(&dotnet_test.step);
         test_step.dependOn(&dotnet_test.step);
+
+        if (b.graph.env_map.get("LOCALAPPDATA")) |localappdata| {
+            const start = b.addSystemCommand(&.{
+                b.fmt("{s}\\mutiny\\bin\\mutiny.exe", .{localappdata}),
+                "start",
+                b.fmt("{s}\\{s}.exe", .{ game_dir, game.name }),
+            });
+            start.step.dependOn(&install_appdata.step);
+            b.step(
+                b.fmt("start-{s}", .{game.step}),
+                b.fmt("install-appdata, then start {s} with Mutiny.dll injected", .{game.name}),
+            ).dependOn(&start.step);
+        }
     }
 
     {
@@ -316,16 +333,29 @@ pub fn build(b: *std.Build) void {
 
 const steam_common = "C:\\Program Files (x86)\\Steam\\steamapps\\common";
 const TestGame = struct {
+    // the exe name without ".exe", the one identity everything else derives from: Unity
+    // puts the game's data in "<name>_Data", and mutiny keeps the game's log and mods in
+    // %LOCALAPPDATA%\mutiny\app\<name>
+    name: []const u8,
+    // the suffix of the "test-<step>" and "start-<step>" build steps
     step: []const u8,
-    dir: []const u8,
-    data: []const u8,
+    // the game's directory under steamapps\common, which is Steam's name for it and can
+    // differ from the exe name ("Outer Wilds" vs OuterWilds.exe)
+    steam_dir: []const u8,
     runtime: enum { mono, il2cpp },
+    // appended to the test step's description
     note: []const u8 = "",
 };
 const test_games = [_]TestGame{
-    .{ .step = "peak", .dir = "PEAK", .data = "PEAK_Data", .runtime = .mono },
-    .{ .step = "outerwilds", .dir = "Outer Wilds", .data = "OuterWilds_Data", .runtime = .mono, .note = " (Unity 2019, V1 gchandle API)" },
-    .{ .step = "schedule1", .dir = "Schedule I", .data = "Schedule I_Data", .runtime = .il2cpp },
+    .{ .name = "PEAK", .step = "peak", .steam_dir = "PEAK", .runtime = .mono },
+    .{
+        .name = "OuterWilds",
+        .step = "outerwilds",
+        .steam_dir = "Outer Wilds",
+        .runtime = .mono,
+        .note = " (Unity 2019, V1 gchandle API)",
+    },
+    .{ .name = "Schedule I", .step = "schedule1", .steam_dir = "Schedule I", .runtime = .il2cpp },
 };
 
 fn createZydisModule(

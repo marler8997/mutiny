@@ -29,6 +29,9 @@ PrimaryTypeExpr
     / LPAREN Expr RPAREN
     / NUMBER
     / STRINGLITERAL
+    / EnumLiteral
+
+EnumLiteral <- DOT IDENTIFIER
 
 ArgList <- LPAREN (Expr COMMA)* Expr? RPAREN
 

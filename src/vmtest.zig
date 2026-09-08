@@ -125,24 +125,35 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
             \\@Assert(Test.Overload(5) == 1)
             \\@Assert(Test.Overload("x") == 2)
             \\@Assert(Test.Overload(1.5) == 3)
-            \\@Assert(Test.EchoEnum(3) == 3)
-            \\@Assert(Test.EchoEnum(0) == 0)
-            \\@Assert(Test.EchoEnum(6) == 6)
         );
         try Vm.testBadCode(dotnet_funcs,
             \\var Test = @TestClass()
-            \\@Discard(Test.EchoEnum(7))
-        , "2: 7 is not a defined value of enum 'DayOfWeek'");
-        try Vm.testBadCode(dotnet_funcs,
-            \\var Test = @TestClass()
-            \\@Discard(Test.EchoEnum(0 - 1))
-        , "2: -1 is not a defined value of enum 'DayOfWeek'");
-        try Vm.testBadCode(dotnet_funcs,
-            \\var Test = @TestClass()
-            \\@Discard(Test.OverloadIntEnum(3))
+            \\@Discard(Test.EchoEnum(3))
         , switch (dotnet_funcs.kind) {
-            .mono => "2: ambiguous overloads for OverloadIntEnum(integer) on class 'Test', candidates: OverloadIntEnum(i4) OverloadIntEnum(DayOfWeek)",
-            .il2cpp => "2: ambiguous overloads for OverloadIntEnum(integer) on class 'Object', candidates: OverloadIntEnum(i4) OverloadIntEnum(DayOfWeek)",
+            .mono => "2: no overload matches for EchoEnum(integer) on class 'Test', candidates: EchoEnum(DayOfWeek)",
+            .il2cpp => "2: no overload matches for EchoEnum(integer) on class 'Object', candidates: EchoEnum(DayOfWeek)",
+        });
+        try Vm.testCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Assert(Test.OverloadIntEnum(3) == 1)
+            \\@Assert(Test.OverloadIntEnum(.Wednesday) == 2)
+            \\@Assert(Test.EchoEnum(.Sunday) == 0)
+            \\@Assert(Test.EchoEnum(.Wednesday) == 3)
+            \\@Assert(Test.EchoEnum(.Saturday) == 6)
+            \\var day = .Thursday
+            \\@Assert(Test.EchoEnum(day) == 4)
+            \\@Log("day is ", day)
+        );
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.EchoEnum(.Funday))
+        , "2: enum 'DayOfWeek' has no member 'Funday'");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.EchoI32(.Monday))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: no overload matches for EchoI32(enum_literal) on class 'Test', candidates: EchoI32(i4)",
+            .il2cpp => "2: no overload matches for EchoI32(enum_literal) on class 'Object', candidates: EchoI32(i4)",
         });
         try Vm.testBadCode(dotnet_funcs,
             \\var Test = @TestClass()

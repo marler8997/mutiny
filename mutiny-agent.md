@@ -109,6 +109,9 @@ loop
 continue                    // `continue` jumps back to `loop`; it ENDS the loop body
 
 fn name(a, b) { @Log(a) }   // functions
+
+Input.GetKeyDown(.Space)    // enum literal: `.Name`, resolved against the parameter's enum
+var key = .Space            // it can be stored; it only becomes a value when passed to .NET
 ```
 
 Things that will surprise you:
@@ -170,6 +173,9 @@ PrimaryTypeExpr
     / LPAREN Expr RPAREN
     / NUMBER
     / STRINGLITERAL
+    / EnumLiteral
+
+EnumLiteral <- DOT IDENTIFIER
 
 ArgList <- LPAREN (Expr COMMA)* Expr? RPAREN
 
@@ -230,9 +236,15 @@ with `run-script`.
 
 These are not style advice. Each one is a way to take the game down.
 
-1. **Methods are resolved by name and argument COUNT only - never by type.** Mutiny does not check
-   that your arguments match the parameters. Passing the wrong types is not an error; it is
-   silent memory corruption followed by a crash later.
+1. **Overloads are chosen by the kinds of your arguments, strictly.** A method is looked up by
+   name and argument count, then every candidate is checked against what you passed: an integer
+   fits an integer parameter, a float a `float`/`double`, a string a `string`, an enum literal
+   an enum. Exactly one candidate must fit; none is an error that lists the candidates and their
+   parameter types, and *two* fitting is an "ambiguous overloads" error rather than a guess -
+   `Foo(int)` next to `Foo(long)` cannot be called with an integer literal today. An integer is
+   also accepted by a `float`/`double` parameter, but only when no exact candidate exists.
+   An enum parameter takes an enum literal only: `GetKeyDown(.Space)`, never `GetKeyDown(32)`.
+   Objects cannot be passed as arguments yet.
 
 2. **Argument values are checked against the declared parameter type.** `float`, `double`, and
    every integer width convert correctly, and a value that doesn't fit stops the script with a
@@ -240,6 +252,10 @@ These are not style advice. Each one is a way to take the game down.
    `short` tells you so rather than quietly becoming 4464. The game is unaffected either way, so
    this is a safe thing to hit and correct. `Heal(100)` and `Heal(87.5)` on a `Heal(float)` both
    work.
+
+   **Enums**: write them as `.Name` (`Input.GetKeyDown(.Space)`); an unknown name is an error
+   naming the enum, and an integer is not accepted at all. (`[Flags]` combinations cannot be
+   written yet.)
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
    script runs. Check with `@IsNull` / `@NotNull`; in a mod, `@Rerun(2000)` to try again later,

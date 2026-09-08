@@ -83,6 +83,7 @@ const Type = enum {
     integer,
     float,
     string_literal,
+    enum_literal,
     managed_string,
     script_function,
     null_assembly,
@@ -103,6 +104,7 @@ const Type = enum {
             .integer => "an integer",
             .float => "a float",
             .string_literal => "a string literal",
+            .enum_literal => "an enum literal",
             // .c_string => "a string",
             .managed_string => "a managed string",
             .script_function => "a function",
@@ -122,6 +124,7 @@ const Type = enum {
             .integer => true,
             .float => true,
             .string_literal => true,
+            .enum_literal => true,
             .managed_string => true,
             // to send a function like a callback, I think we'll want some
             // sort of @CompileFunction() builtin or something so we
@@ -950,6 +953,7 @@ fn evalExprSuffix(
                 .integer,
                 .float,
                 .string_literal,
+                .enum_literal,
                 // .c_string,
                 .managed_string,
                 .script_function,
@@ -1202,13 +1206,6 @@ fn callMethod(
                             .value = .{ .integer = i },
                             .target = target,
                         } });
-                        if (paramEnum(vm.dotnet_funcs, paramType(vm.dotnet_funcs, method, arg_index).?)) |enum_class| {
-                            if (!vm.enumDefinesValue(enum_class, i)) return vm.setError(.{ .undefined_enum_value = .{
-                                .pos = after_lparen,
-                                .class = enum_class,
-                                .value = i,
-                            } });
-                        }
                         break :blk vm.mem.toPointer(i64, value_addr);
                     },
                 }
@@ -1231,6 +1228,16 @@ fn callMethod(
             .managed_string => |handle| {
                 const str = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
                 break :blk @constCast(str);
+            },
+            .enum_literal => |extent| {
+                const enum_class = paramEnum(vm.dotnet_funcs, paramType(vm.dotnet_funcs, method, arg_index).?) orelse unreachable;
+                const name = vm.text[extent.start..extent.end];
+                const value = vm.enumMemberValue(enum_class, name) orelse return vm.setError(.{ .undefined_enum_member = .{
+                    .extent = extent,
+                    .class = enum_class,
+                } });
+                managed_arg_storage[arg_index] = .{ .i8 = value };
+                break :blk managed_arg_storage[arg_index].getPtr();
             },
             else => |a| {
                 std.log.info("TODO: implement converting '{t}' to managed arg", .{a});
@@ -1572,6 +1579,11 @@ fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
             const token_start_ptr = vm.mem.toPointer(usize, value_addr);
             (try vm.push(usize)).* = token_start_ptr.*;
         },
+        .enum_literal => {
+            (try vm.push(Type)).* = .enum_literal;
+            const token_start_ptr = vm.mem.toPointer(usize, value_addr);
+            (try vm.push(usize)).* = token_start_ptr.*;
+        },
         .managed_string => {
             // NOTE: we could make a new type that doesn't create a new GC handle and
             //       just relies on the value higher up in the stack to keep it alive
@@ -1654,6 +1666,16 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             (try vm.push(Type)).* = .string_literal;
             (try vm.push(usize)).* = first_token.start;
             return first_token.end;
+        },
+        .period => {
+            const id_token = lex(vm.text, first_token.end);
+            if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
+                .expected = "an identifier after '.' to form an enum literal",
+                .token = id_token,
+            } });
+            (try vm.push(Type)).* = .enum_literal;
+            (try vm.push(usize)).* = id_token.start;
+            return id_token.end;
         },
         .builtin => {
             const id = vm.text[first_token.start..first_token.end];
@@ -2274,6 +2296,7 @@ fn logValues(
                 .integer => |i| try writer.print("{d}", .{i}),
                 .float => |f| try writer.print("{d}", .{f}),
                 .string_literal => |e| try writer.print("{s}", .{vm.text[e.start + 1 .. e.end - 1]}),
+                .enum_literal => |e| try writer.print(".{s}", .{vm.text[e.start..e.end]}),
                 .managed_string => |gc_handle| {
                     const str_obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
                     const str: *const dotnet.String = @ptrCast(str_obj);
@@ -2461,6 +2484,13 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
             std.debug.assert(vm.text[token.end - 1] == '"');
             return .{ .{ .string_literal = token.extent() }, end };
         },
+        .enum_literal => {
+            const start, const end = vm.readValue(usize, addr);
+            const token = lex(vm.text, start);
+            std.debug.assert(token.start == start);
+            std.debug.assert(token.tag == .identifier);
+            return .{ .{ .enum_literal = token.extent() }, end };
+        },
         // .c_string => {
         //     const ptr, const end = vm.readValue([*:0]const u8, addr);
         //     return .{ .{ .c_string = ptr }, end };
@@ -2549,6 +2579,7 @@ const Value = union(enum) {
     integer: i64,
     float: f64,
     string_literal: Extent,
+    enum_literal: Extent,
     // c_string: [*:0]const u8,
     managed_string: dotnet.GcHandleV2,
     script_function: usize,
@@ -2575,6 +2606,7 @@ const Value = union(enum) {
             .integer => {},
             .float => {},
             .string_literal => {},
+            .enum_literal => {},
             .managed_string => |handle| gchandleFree(dotnet_funcs, handle, maybe_tracker),
             .script_function => {},
             .null_assembly => {},
@@ -2594,6 +2626,7 @@ const Value = union(enum) {
             .integer => .integer,
             .float => .float,
             .string_literal => .string_literal,
+            .enum_literal => .enum_literal,
             // .c_string => .c_string,
             .managed_string => .managed_string,
             .script_function => .script_function,
@@ -2930,6 +2963,7 @@ const VmEat = struct {
             .string_literal,
             .number_literal,
             => return first_token.end,
+            .period => return try vm.eatToken(first_token.end, .identifier, "an identifier after '.' to form an enum literal"),
             .builtin => {
                 const after_l_paren = try vm.eatToken(first_token.end, .l_paren, "a '(' to start the if conditional");
                 return try vm.evalFnCallArgs(after_l_paren);
@@ -3012,12 +3046,14 @@ const ArgKind = enum {
     integer,
     float,
     string,
+    enum_literal,
     other,
     fn of(t: Type) ArgKind {
         return switch (t) {
             .integer => .integer,
             .float => .float,
             .string_literal, .managed_string => .string,
+            .enum_literal => .enum_literal,
             else => .other,
         };
     }
@@ -3030,7 +3066,10 @@ const Fit = enum {
     exact,
     convertible,
     no,
-    fn of(arg: ArgKind, param: dotnet.TypeKind) Fit {
+    fn of(funcs: *const dotnet.Funcs, arg: ArgKind, param_type: *const dotnet.Type) Fit {
+        const is_enum = paramEnum(funcs, param_type) != null;
+        if (is_enum) return if (arg == .enum_literal) .exact else .no;
+        const param = funcs.type_get_type(param_type);
         return switch (arg) {
             .integer => switch (param) {
                 .boolean, .char, .i1, .u1, .i2, .u2, .i4, .u4, .i8, .u8, .i, .u => .exact,
@@ -3042,6 +3081,7 @@ const Fit = enum {
                 else => .no,
             },
             .string => if (param == .string) .exact else .no,
+            .enum_literal => .no,
             .other => .no,
         };
     }
@@ -3050,13 +3090,27 @@ const Fit = enum {
 fn methodFit(funcs: *const dotnet.Funcs, method: *const dotnet.Method, arg_kinds: []const ArgKind) Fit {
     var fit: Fit = .exact;
     for (arg_kinds, 0..) |kind, i| {
-        switch (Fit.of(kind, paramTypeKind(funcs, method, i))) {
+        switch (Fit.of(funcs, kind, paramType(funcs, method, i).?)) {
             .exact => {},
             .convertible => fit = .convertible,
             .no => return .no,
         }
     }
     return fit;
+}
+
+fn enumMemberValue(vm: *Vm, enum_class: *const dotnet.Class, name: []const u8) ?i64 {
+    const base_kind = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.class_enum_basetype(enum_class));
+    var iterator: ?*anyopaque = null;
+    while (vm.dotnet_funcs.class_get_fields(enum_class, &iterator)) |field| {
+        const flags = vm.dotnet_funcs.field_get_flags(field);
+        if (!flags.static or !flags.literal) continue;
+        if (!std.mem.eql(u8, std.mem.span(vm.dotnet_funcs.field_get_name(field)), name)) continue;
+        var member = MarshalValue.initUndefined(base_kind) orelse return null;
+        vm.readStaticField(enum_class, field, &member);
+        return member.toI64();
+    }
+    return null;
 }
 
 fn resolveMethod(
@@ -3180,18 +3234,7 @@ fn readStaticField(vm: *Vm, class: *const dotnet.Class, field: *const dotnet.Cla
     }
 }
 
-fn enumDefinesValue(vm: *Vm, enum_class: *const dotnet.Class, value: i64) bool {
-    const base_kind = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.class_enum_basetype(enum_class));
-    var iterator: ?*anyopaque = null;
-    while (vm.dotnet_funcs.class_get_fields(enum_class, &iterator)) |field| {
-        const flags = vm.dotnet_funcs.field_get_flags(field);
-        if (!flags.static or !flags.literal) continue;
-        var member = MarshalValue.initUndefined(base_kind) orelse return false;
-        vm.readStaticField(enum_class, field, &member);
-        if (member.toI64() == value) return true;
-    }
-    return false;
-}
+
 
 fn integerFitsKind(value: i64, kind: dotnet.TypeKind) bool {
     return switch (kind) {
@@ -4096,10 +4139,9 @@ pub const Error = union(enum) {
         id_extent: Extent,
         arg_count: u16,
     },
-    undefined_enum_value: struct {
-        pos: usize,
+    undefined_enum_member: struct {
+        extent: Extent,
         class: *const dotnet.Class,
-        value: i64,
     },
     overload: struct {
         kind: enum { none_match, ambiguous },
@@ -4377,9 +4419,9 @@ const ErrorFmt = struct {
                     m.arg_count,
                 },
             ),
-            .undefined_enum_value => |e| try writer.print(
-                "{d}: {d} is not a defined value of enum '{s}'",
-                .{ getLineNum(f.text, e.pos), e.value, f.dotnet_funcs.class_get_name(e.class) },
+            .undefined_enum_member => |e| try writer.print(
+                "{d}: enum '{s}' has no member '{s}'",
+                .{ getLineNum(f.text, e.extent.start), f.dotnet_funcs.class_get_name(e.class), f.text[e.extent.start..e.extent.end] },
             ),
             .overload => |o| {
                 const name = f.text[o.id_extent.start..o.id_extent.end];

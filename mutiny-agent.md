@@ -41,31 +41,188 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 
 Which directory to use is decided by *lifetime*, not content - both hold the same language:
 
-- **A question** ("what's the player's health?") goes in `scripts\`. Run it with
-  `mutiny <PID> run-script <name>`; its output comes back on stdout.
-- **An effect that must persist** ("keep me at full health") goes in `mods\`. It starts running by
-  itself as soon as you write the file, and re-runs from the top every time you change the text.
+- **A question** ("what's the player's health?") or **a one-shot action** ("give me 1,000,000
+  money", "unlock the door") goes in `scripts\`. Run it with `mutiny <PID> run-script <name>`;
+  it runs exactly once, when asked, and its output comes back on stdout. A one-shot must not be
+  a mod: a mod file persists, so it would run again on every game start.
+- **An effect** ("keep me at full health", "unlimited jumps", "3x world speed") goes in `mods\`
+  as an **update mod**, `mods\on-update-<name>`. This is the default for anything a player asks
+  to *have*. See "Update mods" below.
+- **A normal mod**, `mods\<name>`, is "do this one thing, once, but it may have to wait for a
+  condition first": it runs when written and re-runs itself with `@Rerun(ms)` until the
+  condition holds, then does the thing. Because the file persists, it does that again at every
+  game start (and whenever its text changes), which suits setup that must happen each session
+  once the world exists - but not a one-shot that must happen only once, which is a script.
 
-Writing a file into `mods\` starts it immediately.
+Writing a file into `mods\` starts it immediately. Deleting it stops it; for an update mod,
+so does adding `@UpdateResult("disabled")` as its first line, which keeps the file and logs
+`disabled` once.
 
-A mod whose name starts with **`on-update-`** is an **update mod**: instead of running once when
-written, it runs from the top on every frame of the game, from inside Unity's `Update`. Use it
-for effects that must be re-applied continuously ("keep stamina full"). Rules that differ from
-a normal mod:
+## Update mods
 
-- Keep it short: it runs every frame, on the main thread, so its cost is paid every frame.
-- **`@Log` is an error in an update mod** - a line per frame would bury the log. Use
-  `@UpdateResult(...)` instead: same arguments as `@Log`, but it *ends this frame's run* with
-  that text as the frame's result, and the result only reaches the log when it **changes**. So
-  `@UpdateResult("health ", h)` logs once per distinct value, not once per frame - that is how
-  you debug an update mod.
-- `@Rerun` is an error (the next frame is the rerun). `@IsFirstRun()` is always 0. `@Exit` just
-  ends this frame's run.
-- Nothing survives between frames; state lives in the game, as with `@Rerun`.
-- An error does not stop it: it keeps running every frame, and errors are coalesced the same way
-  as results - logged when they first happen, again only if they change, and
-  `<name>: recovered` when a frame finishes cleanly again. So an update mod that fails until the
-  level has loaded is fine and needs no guard.
+An update mod runs from the top on **every frame of the game**, inside Unity's `Update`. That
+is all the mechanism is. One way to use it - and the one the examples below follow - is to
+check what exists, put the value where you want it, and report; written that way it behaves
+like an effect you have *added to the game* rather than a script you run:
+
+- it applies as soon as its target exists and re-applies after anything the game does to undo
+  it (a respawn, a scene load, a time-loop reset, the player picking up a new item), because
+  every frame starts over and puts the value back;
+- it needs no waiting logic - a frame where the target is missing just reports and the next
+  frame looks again;
+- its status reaches the log only when it **changes**, so the log reads like an event history,
+  not a trace;
+- it is on while the file exists; to turn it off, add `@UpdateResult("disabled")` as its first
+  line, or delete the file. Nothing to manage.
+
+Here's an example of an update mod for "infinit stamina" in the game PEAK:
+
+```
+var game = @Assembly("Assembly-CSharp")
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @UpdateResult("no character") }
+var me = Character.localCharacter
+me.data.set_currentStamina(me.GetMaxStamina())
+@UpdateResult("enabled")
+```
+
+When this is written to "mods/on-update-stamina", here's what it can look like in the log:
+
+```
+13:54:46.239|98308|107484|PEAK|info|update mod 'on-update-stamina' loaded (266 bytes)
+13:55:01.418|98308|107484|PEAK|info|on-update-stamina: no character
+13:55:01.799|98308|107484|PEAK|info|on-update-stamina: enabled
+```
+
+Rules that differ from a normal mod:
+
+- **`@Log` is an error** - a line per frame would bury the log. `@UpdateResult(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's.
+- **Result text should be stable unless you want something in the log.** `@UpdateResult("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
+- `@Rerun` is an error (the next frame is the rerun). `@IsFirstRun()` is always 0. `@Exit` ends the frame silently.
+- Nothing survives between frames; state lives in the game.
+- **An error never stops it.** The error is logged once just like `@UpdateResult()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@UpdateResult` is better, because it names the state instead of showing an error.
+- Keep it short: its cost is paid every frame, on the main thread.
+
+### Examples
+
+Real update mods from three games, as written. They show the shape; they are not rules. Note
+that none of them puts its own name in an `@UpdateResult`: the log prefixes every result with
+the mod's name already.
+
+PEAK, fly - an update mod sees every frame, so "while the button is held" is an `if` on the
+input state; the result carries the one thing the player has to know:
+
+```
+var jumpImpulse = 1080
+
+var game = @Assembly("Assembly-CSharp")
+var Character = @Class(game.Character)
+var CharacterInput = @Class(game.CharacterInput)
+if (Character.get_localCharacterExists() == 0) { @UpdateResult("no character") }
+var me = Character.localCharacter
+var d = me.data
+var a = me.refs.afflictions
+var mv = me.refs.movement
+
+// 0. jump strength
+set mv.jumpImpulse = jumpImpulse
+
+// 1. unlimited air jumps
+set a.totalExtraJumps = 999999
+set d.extraJumps = 999999
+
+// 2. auto-jump while held
+if (CharacterInput.action_jump.IsPressed() == 1) {
+    set d.isJumping = 0
+    set d.sinceJump = 10
+    mv.TryToJump()
+}
+@UpdateResult("enabled: hold jump to fly")
+```
+
+Outer Wilds, jetpack - the knobs are `var`s at the top with the game's defaults noted; the
+player edits a number and saves, and the changed file reloads the mod:
+
+```
+// transThrust: thrust while holding the jetpack   (game default = 6)
+// boostThrust: the boost burst                    (game default = 23)
+var transThrust = 18
+var boostThrust = 70
+
+var game = @Assembly("Assembly-CSharp")
+var Locator = @Class(game.Locator)
+var ctrl = Locator.GetPlayerController()
+if (@IsNull(ctrl)) { @UpdateResult("waiting for player") }
+
+var jet = ctrl._jetpackModel
+if (@IsNull(jet)) { @UpdateResult("waiting for jetpack") }
+
+set jet._maxTranslationalThrust = transThrust
+set jet._boostThrust = boostThrust
+
+@UpdateResult("enabled")
+```
+
+Outer Wilds, world speed - the mod's own header explains why it skips frames where
+`timeScale` is 0:
+
+```
+// === TIME LORD === (update mod: runs every frame)
+// World-speed dial for the whole physics-simulated solar system.
+// EDIT `speed` below, then SAVE.  1 = normal, 2-10 = fast-forward, 0.2 = slow-mo.
+//
+// It SKIPS when timeScale is 0, so the pause menu still works and you no longer
+// have to re-save after pausing (the old normal-mod version needed that).
+// To turn off: delete this file, or set speed = 1 and save.
+
+var speed = 1
+
+var core = @Assembly("UnityEngine.CoreModule")
+var Time = @Class(core.UnityEngine.Time)
+var cur = Time.get_timeScale()
+
+// leave 0 alone (that is the pause menu); otherwise hold it at `speed`
+if (cur != 0) { Time.set_timeScale(speed) }
+
+@UpdateResult("enabled")
+```
+
+Outer Wilds, god mode - the header says what it does, what it does not, and what stays
+behind when it is turned off:
+
+```
+// === GOD MODE === (update mod: runs every frame, survives time-loop resets)
+//   1. Invincibility   - no damage / impact / suffocation death
+//   2. Infinite fuel   - jetpack never runs dry
+//   3. Infinite oxygen - never suffocate
+//   4. Infinite boost  - the jetpack boost meter never drains
+//
+// Does NOT stop scripted deaths (sun, black hole) or the ~22-min supernova reset.
+// To turn off: delete this file. (Invincibility flag clears on the next loop reset.)
+
+
+var game = @Assembly("Assembly-CSharp")
+var Locator = @Class(game.Locator)
+var ctrl = Locator.GetPlayerController()
+if (@IsNull(ctrl)) { @UpdateResult("waiting for player") }
+
+var pr = ctrl._playerResources
+if (@IsNull(pr)) { @UpdateResult("waiting for resources") }
+
+var PR = @ClassOf(pr)
+
+if (pr.IsInvincible() == 0) {
+    pr.ToggleInvincibility()
+}
+set pr._currentFuel = PR._maxFuel
+set pr._currentOxygen = PR._maxOxygen
+var jet = ctrl._jetpackModel
+if (@NotNull(jet)) {
+    set jet._boostChargeFraction = 1
+}
+@UpdateResult("enabled")
+```
+
 
 ## Finding the right code
 
@@ -258,7 +415,8 @@ These are not style advice. Each one is a way to take the game down.
    written yet.)
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
-   script runs. Check with `@IsNull` / `@NotNull`; in a mod, `@Rerun(2000)` to try again later,
+   script runs. Check with `@IsNull` / `@NotNull`; in an update mod, exit the frame with
+   `@UpdateResult("waiting for player")`; in a normal mod, `@Rerun(2000)` to try again later,
    as in the example below. Do not poll for it in a loop: the game is frozen while your script
    runs.
 
@@ -270,16 +428,20 @@ These are not style advice. Each one is a way to take the game down.
 
 ## Tell the player about these
 
-- **After injecting, the game's close button stops working.** They must quit it from Task Manager.
-  This is a known Mutiny bug, not something your script caused. Warn them before you inject.
+- **How to turn an effect off.** Add `@UpdateResult("disabled")` as the first line of
+  `mods\on-update-<name>` and save; remove the line to turn it back on. Deleting the file also
+  works. To tune one, edit the numbers at the top and save. Say which of its changes the game
+  keeps after it is turned off.
 - **`mutiny run-script` always exits 0**, even when the script failed. Read the output to find out
   whether it worked; do not trust the exit code.
 - **A syntax error stops the whole script**, and the message names a line number and what was
   expected. Read it - the messages are specific.
 
-## A worked example
+## A worked example of a normal mod
 
-A `mods\` file that waits for the player to exist, then heals them:
+A `mods\` file that waits for the player to exist, then heals them once per game session. (For
+an effect that should *stay* applied, write an update mod instead; for a heal on demand, a
+script.)
 
 ```
 var game = @Assembly("Assembly-CSharp")

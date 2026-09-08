@@ -24,7 +24,7 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              what the injected DLL logs, including @Log output from your scripts
-  mods\<name>      your scripts, one VM each, re-run whenever the text changes
+  mods\scheduled-<name>  mods autoscheduled once, can reschedule themselves
   scripts\<name>   one-off scripts, inert until you ask for them by name
   stdout.txt       captured only when Mutiny starts the game for you
   stderr.txt
@@ -42,7 +42,7 @@ The difference between the two directories is *when they run*, not what's in the
 Here's a hacky example script I created on the fly to make myself and a couple friends "GODS" in the game "R.E.P.O".
 
 ```typescript
-// save this script to %LOCALAPPDATA%\mutiny\app\REPO\mods\godmode
+// save this script to %LOCALAPPDATA%\mutiny\app\REPO\mods\scheduled-godmode
 var Steamworks = @Assembly("Facepunch.Steamworks.Win64")
 var SteamClient = @Class(Steamworks.Steamworks.SteamClient)
 
@@ -50,7 +50,7 @@ if (SteamClient.get_IsValid() == 0) {
     if (@IsFirstRun()) {
         @Log("waiting for steam id...")
     }
-    @Rerun(1000)
+    @Reschedule(1000)
 }
 
 // comment/uncomment the following lines to re-run the script for Danny/Zach, their

@@ -728,7 +728,10 @@ fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
     const name = mod.name.slice();
     const new_state: UpdateMod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
-        .rerun_ms => .rerun_requested,
+        .reschedule_ms => blk: {
+            mod.formatStatus("@Reschedule is invalid in update mods", .{});
+            break :blk .{ .err = .{ .error_wyhash = std.hash.Wyhash.hash(0, mod.status.slice()) } };
+        },
         .update_result => |result| blk: {
             std.debug.assert(result.ptr == &mod.status.buffer);
             mod.status.len = @intCast(result.len);
@@ -752,10 +755,6 @@ fn runUpdateMod(dotnet_funcs: *const dotnet.Funcs, mod: *UpdateMod) void {
             },
             .result => std.log.info("{s}: {s}", .{ name, mod.status.slice() }),
             .err => std.log.err("{s}:{s}", .{ name, mod.status.slice() }),
-            .rerun_requested => {
-                std.log.err("{s}: @Rerun is invalid in on-update mods", .{name});
-                mod.formatStatus("error: @Rerun is invalid in on-update mods", .{});
-            },
         }
         mod.state = new_state;
         std.debug.assert(std.meta.eql(new_state, mod.state));
@@ -789,17 +788,17 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
 
     {
         const now = getNow();
-        var it = mods.noeventIterator();
+        var it = mods.scheduledIterator();
         while (it.next(now)) |mod| {
-            const maybe_rerun_ms = runOne(dotnet_funcs, mod.name.slice(), mod.text.?, mod.is_first_run, null) catch |err| switch (err) {
+            const maybe_reschedule_ms = runOne(dotnet_funcs, mod.name.slice(), mod.text.?, mod.is_first_run, null) catch |err| switch (err) {
                 error.WriteFailed => unreachable, // did not pass a writer
             };
             mod.is_first_run = false;
-            if (maybe_rerun_ms) |ms| {
-                mod.run = .{ .rerun = .{ .scheduled = now, .delay_ms = ms } };
+            if (maybe_reschedule_ms) |ms| {
+                mod.run = .{ .reschedule = .{ .scheduled = now, .delay_ms = ms } };
             }
         }
-        if (mods.nextRerunMs(getNow())) |ms| scheduleRerun(ms) catch |err| switch (err) {
+        if (mods.nextRescheduleMs(getNow())) |ms| scheduleRerun(ms) catch |err| switch (err) {
             error.Schedule => rerun_schedule_failed = true,
         };
     }
@@ -884,16 +883,16 @@ fn runOne(
         .is_first_run = is_first_run,
     };
     defer vm.deinit();
-    var rerun_ms: ?u32 = null;
+    var reschedule_ms: ?u32 = null;
     vm.evalRoot() catch switch (vm.error_result) {
         .exit => std.log.info("{s} has exited", .{name}),
         .update_result => unreachable, // out is never .update_result here
-        .rerun_ms => |ms| if (out) |w| {
-            std.log.err("{s}: @Rerun is only supported in mods", .{name});
-            try w.print("{s}: error: @Rerun is only supported in mods\n", .{name});
+        .reschedule_ms => |ms| if (out) |w| {
+            std.log.err("{s}: @Reschedule is only supported in scheduled mods", .{name});
+            try w.print("{s}: error: @Reschedule is only supported in scheduled mods\n", .{name});
         } else {
-            std.log.debug("{s} will rerun in {} ms", .{ name, ms });
-            rerun_ms = ms;
+            std.log.debug("{s} rescheduled in {} ms", .{ name, ms });
+            reschedule_ms = ms;
         },
         .err => |err| switch (err) {
             .vm_out => return error.WriteFailed,
@@ -904,7 +903,7 @@ fn runOne(
         },
     };
     if (out) |w| try w.flush();
-    return rerun_ms;
+    return reschedule_ms;
 }
 
 fn runBuiltin(
@@ -955,7 +954,7 @@ const unitygui = @import("unitygui.zig");
 const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
 
-const Mod = @import("Mod.zig");
+const ScheduledMod = @import("ScheduledMod.zig");
 const UpdateMod = @import("UpdateMod.zig");
 const UnityVersion = mutiny.UnityVersion;
 const Vm = mutiny.Vm;

@@ -176,7 +176,7 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
         context.label(.{ .x = box.x + margin, .y = y, .width = name_column, .height = line_height }, strings.name);
         context.color(switch (mod.state) {
             .ok, .result => .white,
-            .err, .rerun_requested => .status_error,
+            .err => .status_error,
         });
         context.label(.{ .x = box.x + margin + name_column, .y = y, .width = width - margin * 2 - name_column, .height = line_height }, strings.status);
     }

@@ -58,7 +58,7 @@ pub const Out = union(enum) {
 
 const ErrorResult = union(enum) {
     exit,
-    rerun_ms: u32,
+    reschedule_ms: u32,
     update_result: []const u8,
     err: Error,
 };
@@ -1910,16 +1910,16 @@ fn evalBuiltin(
             vm.error_result = .exit;
             return error.Vm;
         },
-        .@"@Rerun" => {
+        .@"@Reschedule" => {
             const integer = switch (vm.pop(args_addr)) {
                 .integer => |i| i,
                 else => unreachable,
             };
             const ms = std.math.cast(u32, integer) orelse return vm.setError(.{ .static_error = .{
                 .pos = builtin_extent.start,
-                .string = "@Rerun delay must be between 0 and 4294967295 milliseconds",
+                .string = "@Reschedule delay must be between 0 and 4294967295 milliseconds",
             } });
-            vm.error_result = .{ .rerun_ms = ms };
+            vm.error_result = .{ .reschedule_ms = ms };
             return error.Vm;
         },
         .@"@IsFirstRun" => {
@@ -3516,7 +3516,7 @@ const Builtin = enum {
     @"@Assert",
     @"@Nothing", // temporary builtin for testing, remove this later
     @"@Exit",
-    @"@Rerun",
+    @"@Reschedule",
     @"@IsFirstRun",
     @"@HasField",
     @"@Log",
@@ -3538,7 +3538,7 @@ const Builtin = enum {
             .@"@Assert" => &.{.{ .concrete = .integer }},
             .@"@Nothing" => &.{},
             .@"@Exit" => &.{},
-            .@"@Rerun" => &.{.{ .concrete = .integer }},
+            .@"@Reschedule" => &.{.{ .concrete = .integer }},
             .@"@IsFirstRun" => &.{},
             .@"@HasField" => &.{ .{ .concrete = .object }, .{ .concrete = .string_literal } },
             .@"@Log" => null,
@@ -3562,7 +3562,7 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Assert", .@"@Assert" },
     .{ "@Nothing", .@"@Nothing" },
     .{ "@Exit", .@"@Exit" },
-    .{ "@Rerun", .@"@Rerun" },
+    .{ "@Reschedule", .@"@Reschedule" },
     .{ "@IsFirstRun", .@"@IsFirstRun" },
     .{ "@HasField", .@"@HasField" },
     .{ "@Log", .@"@Log" },
@@ -4575,7 +4575,7 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
     for (0..2) |_| {
         vm.verifyStack();
         vm.evalRoot() catch switch (vm.error_result) {
-            .exit, .rerun_ms => return error.TestUnexpectedSuccess,
+            .exit, .reschedule_ms => return error.TestUnexpectedSuccess,
             .update_result => unreachable, // out is .log
             .err => |err| {
                 var buf: [2000]u8 = undefined;
@@ -4802,7 +4802,7 @@ pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
                 vm.verifyStack();
                 break;
             },
-            .rerun_ms => {
+            .reschedule_ms => {
                 is_first_run = false;
                 continue;
             },
@@ -4850,7 +4850,7 @@ pub fn testUpdateMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect
     defer vm.deinit();
     const actual: UpdateModExpect = if (vm.evalRoot()) .done else |_| switch (vm.error_result) {
         .exit => .done,
-        .rerun_ms => return error.TestUnexpectedRerun,
+        .reschedule_ms => return error.TestUnexpectedReschedule,
         .update_result => |r| .{ .result = r },
         .err => |err| blk: {
             var buf: [2000]u8 = undefined;

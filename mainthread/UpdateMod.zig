@@ -15,7 +15,6 @@ pub const State = union(enum) {
     err: struct {
         error_wyhash: u64,
     },
-    rerun_requested,
 };
 
 pub fn create(name: BoundedArray(u8, ModNameSlice.max_len), text: []u8) error{OutOfMemory}!*UpdateMod {

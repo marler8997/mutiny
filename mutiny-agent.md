@@ -32,8 +32,8 @@ Run `mutiny` with no arguments for the authoritative command list. This file can
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   log              everything the injected DLL logs, including @Log output from scripts
-  mods\<name>      persistent effects, these files are monitored by the injected DLL for changes and are automatically re-executed when changed
   mods\on-update-<name>  a mod that runs from the top on every frame of the game (see below)
+  mods\scheduled-<name>  a mod that runs once when written, and again only when it asks with @Reschedule(ms) (see below)
   scripts\<name>   unliks mods, only executed when requested via `mutiny <PID> run-script <SCRIPT_NAME>`.
 ```
 
@@ -48,11 +48,10 @@ Which directory to use is decided by *lifetime*, not content - both hold the sam
 - **An effect** ("keep me at full health", "unlimited jumps", "3x world speed") goes in `mods\`
   as an **update mod**, `mods\on-update-<name>`. This is the default for anything a player asks
   to *have*. See "Update mods" below.
-- **A normal mod**, `mods\<name>`, is "do this one thing, once, but it may have to wait for a
-  condition first": it runs when written and re-runs itself with `@Rerun(ms)` until the
-  condition holds, then does the thing. Because the file persists, it does that again at every
-  game start (and whenever its text changes), which suits setup that must happen each session
-  once the world exists - but not a one-shot that must happen only once, which is a script.
+- **A scheduled mod**, `mods\scheduled-<name>`, runs once when the file is written, and again
+  whenever its text changes; since the file persists, that includes every game start. Each run
+  goes from the top to completion. A run can end with `@Reschedule(ms)`, which schedules one
+  more run `ms` milliseconds later; otherwise nothing runs it again until the file changes.
 
 Writing a file into `mods\` starts it immediately. Deleting it stops it; for an update mod,
 so does adding `@UpdateResult("disabled")` as its first line, which keeps the file and logs
@@ -94,11 +93,11 @@ When this is written to "mods/on-update-stamina", here's what it can look like i
 13:55:01.799|98308|107484|PEAK|info|on-update-stamina: enabled
 ```
 
-Rules that differ from a normal mod:
+Rules that differ from a scheduled mod:
 
 - **`@Log` is an error** - a line per frame would bury the log. `@UpdateResult(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's.
 - **Result text should be stable unless you want something in the log.** `@UpdateResult("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
-- `@Rerun` is an error (the next frame is the rerun). `@IsFirstRun()` is always 0. `@Exit` ends the frame silently.
+- `@Reschedule` is an error (the next frame comes by itself). `@IsFirstRun()` is always 0. `@Exit` ends the frame silently.
 - Nothing survives between frames; state lives in the game.
 - **An error never stops it.** The error is logged once just like `@UpdateResult()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@UpdateResult` is better, because it names the state instead of showing an error.
 - Keep it short: its cost is paid every frame, on the main thread.
@@ -278,9 +277,9 @@ Things that will surprise you:
   the end of every iteration; variables declared in an `if` block stay visible after it.
 - **There is no way to sleep or wait inside a script.** Scripts run on the game's main thread
   and the game is frozen until the script finishes, so a loop that polls for a condition freezes
-  the game forever. To wait, a mod calls `@Rerun(ms)`: that ends the script and runs it again
-  from the top after `ms` milliseconds, with the game running in between. `@IsFirstRun()` is 1
-  on the first run and 0 on every rerun, so you can log once instead of every time.
+  the game forever. To wait, a scheduled mod calls `@Reschedule(ms)`: that ends the script and
+  runs it again from the top after `ms` milliseconds, with the game running in between.
+  `@IsFirstRun()` is 1 on the first run and 0 on every run after that, so you can log once.
 - **A second `loop` in the same block is rejected** with "cannot loop inside loop". Putting one
   inside an `if` block is not caught by that check, but nothing tests it and `break`/`continue`
   across that boundary is unexplored — so write one loop at a time.
@@ -382,8 +381,8 @@ memory — see the rules below on argument types.
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
 | `@Exit()` / `@Nothing()` | no arguments | |
-| `@Rerun(ms)` | an integer | mods only (not update mods): exit now, run again from the top after `ms` milliseconds |
-| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on a rerun (always 0 in an update mod) |
+| `@Reschedule(ms)` | an integer | scheduled mods only: exit now, run again from the top after `ms` milliseconds |
+| `@IsFirstRun()` | no arguments | integer 1 on the first run, 0 on every run after that (always 0 in an update mod) |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started
@@ -416,7 +415,7 @@ These are not style advice. Each one is a way to take the game down.
 
 3. **Null-check before dereferencing.** A player object may not exist yet at the moment your
    script runs. Check with `@IsNull` / `@NotNull`; in an update mod, exit the frame with
-   `@UpdateResult("waiting for player")`; in a normal mod, `@Rerun(2000)` to try again later,
+   `@UpdateResult("waiting for player")`; in a scheduled mod, `@Reschedule(2000)` to try again later,
    as in the example below. Do not poll for it in a loop: the game is frozen while your script
    runs.
 
@@ -437,11 +436,10 @@ These are not style advice. Each one is a way to take the game down.
 - **A syntax error stops the whole script**, and the message names a line number and what was
   expected. Read it - the messages are specific.
 
-## A worked example of a normal mod
+## A worked example of a scheduled mod
 
-A `mods\` file that waits for the player to exist, then heals them once per game session. (For
-an effect that should *stay* applied, write an update mod instead; for a heal on demand, a
-script.)
+A `mods\scheduled-<name>` file that waits for the player to exist, then heals them once per
+game session.
 
 ```
 var game = @Assembly("Assembly-CSharp")
@@ -450,7 +448,7 @@ var SemiFunc = @Class(game.SemiFunc)
 var player = SemiFunc.PlayerAvatarGetFromSteamID("76561197960287930")
 if (@IsNull(player)) {
     if (@IsFirstRun()) { @Log("waiting for the player...") }
-    @Rerun(2000)
+    @Reschedule(2000)
 }
 @LogClass(@ClassOf(player.playerHealth))
 player.playerHealth.Heal(99999999, 0)

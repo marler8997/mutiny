@@ -1,4 +1,4 @@
-const Mod = @This();
+const ScheduledMod = @This();
 
 list_node: std.DoublyLinkedList.Node,
 name: BoundedArray(u8, ModNameSlice.max_len),
@@ -6,12 +6,12 @@ text: ?[]u8,
 run: union(enum) {
     pending,
     done,
-    rerun: Rerun,
+    reschedule: Reschedule,
 },
 is_first_run: bool,
 
-pub fn create(mod_name: ModNameSlice, text: ?[]u8) error{OutOfMemory}!*Mod {
-    const mod = try alloc.newMod();
+pub fn create(mod_name: ModNameSlice, text: ?[]u8) error{OutOfMemory}!*ScheduledMod {
+    const mod = try alloc.newScheduledMod();
     mod.* = .{
         .list_node = .{},
         .name = .{ .len = mod_name.len, .buffer = undefined },
@@ -23,10 +23,10 @@ pub fn create(mod_name: ModNameSlice, text: ?[]u8) error{OutOfMemory}!*Mod {
     return mod;
 }
 
-pub fn destroy(mod: *Mod) void {
+pub fn destroy(mod: *ScheduledMod) void {
     if (mod.text) |text| alloc.general().free(text);
     mod.* = undefined;
-    alloc.freeMod(mod);
+    alloc.freeScheduledMod(mod);
 }
 
 const std = @import("std");
@@ -36,4 +36,4 @@ const alloc = @import("alloc.zig");
 
 const BoundedArray = mutiny.BoundedArray;
 const ModNameSlice = @import("ModNameSlice.zig");
-const Rerun = @import("Rerun.zig");
+const Reschedule = @import("Reschedule.zig");

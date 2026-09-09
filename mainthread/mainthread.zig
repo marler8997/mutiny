@@ -25,7 +25,7 @@ const global = struct {
         };
     };
 
-    var post_retry_enabled: std.atomic.Value(bool) = .init(false);
+    var bootstrap_settled: std.atomic.Value(bool) = .init(false);
     var runtime: RuntimeState = .{ .find_lib = .{} };
     var update_hook: UpdateHookState = .pending;
     var dotnet_funcs_store: dotnet.Funcs = undefined;
@@ -64,24 +64,16 @@ pub const PostResult = union(enum) {
 };
 
 pub fn mutinyThreadOnTick(last_post_result: *PostResult) void {
-    switch (last_post_result.*) {
-        .posted => {},
-        .not_ready, .post_error => {
-            mutinyThreadPostRun(last_post_result);
-            return;
-        },
-    }
-    if (global.post_retry_enabled.load(.monotonic)) {
-        mutinyThreadPostRun(last_post_result);
-    }
+    if (global.bootstrap_settled.load(.monotonic)) return;
+    mutinyThreadPostBootstrap(last_post_result);
 }
-pub fn mutinyThreadPostRun(last_post_result: *PostResult) void {
+pub fn mutinyThreadPostBootstrap(last_post_result: *PostResult) void {
     const new_result: PostResult = blk: switch (global.subclass.state) {
         .initial, .find_window, .subclass => .not_ready,
         .ready => {
             const target: Target = .{ .data = .{ .hwnd = global.subclass.hwnd, .msg = global.subclass.wnd_msg } };
             var err: PostError = undefined;
-            target.post(.run, &err) catch break :blk .{ .post_error = err };
+            target.post(.bootstrap, &err) catch break :blk .{ .post_error = err };
             break :blk .posted;
         },
     };
@@ -113,12 +105,12 @@ pub fn mutinyThreadPostRun(last_post_result: *PostResult) void {
 }
 
 const PostAction = union(enum) {
-    run,
+    bootstrap,
     subclass_self_test,
     pub fn deserialize(args: PostActionArgs) ?PostAction {
         if (builtin.os.tag == .windows) {
             return switch (args.wparam) {
-                1 => return .run,
+                1 => return .bootstrap,
                 2 => return .subclass_self_test,
                 else => null,
             };
@@ -126,7 +118,7 @@ const PostAction = union(enum) {
     }
     pub fn serialize(action: PostAction) PostActionArgs {
         if (builtin.os.tag == .windows) return switch (action) {
-            .run => .{ .wparam = 1, .lparam = undefined },
+            .bootstrap => .{ .wparam = 1, .lparam = undefined },
             .subclass_self_test => .{ .wparam = 2, .lparam = undefined },
         } else @panic("todo");
     }
@@ -381,13 +373,10 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
             return 0;
         };
         switch (action) {
-            .run => global.post_retry_enabled.store(switch (run()) {
-                .success => false,
-                .retry => true,
-                // next run above us in the stack will set this to true if needed
-                .recursed => false,
-                .unrecoverable_error => false, // no need to keep retrying
-            }, .monotonic),
+            .bootstrap => switch (bootstrap()) {
+                .settled => global.bootstrap_settled.store(true, .monotonic),
+                .retry => {},
+            },
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
             },
@@ -483,11 +472,13 @@ const UpdateHookState = union(enum) {
     };
 };
 
+const BootstrapResult = enum { settled, retry };
+
 fn updateUpdateHook(
     dotnet_funcs: *const dotnet.Funcs,
     module: dynlib.Module,
     root_domain: *const dotnet.Domain,
-) enum { settled, retry } {
+) BootstrapResult {
     state: switch (global.update_hook) {
         .pending => switch (dotnet_funcs.kind) {
             .mono => {
@@ -533,11 +524,13 @@ fn updateUpdateHook(
         },
         .installed => return .settled,
         .failed => |*hook| {
+            mods.applyUpdates(dotnet_funcs);
             const has_mods = mods.hasMods();
             if (has_mods and !hook.update_mods_warned) {
                 std.log.err("mods will not run: the Update hook failed to install (see the error above)", .{});
             }
             hook.update_mods_warned = has_mods;
+            failQueuedScripts(.update_hook_failed);
             return .settled;
         },
     }
@@ -659,6 +652,8 @@ pub fn onUpdate() callconv(.c) void {
         .ready => |funcs| funcs,
         .unrecoverable_error, .not_ready => return,
     };
+    mods.applyUpdates(dotnet_funcs);
+    runScripts(dotnet_funcs);
     var it = mods.modIterator();
     while (it.next()) |mod| runMod(dotnet_funcs, mod);
 }
@@ -712,30 +707,24 @@ fn runMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
     }
 }
 
-fn run() enum { success, retry, recursed, unrecoverable_error } {
-    if (global.vm_pass_active) return .recursed;
-    global.vm_pass_active = true;
-    defer global.vm_pass_active = false;
-
+fn bootstrap() BootstrapResult {
+    if (global.vm_pass_active) return .retry;
     const dotnet_funcs = switch (updateRuntime()) {
         .ready => |funcs| funcs,
         .unrecoverable_error => |err| {
-            failQueuedScripts(err);
-            return .unrecoverable_error;
+            failQueuedScripts(.{ .runtime = err });
+            return .settled;
         },
         .not_ready => return .retry,
     };
-
-    mods.applyUpdates(dotnet_funcs);
-    const update_hook_retry = switch (updateUpdateHook(
+    return updateUpdateHook(
         dotnet_funcs,
         global.runtime.ready.module,
         global.runtime.ready.root_domain,
-    )) {
-        .settled => false,
-        .retry => true,
-    };
+    );
+}
 
+fn runScripts(dotnet_funcs: *const dotnet.Funcs) void {
     while (scripts.steal()) |script| {
         defer script.deinit();
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
@@ -767,21 +756,31 @@ fn run() enum { success, retry, recursed, unrecoverable_error } {
             std.log.err("write to pipe failed with {t}", .{pipe_writer.err.?});
         }
     }
-
-    return if (update_hook_retry) .retry else .success;
 }
 
-fn failQueuedScripts(err: RuntimeState.UnrecoverableError) void {
+const ScriptFailReason = union(enum) {
+    runtime: RuntimeState.UnrecoverableError,
+    update_hook_failed,
+
+    pub fn format(reason: ScriptFailReason, writer: *std.Io.Writer) error{WriteFailed}!void {
+        switch (reason) {
+            .runtime => |err| try writer.print("{f}", .{err}),
+            .update_hook_failed => try writer.writeAll("the Update hook failed to install"),
+        }
+    }
+};
+
+fn failQueuedScripts(reason: ScriptFailReason) void {
     while (scripts.steal()) |script| {
         defer script.deinit();
-        std.log.err("rejecting script '{s}': {f}", .{ script.name.slice(), err });
+        std.log.err("rejecting script '{s}': {f}", .{ script.name.slice(), reason });
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
         var pipe_buf: [512]u8 = undefined;
         var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
         const write_error: ?error{WriteFailed} = blk: {
             pipe_writer.interface.print(
                 "error: mutiny cannot run scripts in this process, {f}\n",
-                .{err},
+                .{reason},
             ) catch |e| break :blk e;
             pipe_writer.interface.flush() catch |e| break :blk e;
             break :blk null;

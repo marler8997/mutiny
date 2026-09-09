@@ -520,7 +520,7 @@ fn addScript(
         .{fmtW(name_w)},
     );
 
-    mainthread.mutinyThreadPostRun(&global.last_post_result);
+    mainthread.mutinyThreadPostBootstrap(&global.last_post_result);
     switch (global.last_post_result) {
         .posted => {},
         .not_ready => std.log.info(
@@ -618,7 +618,7 @@ fn updateMods() ?UpdateModsError {
     }
 
     queued = modfiles.deleteStale() or queued;
-    if (queued) mainthread.mutinyThreadPostRun(&global.last_post_result);
+    if (queued) mainthread.mutinyThreadPostBootstrap(&global.last_post_result);
 
     return null;
 }

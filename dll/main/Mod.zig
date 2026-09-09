@@ -4,6 +4,7 @@ list_node: std.DoublyLinkedList.Node,
 name: BoundedArray(u8, ModNameSlice.max_len),
 text: []u8,
 state: State,
+enabled: bool,
 status: BoundedArray(u8, status_max_len),
 label: unitygui.ModLabel,
 pub const status_max_len = std.math.maxInt(u8);
@@ -24,6 +25,7 @@ pub fn create(name: BoundedArray(u8, ModNameSlice.max_len), text: []u8) error{Ou
         .name = name,
         .text = text,
         .state = .ok,
+        .enabled = true,
         .status = .{ .len = 0, .buffer = undefined },
         .label = .{},
     };

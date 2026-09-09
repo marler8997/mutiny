@@ -21,6 +21,7 @@ const Color = extern struct {
     a: f32,
 
     const white: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 };
+    const disabled: Color = .{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1 };
     const background: Color = .{ .r = 0.05, .g = 0.05, .b = 0.05, .a = 0.9 };
     const outline: Color = .{ .r = 0.75, .g = 0.75, .b = 0.75, .a = 1 };
     const mod_name: Color = .{ .r = 0.55, .g = 0.8, .b = 1, .a = 1 };
@@ -85,6 +86,9 @@ const button_inset: f32 = (title_height - button_size) / 2;
 const minimized_width: f32 = 120;
 const outline_thickness: f32 = 2;
 const name_column: f32 = 220;
+const checkbox_size: f32 = 14;
+const checkbox_inset: f32 = (line_height - checkbox_size) / 2;
+const checkbox_column: f32 = checkbox_size + margin;
 const title = "Mutiny";
 
 pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
@@ -139,6 +143,10 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
                 .mouse_down => if (button.contains(x, y)) {
                     panel.minimized = !panel.minimized;
                     context.use(event);
+                } else if (if (panel.minimized) null else checkboxAt(box, x, y)) |mod| {
+                    mod.enabled = !mod.enabled;
+                    std.log.info("mod '{s}' {s} from the panel", .{ mod.name.slice(), if (mod.enabled) "enabled" else "disabled" });
+                    context.use(event);
                 } else if (box.contains(x, y)) {
                     panel.drag = .{ .dx = x - panel.x, .dy = y - panel.y };
                     context.use(event);
@@ -172,15 +180,42 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
     var it = mods.modIterator();
     while (it.next()) |mod| : (y += line_height) {
         const strings = context.modStrings(mod) orelse return;
-        context.color(.mod_name);
-        context.label(.{ .x = box.x + margin, .y = y, .width = name_column, .height = line_height }, strings.name);
-        context.color(switch (mod.state) {
+        const check = checkboxRect(box, y);
+        context.outline(check);
+        if (mod.enabled) context.fill(.{
+            .x = check.x + 3,
+            .y = check.y + 3,
+            .width = check.width - 6,
+            .height = check.height - 6,
+        }, .white);
+        const x = box.x + margin + checkbox_column;
+        context.color(if (mod.enabled) .mod_name else .disabled);
+        context.label(.{ .x = x, .y = y, .width = name_column, .height = line_height }, strings.name);
+        context.color(if (!mod.enabled) .disabled else switch (mod.state) {
             .ok, .result => .white,
             .err => .status_error,
         });
-        context.label(.{ .x = box.x + margin + name_column, .y = y, .width = width - margin * 2 - name_column, .height = line_height }, strings.status);
+        context.label(.{ .x = x + name_column, .y = y, .width = width - margin * 2 - checkbox_column - name_column, .height = line_height }, strings.status);
     }
     context.color(.white);
+}
+
+fn checkboxRect(box: Rect, row_y: f32) Rect {
+    return .{
+        .x = box.x + margin,
+        .y = row_y + checkbox_inset,
+        .width = checkbox_size,
+        .height = checkbox_size,
+    };
+}
+
+fn checkboxAt(box: Rect, x: f32, y: f32) ?*Mod {
+    var row_y = box.y + title_height + margin;
+    var it = mods.modIterator();
+    while (it.next()) |mod| : (row_y += line_height) {
+        if (checkboxRect(box, row_y).contains(x, y)) return mod;
+    }
+    return null;
 }
 
 const Context = struct {

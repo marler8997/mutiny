@@ -719,7 +719,9 @@ pub fn onUpdate() callconv(.c) void {
     mods.applyUpdates(dotnet_funcs);
     runScripts(dotnet_funcs);
     var it = mods.modIterator();
-    while (it.next()) |mod| runMod(dotnet_funcs, mod);
+    while (it.next()) |mod| {
+        if (mod.enabled) runMod(dotnet_funcs, mod);
+    }
 }
 pub fn onGui() callconv(.c) void {
     const dotnet_funcs = switch (updateRuntime()) {

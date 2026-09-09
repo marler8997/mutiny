@@ -104,7 +104,8 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
             .{process.pid},
         );
     };
-    try startThread(process, remote_base, mutiny_dll_realpath_w);
+    const attach_thread = try startAttachThread(process, remote_base, mutiny_dll_realpath_w);
+    defer win32.closeHandle(attach_thread);
 
     if (process.maybe_suspended_thread) |thread| {
         std.log.info("resuming new process thread...", .{});
@@ -116,11 +117,11 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
         std.log.info("process thread resumed (suspend_count={})", .{suspend_count});
     }
 
-    try waitForWindow(process);
+    try waitForAttach(process, attach_thread);
     std.log.info("success", .{});
 }
 
-fn startThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16) !void {
+fn startAttachThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16) !win32.HANDLE {
     const start_rva = blk: {
         const local = win32.LoadLibraryW(dll_path) orelse win32.panicWin32(
             "LoadLibrary(ourself)",
@@ -128,16 +129,16 @@ fn startThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16
         );
         const local_start = win32.GetProcAddress(
             local,
-            mutinyipc.main_export_name,
+            mutinyipc.attach_export_name,
         ) orelse win32.panicWin32(
-            "GetProcAddress(" ++ mutinyipc.main_export_name ++ ")",
+            "GetProcAddress(" ++ mutinyipc.attach_export_name ++ ")",
             win32.GetLastError(),
         );
         break :blk @intFromPtr(local_start) - @intFromPtr(local);
     };
     const remote_start = @intFromPtr(remote_base) + start_rva;
     std.log.info("calling {s} at 0x{x} in pid {}", .{
-        mutinyipc.main_export_name,
+        mutinyipc.attach_export_name,
         remote_start,
         process.pid,
     });
@@ -146,11 +147,50 @@ fn startThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16
         null,
         mutinyipc.thread_stack_size,
         @ptrFromInt(remote_start),
-        null,
+        @ptrFromInt(attach_timeout_ms),
         0,
         null,
     ) orelse win32.panicWin32("CreateRemoteThread", win32.GetLastError());
-    win32.closeHandle(thread);
+    return thread;
+}
+
+const attach_timeout_ms = 10 * 1000;
+
+fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE) !void {
+    const handles = [_]?win32.HANDLE{ attach_thread, process.process };
+    switch (win32.WaitForMultipleObjects(handles.len, &handles, 0, win32.INFINITE)) {
+        @intFromEnum(win32.WAIT_OBJECT_0) => {
+            var exit_code: u32 = undefined;
+            if (0 == win32.GetExitCodeThread(attach_thread, &exit_code)) win32.panicWin32(
+                "GetExitCodeThread",
+                win32.GetLastError(),
+            );
+            switch (exit_code) {
+                mutinyipc.AttachResult.success => std.log.info("mutiny is attached to pid {}", .{process.pid}),
+                mutinyipc.AttachResult.fail => errExit("attach to pid {} failed, see the game's mutiny log", .{process.pid}),
+                else => errExit(
+                    "the attach thread in pid {} exited with 0x{x}, see the game's mutiny log",
+                    .{ process.pid, exit_code },
+                ),
+            }
+        },
+        @intFromEnum(win32.WAIT_OBJECT_0) + 1 => {
+            var exit_code: u32 = undefined;
+            if (0 == win32.GetExitCodeProcess(process.process, &exit_code)) win32.panicWin32(
+                "GetExitCodeProcess",
+                win32.GetLastError(),
+            );
+            errExit(
+                "process {} exited with {} before mutiny attached",
+                .{ process.pid, exit_code },
+            );
+        },
+        @intFromEnum(win32.WAIT_FAILED) => errExit(
+            "WaitForMultipleObjects failed, error={f}",
+            .{win32.GetLastError()},
+        ),
+        else => |result| std.debug.panic("WaitForMultipleObjects(INFINITE) returned {}", .{result}),
+    }
 }
 
 fn findRemoteModule(pid: u32) ?*u8 {
@@ -189,46 +229,6 @@ fn eqlAsciiIgnoreCase(wide: []const u16, ascii: []const u8) bool {
         if (std.ascii.toLower(@intCast(w)) != std.ascii.toLower(a)) return false;
     }
     return true;
-}
-
-const wait_for_window_ms = 10000;
-
-fn waitForWindow(process: ProcessResult) !void {
-    var attempt: u32 = 0;
-    const start = try std.time.Instant.now();
-    while (true) : (attempt += 1) {
-        switch (mutinyipc.checkLiveness(process.pid)) {
-            .serving => {
-                std.log.info("mutiny is serving pid {}", .{process.pid});
-                return;
-            },
-            .no_window, .unresponsive => {},
-        }
-
-        const elapsed_ms = @divTrunc((try std.time.Instant.now()).since(start), std.time.ns_per_ms);
-        if (elapsed_ms >= wait_for_window_ms) errExit(
-            "no mutiny window in pid {} after {} ms ({} attempts)",
-            .{ process.pid, elapsed_ms, attempt },
-        );
-        switch (win32.WaitForSingleObject(process.process, 50)) {
-            @intFromEnum(win32.WAIT_OBJECT_0) => {
-                var exit_code: u32 = undefined;
-                if (0 == win32.GetExitCodeProcess(process.process, &exit_code)) win32.panicWin32(
-                    "GetExitCodeProcess",
-                    win32.GetLastError(),
-                );
-                errExit(
-                    "process {} exited with {} before mutiny started serving it",
-                    .{ process.pid, exit_code },
-                );
-            },
-            @intFromEnum(win32.WAIT_TIMEOUT) => {},
-            else => |result| errExit(
-                "wait on process {} returned {}, error={f}",
-                .{ process.pid, result, win32.GetLastError() },
-            ),
-        }
-    }
 }
 
 const ProcessResult = struct {

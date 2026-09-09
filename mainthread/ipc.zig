@@ -234,99 +234,30 @@ fn addScript(
     const name_a = name_buf[0..name_utf8_len];
     const script_name = ModNameSlice.init(name_a) orelse unreachable;
 
-    const request: scripts.Request = blk: {
-        if (name_w[0] == '@') break :blk .{
-            .builtin = try parseBuiltin(writer, name_a, args),
-        };
+    if (name_w[0] == '@') {
+        const builtin_script = try parseBuiltin(writer, name_a, args);
+        return scripts.queue(pid, pipe, script_name, .{ .builtin = builtin_script }) catch reportError(
+            writer,
+            "out of memory creating script '{f}'",
+            .{fmtW(name_w)},
+        );
+    }
 
-        if (args.next() catch return reportError(
-            writer,
-            "malformed run-script arguments",
-            .{},
-        )) |_| return reportError(
-            writer,
-            "script '{s}' was given arguments but scripts do not take arguments yet",
-            .{name_a},
-        );
-
-        const localappdata = appdata.get() orelse return reportError(
-            writer,
-            "no LOCALAPPDATA environment variable",
-            .{},
-        );
-        const app_name = switch (logfile.global.getName()) {
-            .success => |s| s,
-            .err => |err| return reportError(writer, "{f}", .{err}),
-        };
-        var path_buf: [appdata.max_path]u16 = undefined;
-        const path = switch (appdata.format(&path_buf, localappdata, &.{
-            win32.L("mutiny"),
-            win32.L("app"),
-            app_name,
-            win32.L("scripts"),
-            name_w,
-        })) {
-            .ok => |p| p,
-            .too_long => return reportError(
-                writer,
-                "path for script '{f}' is too long",
-                .{fmtW(name_w)},
-            ),
-        };
-
-        const prefixed = std.os.windows.wToPrefixedFileW(null, path) catch |err| return reportError(
-            writer,
-            "bad script path '{f}', {t}",
-            .{ fmtW(path), err },
-        );
-        var file = std.fs.cwd().openFileW(prefixed.span(), .{}) catch |err| return reportError(
-            writer,
-            "open '{f}' failed with {t}",
-            .{ fmtW(path), err },
-        );
-        defer file.close();
-        const file_size64 = file.getEndPos() catch |err| return reportError(
-            writer,
-            "get size of '{f}' failed with {t}",
-            .{ fmtW(path), err },
-        );
-        const file_size = std.math.cast(usize, file_size64) orelse return reportError(
-            writer,
-            "script '{f}' is too big ({} bytes)",
-            .{ fmtW(path), file_size64 },
-        );
-        const text = alloc.general().alloc(u8, file_size) catch return reportError(
-            writer,
-            "out of memory reading '{f}' ({} bytes)",
-            .{ fmtW(path), file_size },
-        );
-        errdefer alloc.general().free(text);
-        readFile(file, text) catch |err| return reportError(
-            writer,
-            "read '{f}' failed with {t}",
-            .{ fmtW(path), err },
-        );
-        break :blk .{ .file = text };
-    };
-    errdefer switch (request) {
-        .file => |text| alloc.general().free(text),
-        .builtin => {},
-    };
-
-    scripts.queue(pid, pipe, script_name, request) catch return reportError(
+    if (args.next() catch return reportError(
         writer,
-        "out of memory creating script '{f}'",
+        "malformed run-script arguments",
+        .{},
+    )) |_| return reportError(
+        writer,
+        "script '{s}' was given arguments but scripts do not take arguments yet",
+        .{name_a},
+    );
+
+    io.requestLoad(pid, pipe, script_name) catch return reportError(
+        writer,
+        "out of memory requesting script '{f}'",
         .{fmtW(name_w)},
     );
-}
-
-fn readFile(file: std.fs.File, mem: []u8) (error{EndOfStream} || std.fs.File.ReadError)!void {
-    var total_read: usize = 0;
-    while (total_read != mem.len) {
-        const last_read = try file.read(mem[total_read..]);
-        if (last_read == 0) return error.EndOfStream;
-        total_read += last_read;
-    }
 }
 
 const fmtW = std.unicode.fmtUtf16Le;
@@ -335,12 +266,10 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
 
-const alloc = @import("alloc.zig");
-const appdata = mutiny.appdata;
-const logfile = mutiny.logfile;
 const mainthread = @import("mainthread.zig");
 const mutinyipc = mutiny.mutinyipc;
 const scripts = @import("scripts.zig");
+const io = @import("dll.io");
 
 const Builtin = mainthread.Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");

@@ -7,7 +7,15 @@ pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
 pub const max_string_len = std.math.maxInt(u16);
 
-pub const main_export_name = "MutinyMain";
+pub const attach_export_name = "MutinyAttach";
+
+pub const AttachResult = packed struct(u32) {
+    failed: bool,
+    signature: u31 = 0x28f9b600,
+
+    pub const fail: u32 = @bitCast(AttachResult{ .failed = true });
+    pub const success: u32 = @bitCast(AttachResult{ .failed = false });
+};
 
 /// The default thread stack is too small when injecting into .NET assemblies, so always ask
 /// for a reasonable 2MB.

@@ -1,9 +1,10 @@
 const global = struct {
-    var list: std.DoublyLinkedList = .{};
+    var mutex: Mutex = .{};
+    var loaded: std.DoublyLinkedList = .{};
 };
 
 pub const Request = union(enum) {
-    file: []u8,
+    file: []const u8,
     builtin: Builtin,
 };
 
@@ -14,8 +15,12 @@ pub fn queue(
     request: Request,
 ) error{OutOfMemory}!void {
     const kind: Script.Kind = switch (request) {
-        .file => |text| .{ .file = .{ .text = text } },
+        .file => |content| .{ .file = .{ .text = try alloc.general().dupe(u8, content) } },
         .builtin => |b| .{ .builtin = b },
+    };
+    errdefer switch (kind) {
+        .file => |f| alloc.general().free(f.text),
+        .builtin => {},
     };
     const script = try alloc.newScript();
     script.* = .{
@@ -25,21 +30,28 @@ pub fn queue(
         .kind = kind,
     };
     @memcpy(script.name.buffer[0..script_name.len], script_name.slice());
-    global.list.append(&script.list_node);
+    global.mutex.lock();
+    defer global.mutex.unlock();
+    global.loaded.append(&script.list_node);
 }
 
 pub fn take() ?*Script {
-    const node = global.list.first orelse return null;
-    global.list.remove(node);
+    global.mutex.lock();
+    defer global.mutex.unlock();
+    const node = global.loaded.first orelse return null;
+    global.loaded.remove(node);
     return @fieldParentPtr("list_node", node);
 }
 
 const std = @import("std");
+const win32 = @import("win32").everything;
 
 const mainthread = @import("mainthread.zig");
 const alloc = @import("alloc.zig");
 
+const BoundedArray = mainthread.BoundedArray;
 const Builtin = mainthread.Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");
+const Mutex = mainthread.Mutex;
 const PipeHandle = Script.PipeHandle;
 const Script = @import("Script.zig");

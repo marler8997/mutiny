@@ -8,8 +8,9 @@ pub const Mutex = mutiny.Mutex;
 pub const Options = mutiny.Options;
 pub const Pool = mutiny.Pool;
 
-pub const mutinyThreadQueueModUpdate = mods.mutinyThreadQueueUpdate;
-pub const mutinyThreadQueueModRemove = mods.mutinyThreadQueueRemove;
+pub const ioThreadQueueModUpdate = mods.ioThreadQueueUpdate;
+pub const ioThreadQueueModRemove = mods.ioThreadQueueRemove;
+pub const ioThreadQueueScript = scripts.queue;
 
 const global = struct {
     // state related to subclassing the main window
@@ -23,7 +24,9 @@ const global = struct {
         };
     };
 
-    var bootstrap_settled: std.atomic.Value(bool) = .init(false);
+    var bootstrap_state: std.atomic.Value(BootstrapState) = .init(.pending);
+    var io_thread_id: std.atomic.Value(u32) = .init(0);
+    var io_thread: ?win32.HANDLE = null;
     var runtime: RuntimeState = .{ .find_lib = .{} };
     var update_hook: UpdateHookState = .pending;
     var dotnet_funcs_store: dotnet.Funcs = undefined;
@@ -55,17 +58,83 @@ const PostActionArgs = if (builtin.os.tag == .windows) struct {
     lparam: win32.LPARAM,
 } else struct {};
 
-pub const PostResult = union(enum) {
+pub const AttachState = struct {
+    stage: enum { subclass, bootstrap } = .subclass,
+    last_post_result: PostResult = .posted,
+
+    pub fn update(state: *AttachState) union(enum) { attached, failed, retry_ms: u32 } {
+        stage: switch (state.stage) {
+            .subclass => switch (subclassUpdate()) {
+                .keep_calling => return .{ .retry_ms = subclass_retry_ms },
+                .done => {
+                    global.bootstrap_state.store(.pending, .monotonic);
+                    state.stage = .bootstrap;
+                    continue :stage state.stage;
+                },
+            },
+            .bootstrap => switch (global.bootstrap_state.load(.monotonic)) {
+                .pending => {
+                    postBootstrap(&state.last_post_result);
+                    return .{ .retry_ms = bootstrap_retry_ms };
+                },
+                .installed => return .attached,
+                .failed => return .failed,
+            },
+        }
+    }
+};
+
+const subclass_retry_ms = 200;
+const bootstrap_retry_ms = 200;
+
+const PostResult = union(enum) {
     posted,
     not_ready,
     post_error: PostError,
 };
 
-pub fn mutinyThreadOnTick(last_post_result: *PostResult) void {
-    if (global.bootstrap_settled.load(.monotonic)) return;
-    mutinyThreadPostBootstrap(last_post_result);
+const BootstrapState = enum(u8) { pending, installed, failed };
+
+pub fn ioThreadId() u32 {
+    return global.io_thread_id.load(.monotonic);
 }
-pub fn mutinyThreadPostBootstrap(last_post_result: *PostResult) void {
+
+fn ensureIoThread() bool {
+    if (global.io_thread) |thread| switch (win32.WaitForSingleObject(thread, 0)) {
+        @intFromEnum(win32.WAIT_TIMEOUT) => return true,
+        @intFromEnum(win32.WAIT_OBJECT_0) => {
+            std.log.err("the io thread died, starting another", .{});
+            win32.closeHandle(thread);
+            global.io_thread = null;
+            global.io_thread_id.store(0, .monotonic);
+        },
+        else => |result| std.debug.panic(
+            "WaitForSingleObject on the io thread returned {} (error={f})",
+            .{ result, win32.GetLastError() },
+        ),
+    };
+    return spawnIoThread();
+}
+
+fn spawnIoThread() bool {
+    const name = switch (logfile.global.getName()) {
+        .success => |s| s,
+        .err => |err| {
+            std.log.err("cannot start the io thread: {f}", .{err});
+            return false;
+        },
+    };
+    const localappdata = appdata.get() orelse {
+        std.log.err("cannot start the io thread: no LOCALAPPDATA environment variable", .{});
+        return false;
+    };
+    const thread = io.spawn(.{ .name = name, .localappdata = localappdata }) catch return false;
+    global.io_thread_id.store(win32.GetThreadId(thread), .monotonic);
+    global.io_thread = thread;
+    return true;
+}
+
+fn postBootstrap(last_post_result: *PostResult) void {
     const new_result: PostResult = blk: switch (global.subclass.state) {
         .initial, .find_window, .subclass => .not_ready,
         .ready => {
@@ -122,7 +191,7 @@ const PostAction = union(enum) {
     }
 };
 
-pub const PostError = struct {
+const PostError = struct {
     data: if (builtin.os.tag == .windows) win32.WIN32_ERROR else void,
     pub fn eql(err: PostError, other: PostError) bool {
         if (builtin.os.tag == .windows) {
@@ -171,7 +240,7 @@ const SubclassWindowState = union(enum) {
     },
     ready,
 };
-pub fn mutinyThreadSubclassUpdate() enum { keep_calling, done } {
+fn subclassUpdate() enum { keep_calling, done } {
     state: switch (global.subclass.state) {
         .initial => |*state| {
             global.subclass.wnd_msg = win32.RegisterWindowMessageW(win32.L("MutinyMainThread"));
@@ -367,8 +436,9 @@ fn subclassProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.
         };
         switch (action) {
             .bootstrap => switch (bootstrap()) {
-                .settled => global.bootstrap_settled.store(true, .monotonic),
                 .retry => {},
+                .installed => global.bootstrap_state.store(.installed, .monotonic),
+                .failed => global.bootstrap_state.store(.failed, .monotonic),
             },
             .subclass_self_test => {
                 std.log.info("TODO: run subclass self test", .{});
@@ -465,7 +535,7 @@ const UpdateHookState = union(enum) {
     };
 };
 
-const BootstrapResult = enum { settled, retry };
+const BootstrapResult = enum { retry, installed, failed };
 
 fn updateUpdateHook(
     dotnet_funcs: *const dotnet.Funcs,
@@ -478,7 +548,7 @@ fn updateUpdateHook(
                 const ticker = mutinymono.load(dotnet_funcs) catch |err| {
                     std.log.err("loading the embedded MutinyMono.dll failed ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
-                    return .settled;
+                    return .failed;
                 };
                 global.update_hook = .{ .mono_instantiate = .{ .ticker = ticker } };
                 continue :state global.update_hook;
@@ -487,10 +557,10 @@ fn updateUpdateHook(
                 bootstrapIl2cpp(dotnet_funcs, module, root_domain) catch |err| {
                     std.log.err("il2cpp Update hook failed to install ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .il2cpp = err } } };
-                    return .settled;
+                    return .failed;
                 };
                 global.update_hook = .installed;
-                return .settled;
+                return .installed;
             },
         },
         .mono_instantiate => |*hook| {
@@ -509,13 +579,13 @@ fn updateUpdateHook(
                 else => {
                     std.log.err("mono Update hook failed to install ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
-                    return .settled;
+                    return .failed;
                 },
             };
             global.update_hook = .installed;
-            return .settled;
+            return .installed;
         },
-        .installed => return .settled,
+        .installed => return .installed,
         .failed => |*hook| {
             mods.applyUpdates(dotnet_funcs);
             const has_mods = mods.hasMods();
@@ -524,7 +594,7 @@ fn updateUpdateHook(
             }
             hook.update_mods_warned = has_mods;
             failQueuedScripts(.update_hook_failed);
-            return .settled;
+            return .failed;
         },
     }
 }
@@ -707,15 +777,17 @@ fn bootstrap() BootstrapResult {
         .ready => |funcs| funcs,
         .unrecoverable_error => |err| {
             failQueuedScripts(.{ .runtime = err });
-            return .settled;
+            return .failed;
         },
         .not_ready => return .retry,
     };
-    return updateUpdateHook(
+    const result = updateUpdateHook(
         dotnet_funcs,
         global.runtime.ready.module,
         global.runtime.ready.root_domain,
     );
+    if (result == .installed and !ensureIoThread()) return .failed;
+    return result;
 }
 
 fn runScripts(dotnet_funcs: *const dotnet.Funcs) void {
@@ -862,6 +934,7 @@ const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
+const io = @import("dll.io");
 const ipc = @import("ipc.zig");
 const mods = @import("mods.zig");
 const unitygui = @import("unitygui.zig");

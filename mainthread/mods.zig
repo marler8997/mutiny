@@ -6,13 +6,13 @@ const global = struct {
     var mod_list: std.DoublyLinkedList = .{};
 };
 
-pub fn mutinyThreadQueueUpdate(name: ModNameSlice, content: []const u8) error{OutOfMemory}!void {
+pub fn ioThreadQueueUpdate(name: ModNameSlice, content: []const u8) error{OutOfMemory}!void {
     const text = try alloc.general().dupe(u8, content);
     errdefer alloc.general().free(text);
     queue(try ModEvent.create(name, text));
 }
 
-pub fn mutinyThreadQueueRemove(name: ModNameSlice) error{OutOfMemory}!void {
+pub fn ioThreadQueueRemove(name: ModNameSlice) error{OutOfMemory}!void {
     queue(try ModEvent.create(name, null));
 }
 

@@ -703,7 +703,7 @@ fn findClass(
 }
 
 // The runtime holds pointers into a synthetic class (obj->klass, its typeHierarchy entries), so it
-// must outlive the mutiny thread that built it. The arena is page-backed and never deinit'd, so its
+// must outlive the thread that built it. The arena is page-backed and never deinit'd, so its
 // allocations live for the process; each `*_class` flag keeps its slot to one build and lets a
 // re-attaching thread recover the class rather than build a second one the GC would then see twice.
 const selftest_method_name = "MutinySentinel";

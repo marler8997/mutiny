@@ -43,7 +43,7 @@ pub fn deleteStale() bool {
         if (!file.stale) continue;
         switch (file.last) {
             .initial, .err => {},
-            .text => mainthread.mutinyThreadQueueModRemove(file.nameSlice()) catch |err| switch (err) {
+            .text => mainthread.ioThreadQueueModRemove(file.nameSlice()) catch |err| switch (err) {
                 error.OutOfMemory => {
                     std.log.err("out of memory queueing removal of mod '{s}', will retry", .{file.name.slice()});
                     continue;
@@ -73,7 +73,7 @@ pub fn update(mod_name: ModNameSlice, mod_update: Update) bool {
                 .text => |last| if (last.hash == hash and last.len == content.len) return false,
                 .initial, .err => {},
             }
-            mainthread.mutinyThreadQueueModUpdate(mod_name, content) catch |err| switch (err) {
+            mainthread.ioThreadQueueModUpdate(mod_name, content) catch |err| switch (err) {
                 error.OutOfMemory => {
                     std.log.err("out of memory queueing mod '{s}', will retry", .{file.name.slice()});
                     return false;
@@ -89,7 +89,7 @@ pub fn update(mod_name: ModNameSlice, mod_update: Update) bool {
             }
             const had_text = file.last == .text;
             new_err.log(file.name.slice());
-            if (had_text) mainthread.mutinyThreadQueueModRemove(mod_name) catch |err| switch (err) {
+            if (had_text) mainthread.ioThreadQueueModRemove(mod_name) catch |err| switch (err) {
                 error.OutOfMemory => {
                     std.log.err("out of memory queueing removal of mod '{s}', will retry", .{file.name.slice()});
                     return false;

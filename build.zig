@@ -82,15 +82,39 @@ pub fn build(b: *std.Build) void {
         mainthread_mod.addImport("win32", win32_mod);
     }
 
+    const dll_io_mod = b.createModule(.{
+        .root_source_file = b.path("dll/io/io.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "mainthread", .module = mainthread_mod },
+        },
+    });
+    if (target.result.os.tag == .windows) {
+        dll_io_mod.addImport("win32", win32_mod);
+    }
+    mainthread_mod.addImport("dll.io", dll_io_mod);
+
+    const attach_mod = b.createModule(.{
+        .root_source_file = b.path("dll/attach/attach.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "mainthread", .module = mainthread_mod },
+        },
+    });
+    if (target.result.os.tag == .windows) {
+        attach_mod.addImport("win32", win32_mod);
+    }
+
     const mutiny_native_dll = b.addLibrary(.{
         .name = "Mutiny",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("mutinydll/mutinydll.zig"),
+            .root_source_file = b.path("dll/root/root.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "mainthread", .module = mainthread_mod },
+                .{ .name = "dll.attach", .module = attach_mod },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,
                 // }) },

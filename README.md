@@ -15,6 +15,10 @@ mutiny <PID> attach
 
 # run a one-off script and print what it logs
 mutiny <PID> run-script <NAME>
+
+# turn a mod off or on, the same as its checkbox in the in-game panel
+mutiny <PID> disable-mod <NAME>
+mutiny <PID> enable-mod <NAME>
 ```
 
 Once injected, Mutiny will continuously monitor the directory `%LOCALAPPDATA%\mutiny\app\InsertGameNameHere\mods` for script files and reload them when they change.
@@ -44,12 +48,12 @@ the game "PEAK":
 
 ```typescript
 // save this to %LOCALAPPDATA%\mutiny\app\PEAK\mods\stamina
+@Section(.update)
 var game = @Assembly("Assembly-CSharp")
 var Character = @Class(game.Character)
 if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
 var me = Character.localCharacter
 me.data.set_currentStamina(me.GetMaxStamina())
-@Exit("enabled")
 ```
 
 `@Exit(...)` ends the frame's run and the text is the mod's status, shown in the in-game panel
@@ -61,4 +65,7 @@ info|stamina: no character
 info|stamina: enabled
 ```
 
-To turn a mod off, add `@Exit("disabled")` as its first line and save, or delete the file.
+To turn a mod off, untick it in the in-game panel, run `mutiny <PID> disable-mod stamina`, or
+delete the file. A mod that changes something the game won't put back on its own can undo
+itself with a `@Section(.disable)` part, which runs once when the mod is turned off, deleted or
+edited; `mutiny-agent.md` has the details.

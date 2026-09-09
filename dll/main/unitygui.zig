@@ -144,8 +144,9 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
                     panel.minimized = !panel.minimized;
                     context.use(event);
                 } else if (if (panel.minimized) null else checkboxAt(box, x, y)) |mod| {
-                    mod.enabled = !mod.enabled;
-                    std.log.info("mod '{s}' {s} from the panel", .{ mod.name.slice(), if (mod.enabled) "enabled" else "disabled" });
+                    const enable = !mod.enabled();
+                    std.debug.assert(mod.setEnabled(enable) == .changed);
+                    std.log.info("mod '{s}' {s} from the panel", .{ mod.name.slice(), if (enable) "enabled" else "disabled" });
                     context.use(event);
                 } else if (box.contains(x, y)) {
                     panel.drag = .{ .dx = x - panel.x, .dy = y - panel.y };
@@ -182,17 +183,18 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
         const strings = context.modStrings(mod) orelse return;
         const check = checkboxRect(box, y);
         context.outline(check);
-        if (mod.enabled) context.fill(.{
+        if (mod.enabled()) context.fill(.{
             .x = check.x + 3,
             .y = check.y + 3,
             .width = check.width - 6,
             .height = check.height - 6,
         }, .white);
         const x = box.x + margin + checkbox_column;
-        context.color(if (mod.enabled) .mod_name else .disabled);
+        context.color(if (mod.enabled()) .mod_name else .disabled);
         context.label(.{ .x = x, .y = y, .width = name_column, .height = line_height }, strings.name);
-        context.color(if (!mod.enabled) .disabled else switch (mod.state) {
-            .ok, .result => .white,
+        context.color(switch (mod.statusText().kind) {
+            .disabled => .disabled,
+            .ok => .white,
             .err => .status_error,
         });
         context.label(.{ .x = x + name_column, .y = y, .width = width - margin * 2 - checkbox_column - name_column, .height = line_height }, strings.status);
@@ -264,10 +266,11 @@ const Context = struct {
         if (mod.label.name == .null) {
             mod.label.name = newString(dotnet_funcs, mod.name.slice()) orelse return null;
         }
-        const status_wyhash = std.hash.Wyhash.hash(0, mod.status.slice());
+        const status_text = mod.statusText().text;
+        const status_wyhash = std.hash.Wyhash.hash(0, status_text);
         if (mod.label.status == .null or mod.label.status_wyhash != status_wyhash) {
             if (mod.label.status != .null) dotnet_funcs.gchandle_free(mod.label.status);
-            mod.label.status = newString(dotnet_funcs, mod.status.slice()) orelse return null;
+            mod.label.status = newString(dotnet_funcs, status_text) orelse return null;
             mod.label.status_wyhash = status_wyhash;
         }
         return .{ .name = mod.label.name, .status = mod.label.status };

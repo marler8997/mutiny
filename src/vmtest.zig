@@ -205,6 +205,29 @@ pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !voi
     try Vm.testMod(dotnet_funcs,
         \\@Log("every frame")
     , .{ .err = "1: @Log is not supported in mods, use @Exit" });
+    {
+        const text =
+            \\@Section(.update)
+            \\var n = 1
+            \\@Exit("update ran ", n)
+            \\@Section(.disable)
+            \\@Nothing()
+            \\@Assert(0)
+        ;
+        const scanned = switch (sections.scan(text)) {
+            .sections => |s| s,
+            .err => |err| {
+                std.log.err("scan failed: {f}", .{err.fmt(text)});
+                return error.TestUnexpectedError;
+            },
+        };
+        const disable = scanned.get(.disable).?;
+        try Vm.testMod(dotnet_funcs, scanned.get(.update).?.text(text), .{ .result = "update ran 1" });
+        try Vm.testBadCodeAtLine(dotnet_funcs, disable.text(text), disable.first_line, "6: assert");
+    }
+    try Vm.testBadCode(dotnet_funcs,
+        \\@Section(.update)
+    , "1: unknown builtin '@Section'");
     try Vm.testCode(dotnet_funcs,
         \\@Exit("not a mod, so this is logged")
         \\@Assert(0)
@@ -311,6 +334,7 @@ const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
 const mutinymono = @import("mutinymono.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
+const sections = @import("sections.zig");
 
 const UnityVersion = @import("UnityVersion.zig");
 const Vm = @import("Vm.zig");

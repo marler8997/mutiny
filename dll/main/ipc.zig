@@ -95,30 +95,79 @@ fn wndProc(
 
 fn onCopyData(wparam: win32.WPARAM, lparam: win32.LPARAM) win32.LRESULT {
     const copy_data: *const win32.COPYDATASTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
-    if (copy_data.dwData != mutinyipc.wm_copydata_run_script) {
-        std.log.info("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
-        return 0x7fffffff;
-    }
+    const kind: enum { run_script, set_mod_enabled } = switch (copy_data.dwData) {
+        mutinyipc.wm_copydata_run_script => .run_script,
+        mutinyipc.wm_copydata_set_mod_enabled => .set_mod_enabled,
+        else => {
+            std.log.info("ignoring WM_COPYDATA with dwData 0x{x}", .{copy_data.dwData});
+            return 0x7fffffff;
+        },
+    };
     if (copy_data.cbData == 0 or copy_data.cbData % 2 != 0) {
-        std.log.info("bad run-script cbData {}", .{copy_data.cbData});
+        std.log.info("bad {t} cbData {}", .{ kind, copy_data.cbData });
         return 0x7fffffff;
     }
     const request_bytes = @as([*]const u8, @ptrCast(copy_data.lpData.?))[0..copy_data.cbData];
     const request: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, request_bytes));
     var strings = mutinyipc.StringList.init(request) catch {
-        std.log.info("malformed run-script request", .{});
+        std.log.info("malformed {t} request", .{kind});
         return 0x7fffffff;
     };
-    const script = blk: {
+    const first_string = blk: {
         const maybe_name = strings.next() catch {
-            std.log.info("malformed run-script request strings", .{});
+            std.log.info("malformed {t} request strings", .{kind});
             return 0x7fffffff;
         };
         break :blk maybe_name orelse {
-            std.log.info("run-script request has no script name", .{});
+            std.log.info("{t} request has no name", .{kind});
             return 0x7fffffff;
         };
     };
+    return switch (kind) {
+        .run_script => onRunScript(wparam, first_string, &strings),
+        .set_mod_enabled => onSetModEnabled(wparam, first_string, &strings),
+    };
+}
+
+fn onSetModEnabled(wparam: win32.WPARAM, name_w: []const u16, args: *mutinyipc.StringList) win32.LRESULT {
+    const enabled = switch (wparam) {
+        0 => false,
+        1 => true,
+        else => {
+            std.log.info("set-mod-enabled wParam {} is not 0 or 1", .{wparam});
+            return 0x7fffffff;
+        },
+    };
+    if (args.next() catch null != null) {
+        std.log.info("set-mod-enabled request has extra strings", .{});
+        return 0x7fffffff;
+    }
+    const name_utf8_len = std.unicode.calcWtf8Len(name_w);
+    if (name_utf8_len > ModNameSlice.max_len) {
+        std.log.info("set-mod-enabled name '{f}' is too long", .{fmtW(name_w)});
+        return @intFromEnum(mutinyipc.SetModEnabledResult.no_such_mod);
+    }
+    var name_buf: [ModNameSlice.max_len]u8 = undefined;
+    std.debug.assert(name_utf8_len == std.unicode.wtf16LeToWtf8(&name_buf, name_w));
+    const name = name_buf[0..name_utf8_len];
+    const mod = mods.findMod(name) orelse {
+        std.log.info("set-mod-enabled: no mod named '{s}'", .{name});
+        return @intFromEnum(mutinyipc.SetModEnabledResult.no_such_mod);
+    };
+    const word = if (enabled) "enabled" else "disabled";
+    switch (mod.setEnabled(enabled)) {
+        .unchanged => {
+            std.log.info("mod '{s}' is already {s}", .{ name, word });
+            return @intFromEnum(mutinyipc.SetModEnabledResult.unchanged);
+        },
+        .changed => {
+            std.log.info("mod '{s}' {s} from the cli", .{ name, word });
+            return @intFromEnum(mutinyipc.SetModEnabledResult.changed);
+        },
+    }
+}
+
+fn onRunScript(wparam: win32.WPARAM, script: []const u16, strings: *mutinyipc.StringList) win32.LRESULT {
     const pid: u32 = std.math.cast(u32, wparam) orelse {
         std.log.info("WM_COPYDATA wParam {} is not a valid 32-bit pid", .{wparam});
         return 0x7fffffff;
@@ -154,7 +203,7 @@ fn onCopyData(wparam: win32.WPARAM, lparam: win32.LPARAM) win32.LRESULT {
     var pipe_writer = pipe_file.writerStreaming(&pipe_write_buf);
     const writer = &pipe_writer.interface;
 
-    if (addScript(pid, pipe, writer, script, &strings)) {
+    if (addScript(pid, pipe, writer, script, strings)) {
         pipe_owned = false;
     } else |e| switch (e) {
         error.Reported => return mutinyipc.wm_copydata_result,
@@ -267,6 +316,7 @@ const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
 
 const mutinyipc = mutiny.mutinyipc;
+const mods = @import("mods.zig");
 const scripts = @import("scripts.zig");
 const dll_io = @import("dll_io");
 

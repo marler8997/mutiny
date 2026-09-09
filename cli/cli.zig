@@ -6,6 +6,8 @@ const usage =
     \\  mutiny PID attach            get Mutiny running inside an already-running game.
     \\  mutiny PID run-script NAME   run scripts\NAME in an injected game and print its output
     \\                               an @-prefixed NAME is a builtin, e.g. @assemblies.
+    \\  mutiny PID enable-mod NAME   turn mods\NAME on or off, the same as its checkbox in
+    \\  mutiny PID disable-mod NAME  the in-game panel; a disabled mod runs its .disable section
     \\
 ;
 
@@ -28,12 +30,14 @@ pub fn main() !u8 {
     // alphabetic, so the two can't collide.
     if (std.fmt.parseInt(u32, command, 10)) |pid| {
         const verb = args.next() orelse errExit(
-            "expected a command after pid {} (attach, run-script)",
+            "expected a command after pid {} (attach, run-script, enable-mod, disable-mod)",
             .{pid},
         );
         if (std.mem.eql(u8, verb, "attach")) return cmdAttach(arena, &args, pid);
         if (std.mem.eql(u8, verb, "run-script")) return cmdRunScript(arena, &args, pid);
-        errExit("unknown command '{s}' for pid {} (attach, run-script)", .{ verb, pid });
+        if (std.mem.eql(u8, verb, "enable-mod")) return cmdSetModEnabled(arena, &args, pid, true);
+        if (std.mem.eql(u8, verb, "disable-mod")) return cmdSetModEnabled(arena, &args, pid, false);
+        errExit("unknown command '{s}' for pid {} (attach, run-script, enable-mod, disable-mod)", .{ verb, pid });
     } else |_| {}
 
     if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
@@ -194,6 +198,52 @@ fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u
             written += wrote;
         }
     }
+    return 0;
+}
+
+fn cmdSetModEnabled(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32, enabled: bool) !u8 {
+    const verb = if (enabled) "enable-mod" else "disable-mod";
+    const name = args.next() orelse errExit("{s} requires a mod name", .{verb});
+    noMoreArgs(args, verb);
+    if (std.mem.indexOfAny(u8, name, "\\/:") != null) errExit(
+        "'{s}' looks like a path, pass just the name of a file in the mods directory",
+        .{name},
+    );
+
+    const hwnd = mutinyipc.findWindow(pid) orelse errExit(
+        "pid {} has no mutiny window (is Mutiny.dll injected?)",
+        .{pid},
+    );
+
+    const request = arena.alloc(u16, 1 + 1 + wtf16Len(name)) catch |e| oom(e);
+    request[0] = 1;
+    std.debug.assert(1 + writeString(request[1..], name) == request.len);
+
+    const copy_data: win32.COPYDATASTRUCT = .{
+        .dwData = mutinyipc.wm_copydata_set_mod_enabled,
+        .cbData = @intCast(request.len * 2),
+        .lpData = @ptrCast(request.ptr),
+    };
+    const result = win32.SendMessageW(
+        hwnd,
+        win32.WM_COPYDATA,
+        @intFromBool(enabled),
+        @bitCast(@intFromPtr(&copy_data)),
+    );
+    const word = if (enabled) "enabled" else "disabled";
+    var stdout_buf: [256]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+    switch (@as(mutinyipc.SetModEnabledResult, @enumFromInt(result))) {
+        .changed => stdout.print("mod '{s}' {s}\n", .{ name, word }) catch return stdout_writer.err.?,
+        .unchanged => stdout.print("mod '{s}' was already {s}\n", .{ name, word }) catch return stdout_writer.err.?,
+        .no_such_mod => errExit("pid {} has no mod named '{s}'", .{ pid, name }),
+        _ => errExit(
+            "pid {} did not handle the request (returned {}), is it running a compatible Mutiny.dll?",
+            .{ pid, result },
+        ),
+    }
+    stdout.flush() catch return stdout_writer.err.?;
     return 0;
 }
 

@@ -48,9 +48,7 @@ Which directory to use is decided by *lifetime*, not content - both hold the sam
   as a **mod**, `mods\<name>`. This is the default for anything a player asks to *have*. See
   "Mods" below.
 
-Writing a file into `mods\` starts it immediately. Deleting it stops it; for a mod,
-so does adding `@Exit("disabled")` as its first line, which keeps the file and logs
-`disabled` once.
+Writing a new file into `mods\` loads and enables it immediately.
 
 ## Mods
 
@@ -66,24 +64,24 @@ like an effect you have *added to the game* rather than a script you run:
   frame looks again;
 - its status reaches the log only when it **changes**, so the log reads like an event history,
   not a trace;
-- it is on while the file exists; to turn it off, add `@Exit("disabled")` as its first
-  line, or delete the file. Nothing to manage.
+- it is on while the file exists; the player can turn it off from the in-game panel, and
+  `mutiny <PID> disable-mod <name>` / `enable-mod <name>` do the same from the CLI.
 
 Here's an example of a mod for "infinit stamina" in the game PEAK:
 
 ```
+@Section(.update)
 var game = @Assembly("Assembly-CSharp")
 var Character = @Class(game.Character)
 if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
 var me = Character.localCharacter
 me.data.set_currentStamina(me.GetMaxStamina())
-@Exit("enabled")
 ```
 
 When this is written to "mods/stamina", here's what it can look like in the log:
 
 ```
-13:54:46.239|98308|107484|PEAK|info|mod 'stamina' loaded (266 bytes)
+13:54:46.239|98308|107484|PEAK|info|mod 'stamina' loaded (250 bytes)
 13:55:01.418|98308|107484|PEAK|info|stamina: no character
 13:55:01.799|98308|107484|PEAK|info|stamina: enabled
 ```
@@ -91,10 +89,42 @@ When this is written to "mods/stamina", here's what it can look like in the log:
 Rules that differ from a script:
 
 - **`@Log` is an error** - a line per frame would bury the log. `@Exit(...)` takes the same arguments, **ends this frame's run**, and makes the text the frame's *result*; the result is logged only when it differs from the previous frame's. `@Exit()` with no arguments ends the frame silently.
-- **Result text should be stable unless you want something in the log.** `@Exit("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: "enabled" when the frame did its job, otherwise why not ("no character", "waiting for player").
+- **Result text should be stable unless you want something in the log.** `@Exit("hp=", hp)` with a value that changes every frame logs every frame - exactly what `@Log` was banned for. Report *states*: when the frame did its job, just finish (the panel shows "enabled" and the log says `recovered` if the previous frame reported something); otherwise say why not ("no character", "waiting for player").
 - Nothing survives between frames; state lives in the game.
 - **An error never stops it.** The error is logged once just like `@Exit()` unless it changes. `<name>: recovered` is logged when the error goes away. So a mod that fails until the level has loaded is fine as-is - but a guard with `@Exit` is better, because it names the state instead of showing an error.
 - Keep it short: its cost is paid every frame, on the main thread.
+
+### Sections
+
+A mod file is made of **sections**, one per hook, each introduced by a `@Section(.name)` line
+at the top level of the file (never inside `{ }`). Code outside a section is an error. Sections
+have no knowledge or interaction with each other, they are completely independent:
+
+```
+@Section(.update)
+var game = @Assembly("Assembly-CSharp")
+var Time = @Class(game.UnityEngine.Time)
+Time.set_timeScale(3)
+
+@Section(.disable)
+var game = @Assembly("Assembly-CSharp")
+var Time = @Class(game.UnityEngine.Time)
+Time.set_timeScale(1)
+```
+
+- `.update` runs every frame - the section almost every mod has.
+- `.disable` runs once when the mod stops: it is turned off, the file is deleted, or the
+  file is edited (the old text's `.disable` runs before the new text starts). Use it to undo
+  what the mod did. Nothing carries over from `.update`, so it can only restore to a value it
+  knows - declare what it needs again, as above.
+
+Each section is a complete script on its own: variables and `@Class` lookups do not carry
+across sections, so repeat them. Any section may be left out (an empty file is a mod that does
+nothing), each may appear once, and only comments may come before the first `@Section`.
+`@Exit(...)` text and errors from `.disable` go to the log with the hook name; `.update`
+behaves as described above. Error line
+numbers are file line numbers. Scripts in `scripts\` have no sections: a script is the whole
+file.
 
 ### Examples
 
@@ -106,6 +136,7 @@ PEAK, fly - a mod sees every frame, so "while the button is held" is an `if` on 
 input state; the result carries the one thing the player has to know:
 
 ```
+@Section(.update)
 var jumpImpulse = 1080
 
 var game = @Assembly("Assembly-CSharp")
@@ -139,6 +170,7 @@ player edits a number and saves, and the changed file reloads the mod:
 ```
 // transThrust: thrust while holding the jetpack   (game default = 6)
 // boostThrust: the boost burst                    (game default = 23)
+@Section(.update)
 var transThrust = 18
 var boostThrust = 70
 
@@ -152,8 +184,6 @@ if (@IsNull(jet)) { @Exit("waiting for jetpack") }
 
 set jet._maxTranslationalThrust = transThrust
 set jet._boostThrust = boostThrust
-
-@Exit("enabled")
 ```
 
 Outer Wilds, world speed - the mod's own header explains why it skips frames where
@@ -168,6 +198,7 @@ Outer Wilds, world speed - the mod's own header explains why it skips frames whe
 // have to re-save after pausing (the old normal-mod version needed that).
 // To turn off: delete this file, or set speed = 1 and save.
 
+@Section(.update)
 var speed = 1
 
 var core = @Assembly("UnityEngine.CoreModule")
@@ -176,8 +207,6 @@ var cur = Time.get_timeScale()
 
 // leave 0 alone (that is the pause menu); otherwise hold it at `speed`
 if (cur != 0) { Time.set_timeScale(speed) }
-
-@Exit("enabled")
 ```
 
 Outer Wilds, god mode - the header says what it does, what it does not, and what stays
@@ -193,7 +222,7 @@ behind when it is turned off:
 // Does NOT stop scripted deaths (sun, black hole) or the ~22-min supernova reset.
 // To turn off: delete this file. (Invincibility flag clears on the next loop reset.)
 
-
+@Section(.update)
 var game = @Assembly("Assembly-CSharp")
 var Locator = @Class(game.Locator)
 var ctrl = Locator.GetPlayerController()
@@ -213,7 +242,6 @@ var jet = ctrl._jetpackModel
 if (@NotNull(jet)) {
     set jet._boostChargeFraction = 1
 }
-@Exit("enabled")
 ```
 
 
@@ -417,10 +445,10 @@ These are not style advice. Each one is a way to take the game down.
 
 ## Tell the player about these
 
-- **How to turn an effect off.** Add `@Exit("disabled")` as the first line of
-  `mods\<name>` and save; remove the line to turn it back on. Deleting the file also
-  works. To tune one, edit the numbers at the top and save. Say which of its changes the game
-  keeps after it is turned off.
+- **How to tune an effect.** Edit the numbers at the top of its `.update` section in
+  `mods\<name>` and save. If the mod changes something the game does not restore on its own,
+  give it a `.disable` section that puts the value back, and say which of its changes stay
+  behind after it is turned off.
 - **`mutiny run-script` always exits 0**, even when the script failed. Read the output to find out
   whether it worked; do not trust the exit code.
 - **A syntax error stops the whole script**, and the message names a line number and what was
@@ -431,6 +459,7 @@ These are not style advice. Each one is a way to take the game down.
 A `mods\<name>` file that keeps the player at full health once they exist.
 
 ```
+@Section(.update)
 var game = @Assembly("Assembly-CSharp")
 var SemiFunc = @Class(game.SemiFunc)
 
@@ -440,7 +469,6 @@ var health = player.playerHealth
 if (health.health < health.maxHealth) {
     health.Heal(health.maxHealth - health.health, 0)
 }
-@Exit("enabled")
 ```
 
 Note what it does before touching anything: names the assembly, resolves the class explicitly,

@@ -66,7 +66,7 @@ fn setError(vm: *Vm, e: Error) error{Vm} {
     return error.Vm;
 }
 
-const Extent = struct { start: usize, end: usize };
+const Extent = lex.Extent;
 
 const ReturnStorage = struct {
     type: ?Type = null,
@@ -143,13 +143,6 @@ const Type = enum {
 
 const TypeContext = enum { @"return", param };
 
-fn getLineNum(text: []const u8, offset: usize) u32 {
-    var line_num: u32 = 1;
-    for (text[0..@min(text.len, offset)]) |c| {
-        if (c == '\n') line_num += 1;
-    }
-    return line_num;
-}
 
 pub fn deinit(vm: *Vm) void {
     vm.reset();
@@ -182,7 +175,7 @@ pub fn reset(vm: *Vm) void {
     };
     while (true) {
         const id_start, const after_id_addr = vm.readValue(usize, id_addr);
-        const id = lex(vm.text, id_start);
+        const id = lex.next(vm.text, id_start);
         std.debug.assert(id.tag == .identifier);
         var previous_id_addr: Memory.Addr = undefined;
         var type_addr: Memory.Addr = undefined;
@@ -223,7 +216,7 @@ fn discardSymbolsUntil(vm: *Vm, mark: ?Memory.Addr) void {
 
 fn discardTopSymbol(vm: *Vm, addr: Memory.Addr) ?Memory.Addr {
     const id_start, const after_id_addr = vm.readValue(usize, addr);
-    const id = lex(vm.text, id_start);
+    const id = lex.next(vm.text, id_start);
     std.debug.assert(id.tag == .identifier);
     var previous_id_addr: ?Memory.Addr = null;
     var type_addr: Memory.Addr = undefined;
@@ -266,7 +259,7 @@ fn logStack(vm: *Vm) void {
             if (next_addr.eql(vm.mem.top())) break;
             const id_addr = next_addr;
             const id_start, next_addr = vm.readValue(usize, id_addr);
-            const id = lex(vm.text, id_start);
+            const id = lex.next(vm.text, id_start);
             std.debug.assert(id.tag == .identifier);
             const id_text = vm.text[id.start..id.end];
             std.debug.print("{f}: symbol '{s}'\n", .{ id_addr, id_text });
@@ -303,7 +296,7 @@ fn logStack(vm: *Vm) void {
 
 fn startSymbol(vm: *Vm, id_start: usize) error{Vm}!void {
     {
-        const token = lex(vm.text, id_start);
+        const token = lex.next(vm.text, id_start);
         std.debug.assert(token.tag == .identifier);
         std.debug.assert(token.start == id_start);
     }
@@ -450,7 +443,7 @@ pub fn evalFunction(
     args_addr: Memory.Addr,
 ) error{Vm}!usize {
     const body_start = blk: {
-        const token = lex(vm.text, start);
+        const token = lex.next(vm.text, start);
         if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
             .expected = "an open brace '{' to start function body",
             .token = token,
@@ -506,7 +499,7 @@ pub fn evalBlock(vm: *Vm, start: usize, comptime kind: enum { @"if" }) error{Vm}
     continue_parent: usize,
 } {
     const body_start = blk: {
-        const token = lex(vm.text, start);
+        const token = lex.next(vm.text, start);
         if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
             .expected = "an open brace '{' to start " ++ @tagName(kind) ++ " block",
             .token = token,
@@ -567,11 +560,11 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
     direct_break_no_loop: usize,
     child_block_break: BlockBreak,
 } {
-    const first_token = lex(vm.text, start);
+    const first_token = lex.next(vm.text, start);
     switch (first_token.tag) {
         .keyword_fn => {
             const id_extent = blk: {
-                const token = lex(vm.text, first_token.end);
+                const token = lex.next(vm.text, first_token.end);
                 if (token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after 'fn'",
                     .token = token,
@@ -579,7 +572,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
                 break :blk token.extent();
             };
             const arg_start = blk: {
-                const token = lex(vm.text, id_extent.end);
+                const token = lex.next(vm.text, id_extent.end);
                 if (token.tag != .l_paren) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an open paren '(' to start function args",
                     .token = token,
@@ -602,7 +595,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
                 "a '(' to start the if conditional",
             );
             const expr_addr = vm.mem.top();
-            const first_expr_token = lex(vm.text, after_lparen);
+            const first_expr_token = lex.next(vm.text, after_lparen);
             const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression inside the if conditional",
                 .token = first_expr_token,
@@ -659,7 +652,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
         .keyword_set => {
             const ref, const ref_end = try vm.evalReference(first_token.end);
             const after_equal = blk: {
-                const token = lex(vm.text, ref_end);
+                const token = lex.next(vm.text, ref_end);
                 if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
                     .expected = "'=' to delimit set destination/source",
                     .token = token,
@@ -667,13 +660,13 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
                 break :blk token.end;
             };
             const value_addr = vm.mem.top();
-            const expr_first_token = lex(vm.text, after_equal);
+            const expr_first_token = lex.next(vm.text, after_equal);
             const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expresson to follow '='",
                 .token = expr_first_token,
             } });
             if (value_addr.eql(vm.mem.top())) return vm.setError(.{ .void_assignment = .{
-                .kind = .{ .ref_start = lex(vm.text, first_token.end).start },
+                .kind = .{ .ref_start = lex.next(vm.text, first_token.end).start },
             } });
             var src = vm.pop(value_addr);
             // NOTE: is this discard correct?
@@ -683,7 +676,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
         },
         .keyword_var => {
             const id_extent = blk: {
-                const id_token = lex(vm.text, first_token.end);
+                const id_token = lex.next(vm.text, first_token.end);
                 if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after 'var'",
                     .token = id_token,
@@ -691,7 +684,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
                 break :blk id_token.extent();
             };
             const after_equal = blk: {
-                const token = lex(vm.text, id_extent.end);
+                const token = lex.next(vm.text, id_extent.end);
                 if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
                     .expected = "an '=' to initialize new var",
                     .token = token,
@@ -700,7 +693,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
             };
             try vm.startSymbol(id_extent.start);
             const value_addr = vm.mem.top();
-            const expr_first_token = lex(vm.text, after_equal);
+            const expr_first_token = lex.next(vm.text, after_equal);
             const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expresson to initialize new var",
                 .token = expr_first_token,
@@ -719,7 +712,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
     if (!vm.mem.top().eql(expr_addr)) {
         const expr_type, _ = vm.readValue(Type, expr_addr);
         {
-            const token = lex(vm.text, expr_end);
+            const token = lex.next(vm.text, expr_end);
             if (token.tag == .@"=") return vm.setError(.{ .bare_assign = .{
                 .assign_pos = token.start,
             } });
@@ -735,7 +728,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
 
 fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
     var ref: Reference, var offset: usize = blk: {
-        const token = lex(vm.text, start);
+        const token = lex.next(vm.text, start);
         switch (token.tag) {
             .identifier => {
                 const entry = vm.lookup(vm.text[token.start..token.end]) orelse return vm.setError(.{
@@ -751,13 +744,13 @@ fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
     };
     while (true) {
         const after_dot = blk: {
-            const token = lex(vm.text, offset);
+            const token = lex.next(vm.text, offset);
             switch (token.tag) {
                 .period => break :blk token.end,
                 else => return .{ ref, offset },
             }
         };
-        const id_token = lex(vm.text, after_dot);
+        const id_token = lex.next(vm.text, after_dot);
         switch (id_token.tag) {
             .identifier => try vm.dot(&ref, id_token.extent()),
             else => return vm.setError(.{ .unexpected_token = .{
@@ -912,10 +905,10 @@ fn evalExprBinary(vm: *Vm, first_token: Token, maybe_priority: ?BinaryOpPriority
     var left_expr_pos = first_token.start;
     var after_expr = try vm.evalExprBinary(first_token, priority.next()) orelse return null;
     while (true) {
-        const op_token = lex(vm.text, after_expr);
+        const op_token = lex.next(vm.text, after_expr);
         const binary_op = BinaryOp.init(op_token.tag, priority) orelse return after_expr;
         const right_expr_addr = vm.mem.top();
-        const right_token = lex(vm.text, op_token.end);
+        const right_token = lex.next(vm.text, op_token.end);
         after_expr = try vm.evalExprBinary(right_token, priority.next()) orelse return after_expr;
         try vm.executeBinaryOp(
             binary_op,
@@ -940,14 +933,14 @@ fn evalExprSuffix(
     expr_addr: Memory.Addr,
     suffix_start: usize,
 ) error{Vm}!?usize {
-    const suffix_op_token = lex(vm.text, suffix_start);
+    const suffix_op_token = lex.next(vm.text, suffix_start);
     return switch (suffix_op_token.tag) {
         .l_bracket => {
             return vm.setError(.{ .not_implemented = "array index" });
         },
         .period => {
             const id_extent = blk: {
-                const id_token = lex(vm.text, suffix_op_token.end);
+                const id_token = lex.next(vm.text, suffix_op_token.end);
                 if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after '.'",
                     .token = id_token,
@@ -1006,7 +999,7 @@ fn evalExprSuffix(
                     _, const id_start_addr = vm.readValue(*const dotnet.Assembly, value_addr);
                     const id_start, const end = vm.readValue(usize, id_start_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
-                    std.debug.assert(lex(vm.text, id_start).tag == .identifier);
+                    std.debug.assert(lex.next(vm.text, id_start).tag == .identifier);
                     return id_extent.end;
                 },
                 .null_class => {
@@ -1670,7 +1663,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             return first_token.end;
         },
         .period => {
-            const id_token = lex(vm.text, first_token.end);
+            const id_token = lex.next(vm.text, first_token.end);
             if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                 .expected = "an identifier after '.' to form an enum literal",
                 .token = id_token,
@@ -1689,12 +1682,12 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
             return args_end;
         },
         .l_paren => {
-            const first_expr_token = lex(vm.text, first_token.end);
+            const first_expr_token = lex.next(vm.text, first_token.end);
             const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                 .expected = "an expression after '('",
                 .token = first_expr_token,
             } });
-            const t = lex(vm.text, after_expr);
+            const t = lex.next(vm.text, after_expr);
             if (t.tag != .r_paren) return vm.setError(.{ .unexpected_token = .{
                 .expected = "a close paren ')' to end expression",
                 .token = t,
@@ -1725,7 +1718,7 @@ fn evalPrimaryTypeExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
                 .msg = "the 'new' keyword",
             } });
             // const id_extent = blk: {
-            //     const token = lex(vm.text, first_token.end);
+            //     const token = lex.next(vm.text, first_token.end);
             //     if (token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
             //         .expected = "an identifier to follow 'new'",
             //         .token = token,
@@ -1760,7 +1753,7 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
     var arg_index: u16 = 0;
     var text_offset = start;
     while (true) {
-        const first_token = lex(vm.text, text_offset);
+        const first_token = lex.next(vm.text, text_offset);
         if (first_token.tag == .r_paren) return .{
             .count = arg_index,
             .end = first_token.end,
@@ -1786,7 +1779,7 @@ fn evalFnCallArgsManaged(vm: *Vm, start: usize) error{Vm}!struct {
 
         arg_index += 1;
 
-        const second_token = lex(vm.text, text_offset);
+        const second_token = lex.next(vm.text, text_offset);
         text_offset = second_token.end;
         switch (second_token.tag) {
             .r_paren => return .{ .count = arg_index, .end = second_token.end },
@@ -1832,7 +1825,7 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
     var arg_index: u16 = 0;
     var text_offset = start;
     while (true) {
-        const first_token = lex(vm.text, text_offset);
+        const first_token = lex.next(vm.text, text_offset);
         if (first_token.tag == .r_paren) {
             text_offset = first_token.end;
             break;
@@ -1869,7 +1862,7 @@ fn evalFnCallArgs(vm: *Vm, params: Params, start: usize) error{Vm}!usize {
         arg_index += 1;
 
         {
-            const token = lex(vm.text, text_offset);
+            const token = lex.next(vm.text, text_offset);
             text_offset = token.end;
             switch (token.tag) {
                 .r_paren => break,
@@ -2316,7 +2309,7 @@ fn logValues(
                 .null_object => try writer.print("<null-object>", .{}),
                 .object => |gc_handle| try writeObject(vm.dotnet_funcs, writer, gc_handle, vm.handle_tracker),
                 .object_method => |method| {
-                    const method_token = lex(vm.text, method.id_start);
+                    const method_token = lex.next(vm.text, method.id_start);
                     std.debug.assert(method_token.tag == .identifier);
                     try writer.print("<object-method '{s}'>", .{vm.text[method_token.start..method_token.end]});
                 },
@@ -2394,14 +2387,14 @@ fn writeObject(
 const DottedIterator = struct {
     id: Extent,
     pub fn init(text: []const u8, start: usize) DottedIterator {
-        const token = lex(text, start);
+        const token = lex.next(text, start);
         std.debug.assert(token.tag == .identifier);
         return .{ .id = token.extent() };
     }
     pub fn next(it: *DottedIterator, text: []const u8) bool {
-        const period_token = lex(text, it.id.end);
+        const period_token = lex.next(text, it.id.end);
         if (period_token.tag != .period) return false;
-        const id_token = lex(text, period_token.end);
+        const id_token = lex.next(text, period_token.end);
         if (id_token.tag != .identifier) return false;
         it.id = id_token.extent();
         return true;
@@ -2434,7 +2427,7 @@ fn lookup(vm: *Vm, needle: []const u8) ?SymbolEntry {
     };
     while (true) {
         const id_start, const after_id_addr = vm.readValue(usize, id_addr);
-        const id = lex(vm.text, id_start);
+        const id = lex.next(vm.text, id_start);
         std.debug.assert(id.tag == .identifier);
         var previous_id_addr: Memory.Addr = undefined;
         var type_addr: Memory.Addr = undefined;
@@ -2470,7 +2463,7 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
         .string_literal => {
             const start, const end = vm.readValue(usize, addr);
             std.debug.assert(vm.text[start] == '"');
-            const token = lex(vm.text, start);
+            const token = lex.next(vm.text, start);
             std.debug.assert(token.start == start);
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
@@ -2478,7 +2471,7 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
         },
         .enum_literal => {
             const start, const end = vm.readValue(usize, addr);
-            const token = lex(vm.text, start);
+            const token = lex.next(vm.text, start);
             std.debug.assert(token.start == start);
             std.debug.assert(token.tag == .identifier);
             return .{ .{ .enum_literal = token.extent() }, end };
@@ -2498,7 +2491,7 @@ fn readAnyValue(vm: *Vm, value_type: Type, addr: Memory.Addr) struct { Value, Me
         .null_assembly => {
             const start, const end = vm.readValue(usize, addr);
             std.debug.assert(vm.text[start] == '"');
-            const token = lex(vm.text, start);
+            const token = lex.next(vm.text, start);
             std.debug.assert(token.start == start);
             std.debug.assert(token.tag == .string_literal);
             std.debug.assert(vm.text[token.end - 1] == '"');
@@ -2732,7 +2725,7 @@ const VmEat = struct {
     }
 
     fn eatToken(vm: VmEat, start: usize, expected_tag: Token.Tag, expected: [:0]const u8) error{Vm}!usize {
-        const t = lex(vm.text, start);
+        const t = lex.next(vm.text, start);
         if (t.tag != expected_tag) return vm.setError(.{
             .unexpected_token = .{ .expected = expected, .token = t },
         });
@@ -2741,7 +2734,7 @@ const VmEat = struct {
 
     pub fn evalBlock(vm: VmEat, start: usize, comptime kind: enum { function, @"if" }) error{Vm}!usize {
         const body_start = blk: {
-            const token = lex(vm.text, start);
+            const token = lex.next(vm.text, start);
             if (token.tag != .l_brace) return vm.setError(.{ .unexpected_token = .{
                 .expected = "an open brace '{' to start " ++ switch (kind) {
                     .function => "function body",
@@ -2800,12 +2793,12 @@ const VmEat = struct {
         statement_end: usize,
         loop_escape: usize,
     } {
-        const first_token = lex(vm.text, start);
+        const first_token = lex.next(vm.text, start);
         switch (first_token.tag) {
             .identifier => {
-                const second_token = lex(vm.text, first_token.end);
+                const second_token = lex.next(vm.text, first_token.end);
                 if (second_token.tag == .@"=") {
-                    const expr_first_token = lex(vm.text, second_token.end);
+                    const expr_first_token = lex.next(vm.text, second_token.end);
                     const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                         .expected = "an expresson",
                         .token = expr_first_token,
@@ -2823,7 +2816,7 @@ const VmEat = struct {
                     .l_paren,
                     "a '(' to start the if conditional",
                 );
-                const first_expr_token = lex(vm.text, after_lparen);
+                const first_expr_token = lex.next(vm.text, after_lparen);
                 const after_expr = try vm.evalExpr(first_expr_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expression inside the if conditional",
                     .token = first_expr_token,
@@ -2842,14 +2835,14 @@ const VmEat = struct {
             .keyword_set => {
                 const ref_end = try vm.evalReference(first_token.end);
                 const after_equal = blk: {
-                    const token = lex(vm.text, ref_end);
+                    const token = lex.next(vm.text, ref_end);
                     if (token.tag != .@"=") return vm.setError(.{ .unexpected_token = .{
                         .expected = "'=' to delimit set destination/source",
                         .token = token,
                     } });
                     break :blk token.end;
                 };
-                const expr_first_token = lex(vm.text, after_equal);
+                const expr_first_token = lex.next(vm.text, after_equal);
                 const after_expr = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expresson to follow '='",
                     .token = expr_first_token,
@@ -2859,7 +2852,7 @@ const VmEat = struct {
             .keyword_var => {
                 const after_id = try vm.eatToken(first_token.end, .identifier, "an identifier after 'var'");
                 const after_equal = try vm.eatToken(after_id, .@"=", "an '=' to initialize new var");
-                const expr_first_token = lex(vm.text, after_equal);
+                const expr_first_token = lex.next(vm.text, after_equal);
                 const expr_end = try vm.evalExpr(expr_first_token) orelse return vm.setError(.{ .unexpected_token = .{
                     .expected = "an expression to initialize new var",
                     .token = expr_first_token,
@@ -2875,7 +2868,7 @@ const VmEat = struct {
 
     fn evalReference(vm: VmEat, start: usize) error{Vm}!usize {
         var offset: usize = blk: {
-            const token = lex(vm.text, start);
+            const token = lex.next(vm.text, start);
             break :blk switch (token.tag) {
                 .identifier => token.end,
                 else => return vm.setError(.{ .unexpected_token = .{
@@ -2886,13 +2879,13 @@ const VmEat = struct {
         };
         while (true) {
             const after_dot = blk: {
-                const token = lex(vm.text, offset);
+                const token = lex.next(vm.text, offset);
                 switch (token.tag) {
                     .period => break :blk token.end,
                     else => return offset,
                 }
             };
-            const id_token = lex(vm.text, after_dot);
+            const id_token = lex.next(vm.text, after_dot);
             switch (id_token.tag) {
                 .identifier => {},
                 else => return vm.setError(.{ .unexpected_token = .{
@@ -2913,9 +2906,9 @@ const VmEat = struct {
         var left_expr_pos = first_token.start;
         var after_expr = try vm.evalExprBinary(first_token, priority.next()) orelse return null;
         while (true) {
-            const op_token = lex(vm.text, after_expr);
+            const op_token = lex.next(vm.text, after_expr);
             _ = BinaryOp.init(op_token.tag, priority) orelse return after_expr;
-            const right_token = lex(vm.text, op_token.end);
+            const right_token = lex.next(vm.text, op_token.end);
             after_expr = try vm.evalExprBinary(right_token, priority.next()) orelse return after_expr;
             left_expr_pos = right_token.start;
         }
@@ -2929,13 +2922,13 @@ const VmEat = struct {
     }
 
     fn evalExprSuffix(vm: VmEat, suffix_start: usize) error{Vm}!?usize {
-        const suffix_op_token = lex(vm.text, suffix_start);
+        const suffix_op_token = lex.next(vm.text, suffix_start);
         return switch (suffix_op_token.tag) {
             .l_bracket => {
                 return vm.setError(.{ .not_implemented = "array index" });
             },
             .period => {
-                const id_token = lex(vm.text, suffix_op_token.end);
+                const id_token = lex.next(vm.text, suffix_op_token.end);
                 if (id_token.tag != .identifier) return vm.setError(.{ .unexpected_token = .{
                     .expected = "an identifier after '.'",
                     .token = id_token,
@@ -2973,7 +2966,7 @@ const VmEat = struct {
     fn evalFnCallArgs(vm: VmEat, start: usize) error{Vm}!usize {
         var offset = start;
         while (true) {
-            const first_token = lex(vm.text, offset);
+            const first_token = lex.next(vm.text, offset);
             if (first_token.tag == .r_paren) {
                 offset = first_token.end;
                 break;
@@ -2983,7 +2976,7 @@ const VmEat = struct {
                 .token = first_token,
             } });
             {
-                const token = lex(vm.text, offset);
+                const token = lex.next(vm.text, offset);
                 offset = token.end;
                 switch (token.tag) {
                     .r_paren => break,
@@ -3004,7 +2997,7 @@ const VmEat = struct {
         var param_count: u16 = 0;
         var offset = start;
         while (true) {
-            const first_token = lex(vm.text, offset);
+            const first_token = lex.next(vm.text, offset);
             offset = first_token.end;
             switch (first_token.tag) {
                 .r_paren => return .{ .count = param_count, .end = first_token.end },
@@ -3016,7 +3009,7 @@ const VmEat = struct {
             }
             if (param_count == std.math.maxInt(u16)) return vm.setError(.{ .not_implemented = "more than 65535 args" });
             param_count += 1;
-            const second_token = lex(vm.text, offset);
+            const second_token = lex.next(vm.text, offset);
             offset = second_token.end;
             switch (second_token.tag) {
                 .r_paren => return .{ .count = param_count, .end = second_token.end },
@@ -3612,388 +3605,6 @@ const BinaryOp = enum {
     }
 };
 
-const Token = struct {
-    tag: Tag,
-    start: usize,
-    end: usize,
-
-    pub fn extent(t: Token) Extent {
-        return .{ .start = t.start, .end = t.end };
-    }
-
-    pub fn extentTrimmed(t: Token) Extent {
-        return .{ .start = t.start + 1, .end = t.end - 1 };
-    }
-
-    pub fn fmt(t: Token, text: []const u8) TokenFmt {
-        return .{ .token = t, .text = text };
-    }
-
-    pub const Tag = enum {
-        invalid,
-        identifier,
-        string_literal,
-        // char_literal,
-        eof,
-        builtin,
-        @"!",
-        // pipe,
-        // pipe_pipe,
-        @"=",
-        @"==",
-        @"!=",
-        l_paren,
-        r_paren,
-        // percent,
-        l_brace,
-        r_brace,
-        l_bracket,
-        r_bracket,
-        period,
-        plus,
-        minus,
-        // colon,
-        slash,
-        comma,
-        // ampersand,
-        @"<",
-        @"<=",
-        @">",
-        @">=",
-        number_literal,
-        keyword_break,
-        keyword_continue,
-        keyword_fn,
-        keyword_if,
-        keyword_new,
-        keyword_set,
-        keyword_var,
-        keyword_loop,
-    };
-    pub const Loc = struct {
-        start: usize,
-        end: usize,
-    };
-
-    pub const keywords = std.StaticStringMap(Tag).initComptime(.{
-        .{ "break", .keyword_break },
-        .{ "continue", .keyword_continue },
-        .{ "fn", .keyword_fn },
-        .{ "if", .keyword_if },
-        .{ "loop", .keyword_loop },
-        .{ "new", .keyword_new },
-        .{ "set", .keyword_set },
-        .{ "var", .keyword_var },
-    });
-    pub fn getKeyword(bytes: []const u8) ?Tag {
-        return keywords.get(bytes);
-    }
-};
-const TokenFmt = struct {
-    token: Token,
-    text: []const u8,
-    pub fn format(f: TokenFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
-        switch (f.token.tag) {
-            .invalid => try writer.print("an invalid token '{s}'", .{f.text[f.token.start..f.token.end]}),
-            .identifier => try writer.print("an identifer '{s}'", .{f.text[f.token.start..f.token.end]}),
-            .string_literal => try writer.print("a string literal {s}", .{f.text[f.token.start..f.token.end]}),
-            .eof => try writer.writeAll("EOF"),
-            .builtin => try writer.print("the builtin function '{s}'", .{f.text[f.token.start..f.token.end]}),
-            .@"!" => try writer.writeAll("a '!' operator"),
-            .@"=" => try writer.writeAll("an equal '=' character"),
-            .@"==" => try writer.writeAll("an '==' operator"),
-            .@"!=" => try writer.writeAll("a '!=' operator"),
-            .l_paren => try writer.writeAll("an open paren '('"),
-            .r_paren => try writer.writeAll("a close paren ')'"),
-            .l_brace => try writer.writeAll("an open brace '{'"),
-            .r_brace => try writer.writeAll("a close brace '}'"),
-            .l_bracket => try writer.writeAll("an open bracket '['"),
-            .r_bracket => try writer.writeAll("a close bracket ']'"),
-            .period => try writer.writeAll("a period '.'"),
-            .plus => try writer.writeAll("a plus '+'"),
-            .minus => try writer.writeAll("a minus '-'"),
-            .slash => try writer.writeAll("a slash '/'"),
-            .comma => try writer.writeAll("a comma ','"),
-            .@"<" => try writer.writeAll("a less than '<' operator"),
-            .@"<=" => try writer.writeAll("a less than or equal '<=' operator"),
-            .@">" => try writer.writeAll("a greater than '>' operator"),
-            .@">=" => try writer.writeAll("a greater than or equal '>=' operator"),
-            .keyword_break => try writer.writeAll("the 'break' keyword"),
-            .keyword_continue => try writer.writeAll("the 'continue' keyword"),
-            .number_literal => try writer.print("a number literal {s}", .{f.text[f.token.start..f.token.end]}),
-            .keyword_fn => try writer.writeAll("the 'fn' keyword"),
-            .keyword_if => try writer.writeAll("the 'if' keyword"),
-            .keyword_loop => try writer.writeAll("the 'loop' keyword"),
-            .keyword_new => try writer.writeAll("the 'new' keyword"),
-            .keyword_set => try writer.writeAll("the 'set' keyword"),
-            .keyword_var => try writer.writeAll("the 'var' keyword"),
-        }
-    }
-};
-
-fn lex(text: []const u8, lex_start: usize) Token {
-    const State = union(enum) {
-        start,
-        identifier: usize,
-        saw_at_sign: usize,
-        builtin: usize,
-        string_literal: usize,
-        equal: usize,
-        bang: usize,
-        slash: usize,
-        line_comment,
-        int: usize,
-        int_period: usize,
-        float: usize,
-        angle_bracket_left: usize,
-        angle_bracket_right: usize,
-    };
-
-    var index = lex_start;
-    var state: State = .start;
-
-    while (true) {
-        if (index >= text.len) return switch (state) {
-            .start, .line_comment => .{ .tag = .eof, .start = index, .end = index },
-            .identifier => |start| .{
-                .tag = Token.getKeyword(text[start..index]) orelse .identifier,
-                .start = start,
-                .end = index,
-            },
-            .builtin => |start| .{ .tag = .builtin, .start = start, .end = index },
-            .saw_at_sign, .string_literal => |start| .{ .tag = .invalid, .start = start, .end = index },
-            .equal => |start| .{ .tag = .@"=", .start = start, .end = index },
-            .bang => |start| .{ .tag = .@"!", .start = start, .end = index },
-            .slash => |start| .{ .tag = .slash, .start = start, .end = index },
-            .int, .float => |start| .{ .tag = .number_literal, .start = start, .end = index },
-            .int_period => |start| .{ .tag = .number_literal, .start = start, .end = index - 1 },
-            .angle_bracket_left => |start| .{ .tag = .@"<", .start = start, .end = index },
-            .angle_bracket_right => |start| .{ .tag = .@">", .start = start, .end = index },
-        };
-        switch (state) {
-            .start => {
-                switch (text[index]) {
-                    ' ', '\n', '\t', '\r' => index += 1,
-                    '"' => {
-                        state = .{ .string_literal = index };
-                        index += 1;
-                    },
-                    'a'...'z', 'A'...'Z', '_' => {
-                        state = .{ .identifier = index };
-                        index += 1;
-                    },
-                    '@' => {
-                        state = .{ .saw_at_sign = index };
-                        index += 1;
-                    },
-                    '=' => {
-                        state = .{ .equal = index };
-                        index += 1;
-                    },
-                    '!' => {
-                        state = .{ .bang = index };
-                        index += 1;
-                    },
-                    // '|' => continue :state .pipe,
-                    '(' => return .{ .tag = .l_paren, .start = index, .end = index + 1 },
-                    ')' => return .{ .tag = .r_paren, .start = index, .end = index + 1 },
-                    '[' => return .{ .tag = .l_bracket, .start = index, .end = index + 1 },
-                    ']' => return .{ .tag = .r_bracket, .start = index, .end = index + 1 },
-                    ',' => return .{ .tag = .comma, .start = index, .end = index + 1 },
-                    // ':'
-                    // '%'
-                    // '*'
-                    '+' => return .{ .tag = .plus, .start = index, .end = index + 1 },
-                    '<' => {
-                        state = .{ .angle_bracket_left = index };
-                        index += 1;
-                    },
-                    '>' => {
-                        state = .{ .angle_bracket_right = index };
-                        index += 1;
-                    },
-                    // '^'
-                    // '\\'
-                    '{' => return .{ .tag = .l_brace, .start = index, .end = index + 1 },
-                    '}' => return .{ .tag = .r_brace, .start = index, .end = index + 1 },
-                    '.' => return .{ .tag = .period, .start = index, .end = index + 1 },
-                    '-' => return .{ .tag = .minus, .start = index, .end = index + 1 },
-                    '/' => {
-                        state = .{ .slash = index };
-                        index += 1;
-                    },
-                    // '&' => continue :state .ampersand,
-                    '0'...'9' => {
-                        state = .{ .int = index };
-                        index += 1;
-                    },
-                    else => return .{ .tag = .invalid, .start = index, .end = index + 1 },
-                }
-            },
-            .identifier => |start| {
-                switch (text[index]) {
-                    'a'...'z', 'A'...'Z', '_', '0'...'9' => index += 1,
-                    else => {
-                        const string = text[start..index];
-                        return .{ .tag = Token.getKeyword(string) orelse .identifier, .start = start, .end = index };
-                    },
-                }
-            },
-            .saw_at_sign => |start| {
-                switch (text[index]) {
-                    'a'...'z', 'A'...'Z', '_' => {
-                        state = .{ .builtin = start };
-                        index += 1;
-                    },
-                    else => return .{ .tag = .invalid, .start = start, .end = index },
-                }
-            },
-            .builtin => |start| switch (text[index]) {
-                'a'...'z', 'A'...'Z', '_', '0'...'9' => index += 1,
-                else => return .{ .tag = .builtin, .start = start, .end = index },
-            },
-            .string_literal => |start| switch (text[index]) {
-                '"' => return .{ .tag = .string_literal, .start = start, .end = index + 1 },
-                '\n' => return .{ .tag = .invalid, .start = start, .end = index },
-                else => index += 1,
-            },
-            .equal => |start| switch (text[index]) {
-                '=' => return .{ .tag = .@"==", .start = start, .end = index + 1 },
-                else => return .{ .tag = .@"=", .start = start, .end = index },
-            },
-            .bang => |start| switch (text[index]) {
-                '=' => return .{ .tag = .@"!=", .start = start, .end = index + 1 },
-                else => return .{ .tag = .@"!", .start = start, .end = index },
-            },
-            .slash => |start| switch (text[index]) {
-                '/' => {
-                    state = .line_comment;
-                    index += 1;
-                },
-                else => return .{ .tag = .slash, .start = start, .end = index },
-            },
-            .line_comment => switch (text[index]) {
-                '\n' => {
-                    state = .start;
-                    index += 1;
-                },
-                else => index += 1,
-            },
-            .int => |start| switch (text[index]) {
-                '.' => {
-                    state = .{ .int_period = start };
-                    index += 1;
-                },
-                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
-                    index += 1;
-                },
-                else => return .{ .tag = .number_literal, .start = start, .end = index },
-            },
-            .int_period => |start| switch (text[index]) {
-                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
-                    state = .{ .float = start };
-                    index += 1;
-                },
-                else => return .{ .tag = .number_literal, .start = start, .end = index - 1 },
-            },
-            .float => |start| switch (text[index]) {
-                '_', 'a'...'d', 'f'...'o', 'q'...'z', 'A'...'D', 'F'...'O', 'Q'...'Z', '0'...'9' => {
-                    index += 1;
-                },
-                else => return .{ .tag = .number_literal, .start = start, .end = index },
-            },
-            .angle_bracket_left => |start| switch (text[index]) {
-                '=' => return .{ .tag = .@"<=", .start = start, .end = index + 1 },
-                else => return .{ .tag = .@"<", .start = start, .end = index },
-            },
-            .angle_bracket_right => |start| switch (text[index]) {
-                '=' => return .{ .tag = .@">=", .start = start, .end = index + 1 },
-                else => return .{ .tag = .@">", .start = start, .end = index },
-            },
-        }
-    }
-}
-
-const TokenIterator = struct {
-    text: []const u8,
-    offset: usize = 0,
-    pub fn next(it: *TokenIterator) Token {
-        const token = lex(it.text, it.offset);
-        it.offset = token.end;
-        return token;
-    }
-    pub fn expect(it: *TokenIterator, tag: Token.Tag, str: []const u8) !void {
-        const token = it.next();
-        try std.testing.expectEqual(tag, token.tag);
-        try std.testing.expectEqualSlices(u8, str, it.text[token.start..token.end]);
-    }
-};
-
-test "lex" {
-    {
-        var it: TokenIterator = .{ .text = "" };
-        try it.expect(.eof, "");
-    }
-    {
-        var it: TokenIterator = .{ .text =
-            \\cs = @Assembly("Assembly-CSharp")
-            \\
-            \\fn void ExecuteSprintCommand(bool fromServer, string[] args) {
-            \\    print("test")
-            \\}
-            \\
-            \\cmd = cs.DebugCommandHandler.ChatCommand(
-            \\    "sprint",
-            \\    ExecuteSprintCommand,
-            \\    null,
-            \\    false,
-            \\)
-            \\
-        };
-        try it.expect(.identifier, "cs");
-        try it.expect(.@"=", "=");
-        try it.expect(.builtin, "@Assembly");
-        try it.expect(.l_paren, "(");
-        try it.expect(.string_literal, "\"Assembly-CSharp\"");
-        try it.expect(.r_paren, ")");
-        try it.expect(.keyword_fn, "fn");
-        try it.expect(.identifier, "void");
-        try it.expect(.identifier, "ExecuteSprintCommand");
-        try it.expect(.l_paren, "(");
-        try it.expect(.identifier, "bool");
-        try it.expect(.identifier, "fromServer");
-        try it.expect(.comma, ",");
-        try it.expect(.identifier, "string");
-        try it.expect(.l_bracket, "[");
-        try it.expect(.r_bracket, "]");
-        try it.expect(.identifier, "args");
-        try it.expect(.r_paren, ")");
-        try it.expect(.l_brace, "{");
-        try it.expect(.identifier, "print");
-        try it.expect(.l_paren, "(");
-        try it.expect(.string_literal, "\"test\"");
-        try it.expect(.r_paren, ")");
-        try it.expect(.r_brace, "}");
-        try it.expect(.identifier, "cmd");
-        try it.expect(.@"=", "=");
-        try it.expect(.identifier, "cs");
-        try it.expect(.period, ".");
-        try it.expect(.identifier, "DebugCommandHandler");
-        try it.expect(.period, ".");
-        try it.expect(.identifier, "ChatCommand");
-        try it.expect(.l_paren, "(");
-        try it.expect(.string_literal, "\"sprint\"");
-        try it.expect(.comma, ",");
-        try it.expect(.identifier, "ExecuteSprintCommand");
-        try it.expect(.comma, ",");
-        try it.expect(.identifier, "null");
-        try it.expect(.comma, ",");
-        try it.expect(.identifier, "false");
-        try it.expect(.comma, ",");
-        try it.expect(.r_paren, ")");
-    }
-}
-
 const MethodNameKind = enum { id, new };
 
 pub const Error = union(enum) {
@@ -4188,45 +3799,52 @@ pub const Error = union(enum) {
         return error.Vm;
     }
     pub fn fmt(err: *const Error, text: []const u8, dotnet_funcs: *const dotnet.Funcs) ErrorFmt {
-        return .{ .err = err, .text = text, .dotnet_funcs = dotnet_funcs };
+        return err.fmtAtLine(text, 1, dotnet_funcs);
+    }
+    pub fn fmtAtLine(err: *const Error, text: []const u8, first_line: u32, dotnet_funcs: *const dotnet.Funcs) ErrorFmt {
+        return .{ .err = err, .text = text, .first_line = first_line, .dotnet_funcs = dotnet_funcs };
     }
 };
 const ErrorFmt = struct {
     err: *const Error,
     text: []const u8,
+    first_line: u32,
     dotnet_funcs: *const dotnet.Funcs,
+    fn lineNum(f: *const ErrorFmt, offset: usize) u32 {
+        return f.first_line - 1 + lex.lineNum(f.text, offset);
+    }
     pub fn format(f: *const ErrorFmt, writer: *std.Io.Writer) error{WriteFailed}!void {
         switch (f.err.*) {
             .not_implemented => |n| try writer.print("{s} not implemented", .{n}),
             .not_implemented2 => |e| try writer.print(
                 "{d}: {s} not implemented",
-                .{ getLineNum(f.text, e.pos), e.msg },
+                .{ f.lineNum(e.pos), e.msg },
             ),
             .not_implemented_for_type => |e| try writer.print(
                 "{d}: {s} on {s} not implemented",
-                .{ getLineNum(f.text, e.pos), e.what, e.type.what() },
+                .{ f.lineNum(e.pos), e.what, e.type.what() },
             ),
             .not_implemented_for_kind => |e| try writer.print(
                 "{d}: {s} of .NET type kind {t} not implemented",
-                .{ getLineNum(f.text, e.pos), e.what, e.kind },
+                .{ f.lineNum(e.pos), e.what, e.kind },
             ),
             .managed_exception => |e| try writer.print(
                 "{d}: the method threw {s}",
-                .{ getLineNum(f.text, e.pos), e.class_name },
+                .{ f.lineNum(e.pos), e.class_name },
             ),
-            .assert => |e| try writer.print("{d}: assert", .{getLineNum(f.text, e)}),
+            .assert => |e| try writer.print("{d}: assert", .{f.lineNum(e)}),
             .log_error => |e| try writer.print(
                 "{d}: @Log failed with {t}",
-                .{ getLineNum(f.text, e.pos), e.err },
+                .{ f.lineNum(e.pos), e.err },
             ),
             .vm_out => |e| try writer.print(
                 "{d}: vm write output failed",
-                .{getLineNum(f.text, e.pos)},
+                .{f.lineNum(e.pos)},
             ),
             .unexpected_token => |e| try writer.print(
                 "{d}: syntax error: expected {s} but got {f}",
                 .{
-                    getLineNum(f.text, e.token.start),
+                    f.lineNum(e.token.start),
                     e.expected,
                     e.token.fmt(f.text),
                 },
@@ -4234,7 +3852,7 @@ const ErrorFmt = struct {
             .unexpected_type => |e| try writer.print(
                 "{d}: expected {s} but got {s}",
                 .{
-                    getLineNum(f.text, e.pos),
+                    f.lineNum(e.pos),
                     e.expected,
                     if (e.actual) |t| t.what() else "nothing",
                 },
@@ -4242,64 +3860,64 @@ const ErrorFmt = struct {
             .unknown_builtin => |token| try writer.print(
                 "{d}: unknown builtin '{s}'",
                 .{
-                    getLineNum(f.text, token.start),
+                    f.lineNum(token.start),
                     f.text[token.start..token.end],
                 },
             ),
             .undefined_identifier => |token| try writer.print(
                 "{d}: undefined identifier '{s}'",
                 .{
-                    getLineNum(f.text, token.start),
+                    f.lineNum(token.start),
                     f.text[token.start..token.end],
                 },
             ),
             .num_literal_overflow => |e| try writer.print(
                 "{d}: integer literal '{s}' doesn't fit in an i64",
-                .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
+                .{ f.lineNum(e.start), f.text[e.start..e.end] },
             ),
             .bad_num_literal => |e| try writer.print(
                 "{d}: invalid number literal '{s}'",
-                .{ getLineNum(f.text, e.start), f.text[e.start..e.end] },
+                .{ f.lineNum(e.start), f.text[e.start..e.end] },
             ),
             .called_non_function => |e| if (e.unexpected_type) |t| switch (t) {
-                .assembly_field => try writer.print("{d}: can't call fields on an assembly directly, call @Class first", .{getLineNum(f.text, e.start)}),
+                .assembly_field => try writer.print("{d}: can't call fields on an assembly directly, call @Class first", .{f.lineNum(e.start)}),
                 else => try writer.print(
                     "{d}: can't call {s}",
-                    .{ getLineNum(f.text, e.start), t.what() },
+                    .{ f.lineNum(e.start), t.what() },
                 ),
             } else try writer.print(
                 "{d}: attempted to call a void expression",
-                .{getLineNum(f.text, e.start)},
+                .{f.lineNum(e.start)},
             ),
             .void_field => |e| try writer.print(
                 "{d}: void has no fields",
-                .{getLineNum(f.text, e.start)},
+                .{f.lineNum(e.start)},
             ),
             .no_field => |e| try writer.print(
                 "{d}: {s} has no field '{s}'",
                 .{
-                    getLineNum(f.text, e.start),
+                    f.lineNum(e.start),
                     e.unexpected_type.what(),
                     f.text[e.field.start..e.field.end],
                 },
             ),
             .too_many_assembly_fields => |t| try writer.print(
                 "{d}: too many assembly fields",
-                .{getLineNum(f.text, t.pos)},
+                .{f.lineNum(t.pos)},
             ),
             .arg_count => |e| try writer.print("{d}: expected {} args but got {}", .{
-                getLineNum(f.text, e.start),
+                f.lineNum(e.start),
                 e.expected,
                 e.actual,
             }),
             .arg_type => |e| try writer.print("{d}: expected argument {} to be {s} but got {s}", .{
-                getLineNum(f.text, e.arg_pos),
+                f.lineNum(e.arg_pos),
                 e.arg_index,
                 e.expected.what(),
                 e.actual.what(),
             }),
             .arg_type_call_pos => |e| try writer.print("{d}: expected argument {} to be {s} but got {s}", .{
-                getLineNum(f.text, e.call_pos),
+                f.lineNum(e.call_pos),
                 e.arg_index,
                 e.expected.what(),
                 e.actual.what(),
@@ -4307,36 +3925,36 @@ const ErrorFmt = struct {
             .new_non_class => |n| try writer.print(
                 "{d}: cannot new '{s}' which is {s}",
                 .{
-                    getLineNum(f.text, n.id_extent.start),
+                    f.lineNum(n.id_extent.start),
                     f.text[n.id_extent.start..n.id_extent.end],
                     n.actual_type.what(),
                 },
             ),
             .statement_result_ignored => |i| try writer.print(
                 "{d}: return value of type {t} was ignored, use @Discard to discard it",
-                .{ getLineNum(f.text, i.pos), i.ignored_type },
+                .{ f.lineNum(i.pos), i.ignored_type },
             ),
             .bare_assign => |a| try writer.print(
                 "{d}: syntax error: '=' after expresion, might be missing 'var' or 'set'",
-                .{getLineNum(f.text, a.assign_pos)},
+                .{f.lineNum(a.assign_pos)},
             ),
             .void_assignment => |assign| switch (assign.kind) {
                 .var_id_extent => |id_extent| try writer.print(
                     "{d}: identifier '{s}' was defined to nothing",
                     .{
-                        getLineNum(f.text, id_extent.start),
+                        f.lineNum(id_extent.start),
                         f.text[id_extent.start..id_extent.end],
                     },
                 ),
                 .ref_start => |start| try writer.print(
                     "{d}: cannot set nothing",
-                    .{getLineNum(f.text, start)},
+                    .{f.lineNum(start)},
                 ),
             },
             .assign_type => |e| try writer.print(
                 "{d}: cannot assign {s} to identifier '{s}' which is {s}",
                 .{
-                    getLineNum(f.text, e.id_extent.start),
+                    f.lineNum(e.id_extent.start),
                     e.src.what(),
                     f.text[e.id_extent.start..e.id_extent.end],
                     e.dst.what(),
@@ -4345,21 +3963,21 @@ const ErrorFmt = struct {
             .void_argument => |v| try writer.print(
                 "{d}: nothing was assigned to function argument {}",
                 .{
-                    getLineNum(f.text, v.first_arg_token.start),
+                    f.lineNum(v.first_arg_token.start),
                     v.arg_index + 1,
                 },
             ),
             .assembly_not_found => |extent| try writer.print(
                 "{d}: assembly {s} not found",
                 .{
-                    getLineNum(f.text, extent.start),
+                    f.lineNum(extent.start),
                     f.text[extent.start..extent.end],
                 },
             ),
             .id_too_big => |token| try writer.print(
                 "{d}: id '{s}' is too big ({} bytes but max is {})",
                 .{
-                    getLineNum(f.text, token.start),
+                    f.lineNum(token.start),
                     f.text[token.start..token.end],
                     token.end - token.start,
                     ManagedId.max,
@@ -4374,7 +3992,7 @@ const ErrorFmt = struct {
                 try writer.print(
                     "{d}: this assembly does not have a class named '{s}' in namespace '{s}'",
                     .{
-                        getLineNum(f.text, m.id_start),
+                        f.lineNum(m.id_start),
                         name.slice(),
                         namespace.slice(),
                     },
@@ -4383,7 +4001,7 @@ const ErrorFmt = struct {
             .missing_field => |e| try writer.print(
                 "{d}: class '{s}' has no field '{s}'",
                 .{
-                    getLineNum(f.text, e.id_extent.start),
+                    f.lineNum(e.id_extent.start),
                     f.dotnet_funcs.class_get_name(e.class),
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
@@ -4391,7 +4009,7 @@ const ErrorFmt = struct {
             .missing_method => |m| try writer.print(
                 "{d}: class '{s}' has no method {s} with {} params",
                 .{
-                    getLineNum(f.text, m.id_extent.start),
+                    f.lineNum(m.id_extent.start),
                     f.dotnet_funcs.class_get_name(m.class),
                     f.text[m.id_extent.start..m.id_extent.end],
                     m.arg_count,
@@ -4399,12 +4017,12 @@ const ErrorFmt = struct {
             ),
             .undefined_enum_member => |e| try writer.print(
                 "{d}: enum '{s}' has no member '{s}'",
-                .{ getLineNum(f.text, e.extent.start), f.dotnet_funcs.class_get_name(e.class), f.text[e.extent.start..e.extent.end] },
+                .{ f.lineNum(e.extent.start), f.dotnet_funcs.class_get_name(e.class), f.text[e.extent.start..e.extent.end] },
             ),
             .overload => |o| {
                 const name = f.text[o.id_extent.start..o.id_extent.end];
                 try writer.print("{d}: {s} for {s}(", .{
-                    getLineNum(f.text, o.id_extent.start),
+                    f.lineNum(o.id_extent.start),
                     switch (o.kind) {
                         .none_match => "no overload matches",
                         .ambiguous => "ambiguous overloads",
@@ -4439,7 +4057,7 @@ const ErrorFmt = struct {
             .overflow => |o| try writer.print(
                 "{d}: integer overflow, value {d} to {}-bit {t} integer",
                 .{
-                    getLineNum(f.text, o.pos),
+                    f.lineNum(o.pos),
                     o.value,
                     o.int.bits,
                     o.int.signedness,
@@ -4448,21 +4066,21 @@ const ErrorFmt = struct {
             .non_static_field => |e| try writer.print(
                 "{d}: cannot access non-static field '{s}' on class, need an object",
                 .{
-                    getLineNum(f.text, e.id_extent.start),
+                    f.lineNum(e.id_extent.start),
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
             .const_field => |e| try writer.print(
                 "{d}: cannot assign to '{s}' because it is a const, which has no storage to write to",
                 .{
-                    getLineNum(f.text, e.id_extent.start),
+                    f.lineNum(e.id_extent.start),
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
             .static_field => |e| try writer.print(
                 "{d}: cannot access static field '{s}' on an object, need a class",
                 .{
-                    getLineNum(f.text, e.id_extent.start),
+                    f.lineNum(e.id_extent.start),
                     f.text[e.id_extent.start..e.id_extent.end],
                 },
             ),
@@ -4470,25 +4088,25 @@ const ErrorFmt = struct {
                 // TODO: can/should we print the class?
                 "{d}: field '{s}' accessed on NULL object",
                 .{
-                    getLineNum(f.text, e.field_extent.start),
+                    f.lineNum(e.field_extent.start),
                     f.text[e.field_extent.start..e.field_extent.end],
                 },
             ),
             .new_failed => |n| try writer.print("{d}: new failed", .{
-                getLineNum(f.text, n.pos),
+                f.lineNum(n.pos),
             }),
             .cant_marshal => |c| try writer.print(
                 "{d}: can't marshal {s} to a managed method",
-                .{ getLineNum(f.text, c.pos), c.type.what() },
+                .{ f.lineNum(c.pos), c.type.what() },
             ),
             .binary_operand_nothing => |e| try writer.print(
                 "{d}: one side of binary operation '{t}' is nothing",
-                .{ getLineNum(f.text, e.pos), e.op },
+                .{ f.lineNum(e.pos), e.op },
             ),
             .binary_operand_type => |e| try writer.print(
                 "{d}: binary operation '{t}' expects {s} but got {s}",
                 .{
-                    getLineNum(f.text, e.pos),
+                    f.lineNum(e.pos),
                     e.op,
                     e.expects,
                     e.actual.what(),
@@ -4497,15 +4115,15 @@ const ErrorFmt = struct {
             .overflow_i64 => |o| try writer.print(
                 "{d}: i64 overflow from '{t}' operator on {} and {}",
                 .{
-                    getLineNum(f.text, o.pos),
+                    f.lineNum(o.pos),
                     o.op,
                     o.left_i64,
                     o.right_i64,
                 },
             ),
-            .divide_by_0 => |d| try writer.print("{d}: divide by 0", .{getLineNum(f.text, d.pos)}),
+            .divide_by_0 => |d| try writer.print("{d}: divide by 0", .{f.lineNum(d.pos)}),
             .lossy_conversion => |l| {
-                try writer.print("{d}: cannot convert ", .{getLineNum(f.text, l.pos)});
+                try writer.print("{d}: cannot convert ", .{f.lineNum(l.pos)});
                 switch (l.value) {
                     .integer => |i| try writer.print("{d}", .{i}),
                     .float => |v| try writer.print("{e}", .{v}),
@@ -4514,22 +4132,22 @@ const ErrorFmt = struct {
             },
             .if_type => |e| if (e.type) |t| try writer.print(
                 "{d}: if requires an integer but got {s}",
-                .{ getLineNum(f.text, e.pos), t.what() },
+                .{ f.lineNum(e.pos), t.what() },
             ) else try writer.print(
                 "{d}: if conditional expression resulted in nothing",
-                .{getLineNum(f.text, e.pos)},
+                .{f.lineNum(e.pos)},
             ),
             .assign_dest_nothing => |e| try writer.print(
                 "{d}: destination for '=' assignment evaluated to nothing",
-                .{getLineNum(f.text, e.dest_pos)},
+                .{f.lineNum(e.dest_pos)},
             ),
             .assign_src_nothing => |e| try writer.print(
                 "{d}: source for '=' assignment evaluated to nothing",
-                .{getLineNum(f.text, e.src_pos)},
+                .{f.lineNum(e.src_pos)},
             ),
             .static_error => |e| try writer.print(
                 "{d}: {s}",
-                .{ getLineNum(f.text, e.pos), e.string },
+                .{ f.lineNum(e.pos), e.string },
             ),
             .oom => try writer.writeAll("out of memory"),
         }
@@ -4543,6 +4161,10 @@ pub fn runTests(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion)
 }
 
 pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_error: []const u8) !void {
+    return testBadCodeAtLine(dotnet_funcs, text, 1, expected_error);
+}
+
+pub fn testBadCodeAtLine(dotnet_funcs: *const dotnet.Funcs, text: []const u8, first_line: u32, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4572,7 +4194,7 @@ pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected
             .result => unreachable, // out is .log
             .err => |err| {
                 var buf: [2000]u8 = undefined;
-                const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmt(text, dotnet_funcs)});
+                const actual_error = try std.fmt.bufPrint(&buf, "{f}", .{err.fmtAtLine(text, first_line, dotnet_funcs)});
                 if (!std.mem.eql(u8, expected_error, actual_error)) {
                     std.log.err("actual error string\n\"{f}\"\n", .{std.zig.fmtString(actual_error)});
                     return error.TestUnexpectedError;
@@ -5334,17 +4956,17 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
     );
 }
 
-comptime {
-    if (@import("builtin").is_test) _ = @import("vmtest.zig");
-}
-
 const monolog = std.log.scoped(.mono);
 const gchandlelog = std.log.scoped(.mono_gchandle);
 
 const std = @import("std");
-const logfile = @import("logfile.zig");
+
 const dotnet = @import("dotnet.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
-const Memory = @import("Memory.zig");
+const lex = @import("lex.zig");
+const logfile = @import("logfile.zig");
 const vmtest = @import("vmtest.zig");
+
+const Memory = @import("Memory.zig");
+const Token = lex.Token;
 const UnityVersion = @import("UnityVersion.zig");

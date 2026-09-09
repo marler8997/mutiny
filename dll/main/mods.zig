@@ -39,11 +39,11 @@ fn find(comptime T: type, list: *const std.DoublyLinkedList, mod_name: []const u
     return null;
 }
 
-pub fn applyUpdates(dotnet_funcs: *const dotnet.Funcs) void {
-    while (stealUpdate()) |update| applyModEvent(dotnet_funcs, update);
+pub fn applyUpdates(retired: *std.DoublyLinkedList) void {
+    while (stealUpdate()) |update| applyModEvent(update, retired);
 }
 
-fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ModEvent) void {
+fn applyModEvent(update: *ModEvent, retired: *std.DoublyLinkedList) void {
     defer update.destroy();
     const existing = find(Mod, &global.mod_list, update.name.slice());
     if (update.text) |new_text| {
@@ -59,8 +59,7 @@ fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ModEvent) void {
                 "mod '{s}' updated ({} to {} bytes)",
                 .{ old_mod.name.slice(), old_mod.text.len, new_text.len },
             );
-            global.mod_list.remove(&old_mod.list_node);
-            old_mod.destroy(dotnet_funcs);
+            retire(old_mod, retired);
         } else {
             std.log.info("mod '{s}' loaded ({} bytes)", .{ update.name.slice(), new_text.len });
         }
@@ -68,9 +67,17 @@ fn applyModEvent(dotnet_funcs: *const dotnet.Funcs, update: *ModEvent) void {
     } else {
         const mod = existing orelse std.debug.panic("remove for unknown mod '{s}'", .{update.name.slice()});
         std.log.info("deleting mod '{s}'", .{mod.name.slice()});
-        global.mod_list.remove(&mod.list_node);
-        mod.destroy(dotnet_funcs);
+        retire(mod, retired);
     }
+}
+
+fn retire(mod: *Mod, retired: *std.DoublyLinkedList) void {
+    global.mod_list.remove(&mod.list_node);
+    retired.append(&mod.list_node);
+}
+
+pub fn findMod(name: []const u8) ?*Mod {
+    return find(Mod, &global.mod_list, name);
 }
 
 pub const ModIterator = struct {
@@ -95,7 +102,6 @@ const std = @import("std");
 const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
-const dotnet = mutiny.dotnet;
 
 const ModEvent = @import("ModEvent.zig");
 const Mod = @import("Mod.zig");

@@ -11,9 +11,10 @@ pub const dotnetkind = @import("dotnetkind.zig");
 pub const dynlib = @import("dynlib.zig");
 pub const getname = @import("getname.zig");
 pub const il2cppclass = @import("il2cppclass.zig");
-pub const mutinymono = @import("mutinymono.zig");
 pub const logfile = @import("logfile.zig");
 pub const mutinyipc = @import("mutinyipc.zig");
+pub const mutinymono = @import("mutinymono.zig");
+pub const sections = @import("sections.zig");
 
 pub const Options = struct {
     onUpdate: fn () callconv(.c) void,

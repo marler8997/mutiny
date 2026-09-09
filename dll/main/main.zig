@@ -30,9 +30,6 @@ const global = struct {
     var runtime: RuntimeState = .{ .find_lib = .{} };
     var update_hook: UpdateHookState = .pending;
     var dotnet_funcs_store: dotnet.Funcs = undefined;
-    // protects both run and onUpdate functions from simulatneously using shared state like
-    // vm_arena due to recursive calls via message pump
-    var vm_pass_active: bool = false;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
 
@@ -587,7 +584,7 @@ fn updateUpdateHook(
         },
         .installed => return .installed,
         .failed => |*hook| {
-            mods.applyUpdates(dotnet_funcs);
+            applyModUpdates(dotnet_funcs);
             const has_mods = mods.hasMods();
             if (has_mods and !hook.update_mods_warned) {
                 std.log.err("mods will not run: the Update hook failed to install (see the error above)", .{});
@@ -708,20 +705,15 @@ fn bootstrapIl2cpp(
 // Note: this is called on EVERY game update, which can happen hundreds of times
 //       per second. Be very cautious about performance and logging.
 pub fn onUpdate() callconv(.c) void {
-    std.debug.assert(!global.vm_pass_active);
-    global.vm_pass_active = true;
-    defer global.vm_pass_active = false;
     const dotnet_funcs = switch (updateRuntime()) {
         .ready => |funcs| funcs,
         .unrecoverable_error, .not_ready => return,
     };
     ipc.ensureWindow();
-    mods.applyUpdates(dotnet_funcs);
+    applyModUpdates(dotnet_funcs);
     runScripts(dotnet_funcs);
     var it = mods.modIterator();
-    while (it.next()) |mod| {
-        if (mod.enabled) runMod(dotnet_funcs, mod);
-    }
+    while (it.next()) |mod| tickMod(dotnet_funcs, mod);
 }
 pub fn onGui() callconv(.c) void {
     const dotnet_funcs = switch (updateRuntime()) {
@@ -731,50 +723,100 @@ pub fn onGui() callconv(.c) void {
     unitygui.draw(dotnet_funcs);
 }
 
-fn runMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+fn tickMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+    switch (mod.state) {
+        .off => {},
+        .stopping => {
+            runDisable(dotnet_funcs, mod);
+            mod.state = .off;
+        },
+        .on => runUpdate(dotnet_funcs, mod),
+    }
+}
+
+fn applyModUpdates(dotnet_funcs: *const dotnet.Funcs) void {
+    var retired: std.DoublyLinkedList = .{};
+    mods.applyUpdates(&retired);
+    while (retired.popFirst()) |node| {
+        const mod: *Mod = @fieldParentPtr("list_node", node);
+        switch (mod.state) {
+            .off => {},
+            .stopping => runDisable(dotnet_funcs, mod),
+            .on => |outcome| if (outcome != .not_run) runDisable(dotnet_funcs, mod),
+        }
+        mod.destroy(dotnet_funcs);
+    }
+}
+
+fn runDisable(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+    const section = switch (mod.scan) {
+        .err => return,
+        .sections => |s| s.get(.disable) orelse return,
+    };
+    const name = mod.name.slice();
+    switch (runSection(dotnet_funcs, mod.text, section)) {
+        .not_run => unreachable,
+        .ok => {},
+        .result => |*status| std.log.info("{s}: disable: {s}", .{ name, status.slice() }),
+        .err => |*status| std.log.err("{s}: disable:{s}", .{ name, status.slice() }),
+    }
+}
+
+fn runSection(
+    dotnet_funcs: *const dotnet.Funcs,
+    file_text: []const u8,
+    section: sections.Section,
+) Mod.Outcome {
     std.debug.assert(arenaIsClear(&global.vm_arena));
     defer _ = global.vm_arena.reset(.retain_capacity);
+    const text = section.text(file_text);
+    var status: Mod.Status = .{ .len = 0, .buffer = undefined };
     var vm: Vm = .{
         .dotnet_funcs = dotnet_funcs,
-        .text = mod.text,
+        .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
-        .out = .{ .result = &mod.status.buffer },
+        .out = .{ .result = &status.buffer },
     };
     defer vm.deinit();
-    const name = mod.name.slice();
-    const new_state: Mod.State = if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
+    return if (vm.evalRoot()) .ok else |_| switch (vm.error_result) {
         .exit => .ok,
         .result => |result| blk: {
-            std.debug.assert(result.ptr == &mod.status.buffer);
-            mod.status.len = @intCast(result.len);
-            break :blk .{ .result = .{ .wyhash = std.hash.Wyhash.hash(0, result) } };
+            std.debug.assert(result.ptr == &status.buffer);
+            status.len = @intCast(result.len);
+            break :blk .{ .result = status };
         },
         .err => |err| switch (err) {
             .vm_out => unreachable, // no writer
             else => blk: {
-                mod.formatStatus("{f}", .{err.fmt(mod.text, dotnet_funcs)});
-                break :blk .{ .err = .{
-                    .error_wyhash = std.hash.Wyhash.hash(0, mod.status.slice()),
-                } };
+                Mod.formatInto(&status, "{f}", .{err.fmtAtLine(text, section.first_line, dotnet_funcs)});
+                break :blk .{ .err = status };
             },
         },
     };
-    if (!std.meta.eql(new_state, mod.state)) {
-        switch (new_state) {
-            .ok => {
-                std.log.info("{s}: recovered", .{name});
-                mod.formatStatus("enabled", .{});
-            },
-            .result => std.log.info("{s}: {s}", .{ name, mod.status.slice() }),
-            .err => std.log.err("{s}:{s}", .{ name, mod.status.slice() }),
-        }
-        mod.state = new_state;
-        std.debug.assert(std.meta.eql(new_state, mod.state));
+}
+
+fn runUpdate(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+    const name = mod.name.slice();
+    const outcome: Mod.Outcome = switch (mod.scan) {
+        .err => |*err| blk: {
+            var status: Mod.Status = .{ .len = 0, .buffer = undefined };
+            Mod.formatInto(&status, "{f}", .{err.fmt(mod.text)});
+            break :blk .{ .err = status };
+        },
+        .sections => |s| runSection(dotnet_funcs, mod.text, s.get(.update) orelse return),
+    };
+    const previous = &mod.state.on;
+    if (outcome.eql(previous)) return;
+    switch (outcome) {
+        .not_run => unreachable,
+        .ok => if (previous.* != .not_run) std.log.info("{s}: recovered", .{name}),
+        .result => |*status| std.log.info("{s}: {s}", .{ name, status.slice() }),
+        .err => |*status| std.log.err("{s}:{s}", .{ name, status.slice() }),
     }
+    mod.state = .{ .on = outcome };
 }
 
 fn bootstrap() BootstrapResult {
-    if (global.vm_pass_active) return .retry;
     const dotnet_funcs = switch (updateRuntime()) {
         .ready => |funcs| funcs,
         .unrecoverable_error => |err| {
@@ -939,6 +981,7 @@ const mods = @import("mods.zig");
 const unitygui = @import("unitygui.zig");
 const mutinymono = mutiny.mutinymono;
 const scripts = @import("scripts.zig");
+const sections = mutiny.sections;
 
 const Mod = @import("Mod.zig");
 const UnityVersion = mutiny.UnityVersion;

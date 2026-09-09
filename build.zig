@@ -240,7 +240,7 @@ pub fn build(b: *std.Build) void {
     {
         const t = b.addTest(.{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/Vm.zig"),
+                .root_source_file = b.path("src/testroot.zig"),
                 .target = target,
                 .optimize = optimize,
             }),

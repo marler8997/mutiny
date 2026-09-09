@@ -2,6 +2,14 @@ pub const window_class_name = "MutinyWindow";
 pub const wm_copydata_run_script: usize = 0x4d55544e;
 pub const wm_copydata_result: win32.LRESULT = 0x3b7e15a2;
 
+pub const wm_copydata_set_mod_enabled: usize = 0x4d55544f;
+pub const SetModEnabledResult = enum(win32.LRESULT) {
+    changed = 0x5e7a1c01,
+    unchanged = 0x5e7a1c02,
+    no_such_mod = 0x5e7a1c03,
+    _,
+};
+
 pub const wm_heartbeat = win32.WM_APP + 0;
 pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 

@@ -22,7 +22,7 @@ const Color = extern struct {
 
     const white: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 };
     const disabled: Color = .{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1 };
-    const background: Color = .{ .r = 0.05, .g = 0.05, .b = 0.05, .a = 0.9 };
+    const background: Color = .{ .r = 0.05, .g = 0.05, .b = 0.05, .a = 0.8 };
     const outline: Color = .{ .r = 0.75, .g = 0.75, .b = 0.75, .a = 1 };
     const mod_name: Color = .{ .r = 0.55, .g = 0.8, .b = 1, .a = 1 };
     const status_error: Color = .{ .r = 1, .g = 0.4, .b = 0.4, .a = 1 };
@@ -37,6 +37,8 @@ const Gui = struct {
     event_button: *const dotnet.Method,
     event_mouse_position: *const dotnet.Method,
     event_use: *const dotnet.Method,
+    set_matrix: ?*const dotnet.Method,
+    scale: f32,
     fill_style: dotnet.GcHandleV2,
     empty: dotnet.GcHandleV2,
     title: dotnet.GcHandleV2,
@@ -85,7 +87,7 @@ const button_size: f32 = 20;
 const button_inset: f32 = (title_height - button_size) / 2;
 const minimized_width: f32 = 120;
 const outline_thickness: f32 = 2;
-const name_column: f32 = 220;
+const name_column: f32 = 120;
 const checkbox_size: f32 = 14;
 const checkbox_inset: f32 = (line_height - checkbox_size) / 2;
 const checkbox_column: f32 = checkbox_size + margin;
@@ -111,6 +113,7 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
         .repaint, .mouse_down, .mouse_up, .mouse_drag => {},
         _ => return,
     }
+    context.applyScale();
 
     var count: usize = 0;
     var it = mods.modIterator();
@@ -133,7 +136,11 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
     };
 
     switch (event_type) {
-        .repaint => paint(&context, panel, box, button),
+        .repaint => {
+            paint(&context, panel, box, button);
+            const position = context.unbox([2]f32, gui.event_mouse_position, event) orelse return;
+            if (box.contains(position[0], position[1])) paintCursor(&context, position[0], position[1]);
+        },
         .mouse_down, .mouse_up, .mouse_drag => {
             if ((context.unbox(i32, gui.event_button, event) orelse return) != 0) return;
             const position = context.unbox([2]f32, gui.event_mouse_position, event) orelse return;
@@ -143,7 +150,7 @@ pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
                 .mouse_down => if (button.contains(x, y)) {
                     panel.minimized = !panel.minimized;
                     context.use(event);
-                } else if (if (panel.minimized) null else checkboxAt(box, x, y)) |mod| {
+                } else if (if (panel.minimized) null else toggleAt(box, x, y)) |mod| {
                     const enable = !mod.enabled();
                     std.debug.assert(mod.setEnabled(enable) == .changed);
                     std.log.info("mod '{s}' {s} from the panel", .{ mod.name.slice(), if (enable) "enabled" else "disabled" });
@@ -189,17 +196,24 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
             .width = check.width - 6,
             .height = check.height - 6,
         }, .white);
-        const x = box.x + margin + checkbox_column;
+        const name = nameRect(box, y);
         context.color(if (mod.enabled()) .mod_name else .disabled);
-        context.label(.{ .x = x, .y = y, .width = name_column, .height = line_height }, strings.name);
+        context.label(name, strings.name);
         context.color(switch (mod.statusText().kind) {
             .disabled => .disabled,
             .ok => .white,
             .err => .status_error,
         });
-        context.label(.{ .x = x + name_column, .y = y, .width = width - margin * 2 - checkbox_column - name_column, .height = line_height }, strings.status);
+        context.label(.{ .x = name.x + name_column, .y = y, .width = width - margin * 2 - checkbox_column - name_column, .height = line_height }, strings.status);
     }
     context.color(.white);
+}
+
+fn paintCursor(context: *Context, x: f32, y: f32) void {
+    const arm: f32 = 8;
+    const thickness: f32 = 2;
+    context.fill(.{ .x = x - arm, .y = y - thickness / 2, .width = arm * 2, .height = thickness }, .white);
+    context.fill(.{ .x = x - thickness / 2, .y = y - arm, .width = thickness, .height = arm * 2 }, .white);
 }
 
 fn checkboxRect(box: Rect, row_y: f32) Rect {
@@ -211,11 +225,21 @@ fn checkboxRect(box: Rect, row_y: f32) Rect {
     };
 }
 
-fn checkboxAt(box: Rect, x: f32, y: f32) ?*Mod {
+fn nameRect(box: Rect, row_y: f32) Rect {
+    return .{
+        .x = box.x + margin + checkbox_column,
+        .y = row_y,
+        .width = name_column,
+        .height = line_height,
+    };
+}
+
+fn toggleAt(box: Rect, x: f32, y: f32) ?*Mod {
     var row_y = box.y + title_height + margin;
     var it = mods.modIterator();
     while (it.next()) |mod| : (row_y += line_height) {
         if (checkboxRect(box, row_y).contains(x, y)) return mod;
+        if (nameRect(box, row_y).contains(x, y)) return mod;
     }
     return null;
 }
@@ -227,6 +251,19 @@ const Context = struct {
 
     fn use(context: *Context, event: *const dotnet.Object) void {
         _ = context.call(context.gui.event_use, event, null);
+    }
+
+    fn applyScale(context: *Context) void {
+        const set_matrix = context.gui.set_matrix orelse return;
+        const s = context.gui.scale;
+        var matrix = [16]f32{
+            s, 0, 0, 0,
+            0, s, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        };
+        var args = [_]*anyopaque{@ptrCast(&matrix)};
+        _ = context.call(set_matrix, null, @ptrCast(&args));
     }
 
     fn color(context: *Context, c: Color) void {
@@ -358,6 +395,30 @@ fn resolve(dotnet_funcs: *const dotnet.Funcs) ResolveError!Gui {
     var set_background_args = [_]*anyopaque{@constCast(white)};
     _ = try invoke(dotnet_funcs, set_background, normal, @ptrCast(&set_background_args));
 
+    const scale: f32 = blk: {
+        const screen_class = dotnet_funcs.class_from_name(core, "UnityEngine", "Screen") orelse {
+            std.log.info("unity gui: no Screen class, panel drawn unscaled", .{});
+            break :blk 1;
+        };
+        const get_dpi = dotnet_funcs.class_get_method_from_name(screen_class, "get_dpi", 0) orelse {
+            std.log.info("unity gui: no Screen.dpi, panel drawn unscaled", .{});
+            break :blk 1;
+        };
+        const boxed = try invoke(dotnet_funcs, get_dpi, null, null) orelse break :blk 1;
+        const dpi: f32 = @as(*align(1) const f32, @ptrCast(dotnet_funcs.object_unbox(boxed))).*;
+        if (dpi <= 0) {
+            std.log.info("unity gui: Screen.dpi is {d}, panel drawn unscaled", .{dpi});
+            break :blk 1;
+        }
+        const s = @max(1, dpi / 96);
+        std.log.info("unity gui: dpi {d}, panel scale {d}", .{ dpi, s });
+        break :blk s;
+    };
+    const set_matrix = if (scale == 1) null else dotnet_funcs.class_get_method_from_name(gui_class, "set_matrix", 1) orelse blk: {
+        std.log.info("unity gui: no GUI.matrix, panel drawn unscaled", .{});
+        break :blk null;
+    };
+
     return .{
         .label = findLabelMethod(dotnet_funcs, gui_class, 2) orelse return error.NoLabelMethod,
         .styled_label = findLabelMethod(dotnet_funcs, gui_class, 3) orelse return error.NoStyledLabelMethod,
@@ -367,6 +428,8 @@ fn resolve(dotnet_funcs: *const dotnet.Funcs) ResolveError!Gui {
         .event_button = dotnet_funcs.class_get_method_from_name(event_class, "get_button", 0) orelse return error.NoEventMethod,
         .event_mouse_position = dotnet_funcs.class_get_method_from_name(event_class, "get_mousePosition", 0) orelse return error.NoEventMethod,
         .event_use = dotnet_funcs.class_get_method_from_name(event_class, "Use", 0) orelse return error.NoEventMethod,
+        .set_matrix = set_matrix,
+        .scale = scale,
         .fill_style = dotnet_funcs.gchandle_new(style, false),
         .empty = try resolveString(dotnet_funcs, ""),
         .title = try resolveString(dotnet_funcs, title),

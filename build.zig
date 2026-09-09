@@ -380,6 +380,7 @@ const test_games = [_]TestGame{
         .note = " (Unity 2019, V1 gchandle API)",
     },
     .{ .name = "Schedule I", .step = "schedule1", .steam_dir = "Schedule I", .runtime = .il2cpp },
+    .{ .name = "Gnomium", .step = "gnome", .steam_dir = "Burglin' Gnomes", .runtime = .mono },
 };
 
 fn createZydisModule(

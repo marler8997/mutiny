@@ -131,7 +131,7 @@ const ModsWatch = struct {
             0,
             .{ .FILE_NAME = 1, .SIZE = 1, .LAST_WRITE = 1 },
         );
-        if (handle == @intFromPtr(win32.INVALID_HANDLE_VALUE)) {
+        if (@as(usize, @bitCast(handle)) == @intFromPtr(win32.INVALID_HANDLE_VALUE)) {
             switch (win32.GetLastError()) {
                 .ERROR_FILE_NOT_FOUND, .ERROR_PATH_NOT_FOUND => {
                     if (!watch.no_dir_logged) {

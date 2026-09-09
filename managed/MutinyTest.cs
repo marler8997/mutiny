@@ -56,6 +56,8 @@ namespace MutinyTest
         public static int[] I32Array = new int[] { 10, 20, 30 };
         public static string[] StringArray = new string[] { "a", "b" };
         public static int[] NullArray = null;
+
+        public static Instances Instance = Instances.New();
     }
 
     public class Instances
@@ -72,7 +74,9 @@ namespace MutinyTest
         public float F32Field = 1.5f;
         public double F64Field = 3.25;
 
-        public static Instances New() { return new Instances(); }
+        public Instances Inner;
+
+        public static Instances New() { return new Instances { Inner = new Instances() }; }
         public static Instances NullInstance() { return null; }
     }
 

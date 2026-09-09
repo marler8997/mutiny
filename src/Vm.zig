@@ -650,6 +650,7 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
         },
         .keyword_continue => return .{ .@"continue" = first_token.start },
         .keyword_set => {
+            const ref_addr = vm.mem.top();
             const ref, const ref_end = try vm.evalReference(first_token.end);
             const after_equal = blk: {
                 const token = lex.next(vm.text, ref_end);
@@ -672,6 +673,8 @@ fn evalStatement(vm: *Vm, start: usize, maybe_loop_ref: *?Loop) error{Vm}!union(
             // NOTE: is this discard correct?
             defer src.discard(vm.dotnet_funcs, vm.handle_tracker);
             try vm.set(&ref, &src);
+            vm.discardValues(ref_addr);
+            _ = vm.mem.discardFrom(ref_addr);
             return .{ .statement_end = after_expr };
         },
         .keyword_var => {
@@ -867,33 +870,58 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
 }
 fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
     switch (ref.*) {
-        .symbol_entry => |*entry| {
-            const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
-            switch (symbol_type) {
-                .object => ref.* = .{ .object_field = .{
-                    .handle_addr = symbol_value_addr,
-                    .extent = id_extent,
-                } },
-                .class => ref.* = .{ .class_field = .{
-                    .class_addr = symbol_value_addr,
-                    .extent = id_extent,
-                } },
-                else => return vm.setError(.{ .not_implemented_for_type = .{
-                    .pos = id_extent.start,
-                    .what = "field access",
-                    .type = symbol_type,
-                } }),
-            }
-        },
+        .symbol_entry => |*entry| ref.* = try vm.refFromValue(entry.type_addr, id_extent),
         .object_field => |*field| {
-            _ = field;
-            return vm.setError(.{ .not_implemented = "get field on object field" });
+            const gc_handle, _ = vm.readValue(dotnet.GcHandleV2, field.handle_addr);
+            const obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
+            const class = vm.dotnet_funcs.object_get_class(obj);
+            const name = try vm.managedId(field.extent);
+            const mono_field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
+                .class = class,
+                .id_extent = field.extent,
+            } });
+            const value_addr = vm.mem.top();
+            try vm.pushMonoField(class, mono_field, obj, field.extent);
+            ref.* = try vm.refFromValue(value_addr, id_extent);
         },
         .class_field => |*field| {
-            _ = field;
-            return vm.setError(.{ .not_implemented = "get field on class field" });
+            const class, _ = vm.readValue(*const dotnet.Class, field.class_addr);
+            const name = try vm.managedId(field.extent);
+            const mono_field = vm.dotnet_funcs.class_get_field_from_name(class, name.slice()) orelse return vm.setError(.{ .missing_field = .{
+                .class = class,
+                .id_extent = field.extent,
+            } });
+            const value_addr = vm.mem.top();
+            try vm.pushMonoField(class, mono_field, null, field.extent);
+            ref.* = try vm.refFromValue(value_addr, id_extent);
         },
     }
+}
+
+fn refFromValue(vm: *Vm, type_addr: Memory.Addr, id_extent: Extent) error{Vm}!Reference {
+    const value_type, const value_addr = vm.readValue(Type, type_addr);
+    return switch (value_type) {
+        .object => .{ .object_field = .{
+            .handle_addr = value_addr,
+            .extent = id_extent,
+        } },
+        .class => .{ .class_field = .{
+            .class_addr = value_addr,
+            .extent = id_extent,
+        } },
+        .null_object => blk: {
+            const class, _ = vm.readValue(*const dotnet.Class, value_addr);
+            break :blk vm.setError(.{ .null_field_access = .{
+                .field_extent = id_extent,
+                .kind = .{ .object = class },
+            } });
+        },
+        else => vm.setError(.{ .not_implemented_for_type = .{
+            .pos = id_extent.start,
+            .what = "field access",
+            .type = value_type,
+        } }),
+    };
 }
 
 fn evalExpr(vm: *Vm, first_token: Token) error{Vm}!?usize {
@@ -4835,6 +4863,35 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(d.BaseField == 8)
         \\@Assert(d.BaseMethod() == 7)
     );
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.Instance.Inner.I32Field = 77
+        \\@Assert(Statics.Instance.Inner.I32Field == 77)
+        \\var inst = Statics.Instance
+        \\set inst.Inner.I32Field = 78
+        \\@Assert(inst.Inner.I32Field == 78)
+        \\@Assert(Statics.Instance.Inner.I32Field == 78)
+        \\set Statics.Instance.I32Field = 79
+        \\@Assert(inst.I32Field == 79)
+        \\set Statics.Instance.Inner.F64Field = 0 - 0.5
+        \\@Assert(inst.Inner.F64Field == 0 - 0.5)
+    );
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.Instance.Inner.Inner.I32Field = 1
+    , "3: field 'I32Field' accessed on NULL object");
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.Instance.NotAField.I32Field = 1
+    , "3: class 'Instances' has no field 'NotAField'");
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.Instance.I32Field.Inner = 1
+    , "3: field access on an integer not implemented");
     // TODO: should we use "@TestClass()" so we can test these with il2cpp?
     if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")

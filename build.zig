@@ -297,6 +297,7 @@ pub fn build(b: *std.Build) void {
     for (test_games) |game| {
         const game_dir = b.fmt("{s}\\{s}", .{ steam_common, game.steam_dir });
         const dotnet_test = b.addRunArtifact(dotnet_test_exe);
+        dotnet_test.step.name = b.fmt("test-{s}", .{game.step});
         dotnet_test.step.dependOn(&install_dotnet_test.step);
         switch (game.runtime) {
             .mono => {
@@ -311,7 +312,7 @@ pub fn build(b: *std.Build) void {
             },
         }
         b.step(
-            b.fmt("test-{s}", .{game.step}),
+            dotnet_test.step.name,
             b.fmt(
                 "run dotnet-test against {s}'s {t} runtime{s}",
                 .{ game.name, game.runtime, game.note },

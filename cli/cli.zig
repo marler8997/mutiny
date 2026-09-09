@@ -116,15 +116,9 @@ fn cmdDetach(args: *std.process.ArgIterator, pid: u32) !u8 {
         "pid {} has no mutiny window (is Mutiny.dll injected?)",
         .{pid},
     );
-    var hwnd_pid: u32 = undefined;
-    const tid = win32.GetWindowThreadProcessId(hwnd, &hwnd_pid);
-    if (tid == 0) errExit(
-        "GetWindowThreadProcessId failed, error={f}",
+    if (0 == win32.PostMessageW(hwnd, win32.WM_CLOSE, 0, 0)) errExit(
+        "PostMessage(WM_CLOSE) to the mutiny window failed, error={f}",
         .{win32.GetLastError()},
-    );
-    if (0 == win32.PostThreadMessageW(tid, win32.WM_QUIT, 0, 0)) errExit(
-        "PostThreadMessage(WM_QUIT) to thread {} failed, error={f}",
-        .{ tid, win32.GetLastError() },
     );
 
     const start = try std.time.Instant.now();

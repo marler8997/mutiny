@@ -693,6 +693,7 @@ fn wndProc(
         win32.WM_CLOSE => {
             // don't call DefWindowProc, it calls DestroyWindow but we do that ourselves
             // in a defer.
+            win32.PostQuitMessage(0);
             return 0;
         },
         win32.WM_TIMER => {

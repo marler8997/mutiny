@@ -10,8 +10,6 @@ pub const Pool = mutiny.Pool;
 
 pub const mutinyThreadQueueModUpdate = mods.mutinyThreadQueueUpdate;
 pub const mutinyThreadQueueModRemove = mods.mutinyThreadQueueRemove;
-pub const mutinyThreadQueueScript = scripts.mutinyThreadQueue;
-pub const ScriptRequest = scripts.Request;
 
 const global = struct {
     // state related to subclassing the main window
@@ -159,11 +157,6 @@ const Target = struct {
         }
     }
 };
-
-pub fn mutinyThreadDetach() bool {
-    std.log.err("TODO: implement mainthread.mutinyThreadDetach", .{});
-    return false;
-}
 
 const SubclassWindowState = union(enum) {
     initial: struct {
@@ -652,6 +645,7 @@ pub fn onUpdate() callconv(.c) void {
         .ready => |funcs| funcs,
         .unrecoverable_error, .not_ready => return,
     };
+    ipc.ensureWindow();
     mods.applyUpdates(dotnet_funcs);
     runScripts(dotnet_funcs);
     var it = mods.modIterator();
@@ -725,7 +719,7 @@ fn bootstrap() BootstrapResult {
 }
 
 fn runScripts(dotnet_funcs: *const dotnet.Funcs) void {
-    while (scripts.steal()) |script| {
+    while (scripts.take()) |script| {
         defer script.deinit();
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
         var pipe_buf: [4096]u8 = undefined;
@@ -771,7 +765,7 @@ const ScriptFailReason = union(enum) {
 };
 
 fn failQueuedScripts(reason: ScriptFailReason) void {
-    while (scripts.steal()) |script| {
+    while (scripts.take()) |script| {
         defer script.deinit();
         std.log.err("rejecting script '{s}': {f}", .{ script.name.slice(), reason });
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
@@ -868,6 +862,7 @@ const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
+const ipc = @import("ipc.zig");
 const mods = @import("mods.zig");
 const unitygui = @import("unitygui.zig");
 const mutinymono = mutiny.mutinymono;

@@ -1,3 +1,8 @@
+pub const Builtin = enum {
+    assemblies,
+    decomp,
+};
+
 const AssemblyFormat = enum { names, decomp };
 
 pub fn writeDecomp(

@@ -3,7 +3,6 @@ const global = struct {
     var mutex: std.atomic.Value(?win32.HANDLE) = .init(null);
 };
 
-
 pub fn activeThreadId() u32 {
     return global.active_thread_id;
 }
@@ -29,7 +28,7 @@ fn MutinyAttach(context: ?*anyopaque) callconv(.winapi) u32 {
     global.active_thread_id = win32.GetCurrentThreadId();
     defer global.active_thread_id = 0;
 
-    var state: mainthread.AttachState = .{};
+    var state: dll_main.AttachState = .{};
     while (true) switch (state.update()) {
         .attached => {
             std.log.info("attached", .{});
@@ -90,6 +89,6 @@ fn claimMutex(timeout_ms: u32) ?win32.HANDLE {
 
 const std = @import("std");
 const win32 = @import("win32").everything;
-const mainthread = @import("mainthread");
+const dll_main = @import("dll_main");
 
-const mutinyipc = mainthread.mutinyipc;
+const mutinyipc = dll_main.mutinyipc;

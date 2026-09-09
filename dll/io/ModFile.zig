@@ -42,7 +42,7 @@ pub fn nameSlice(file: *const ModFile) ModNameSlice {
 
 const std = @import("std");
 
-const mainthread = @import("mainthread");
+const dll_main = @import("dll_main");
 
-const BoundedArray = mainthread.BoundedArray;
-const ModNameSlice = mainthread.ModNameSlice;
+const BoundedArray = dll_main.BoundedArray;
+const ModNameSlice = dll_main.ModNameSlice;

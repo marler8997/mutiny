@@ -128,7 +128,7 @@ fn spawnIoThread() bool {
         std.log.err("cannot start the io thread: no LOCALAPPDATA environment variable", .{});
         return false;
     };
-    const thread = io.spawn(.{ .name = name, .localappdata = localappdata }) catch return false;
+    const thread = dll_io.spawn(.{ .name = name, .localappdata = localappdata }) catch return false;
     global.io_thread_id.store(win32.GetThreadId(thread), .monotonic);
     global.io_thread = thread;
     return true;
@@ -323,7 +323,7 @@ fn subclassUpdate() enum { keep_calling, done } {
                 }
                 return .keep_calling;
             }
-            std.log.info("mainthread: subclassed window 0x{x} (original wndproc 0x{x})", .{
+            std.log.info("subclassed window 0x{x} (original wndproc 0x{x})", .{
                 @intFromPtr(global.subclass.hwnd),
                 old_wndproc,
             });
@@ -903,10 +903,7 @@ fn runBuiltin(
     try writer.flush();
 }
 
-pub const Builtin = enum {
-    assemblies,
-    decomp,
-};
+pub const Builtin = builtins.Builtin;
 
 const ModUpdate = union(enum) {
     open_file_error: std.fs.File.OpenError,
@@ -934,7 +931,7 @@ const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
-const io = @import("dll.io");
+const dll_io = @import("dll_io");
 const ipc = @import("ipc.zig");
 const mods = @import("mods.zig");
 const unitygui = @import("unitygui.zig");

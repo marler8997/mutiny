@@ -46,12 +46,12 @@ pub fn take() ?*Script {
 const std = @import("std");
 const win32 = @import("win32").everything;
 
-const mainthread = @import("mainthread.zig");
+const mutiny = @import("mutiny");
 const alloc = @import("alloc.zig");
 
-const BoundedArray = mainthread.BoundedArray;
-const Builtin = mainthread.Builtin;
+const BoundedArray = mutiny.BoundedArray;
+const Builtin = @import("builtins.zig").Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");
-const Mutex = mainthread.Mutex;
+const Mutex = mutiny.Mutex;
 const PipeHandle = Script.PipeHandle;
 const Script = @import("Script.zig");

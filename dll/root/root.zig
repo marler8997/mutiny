@@ -7,11 +7,11 @@ const global = struct {
 };
 
 fn isOurThread(thread_id: u32) bool {
-    return thread_id == attach.activeThreadId() or thread_id == mainthread.ioThreadId();
+    return thread_id == dll_attach.activeThreadId() or thread_id == dll_main.ioThreadId();
 }
 
 comptime {
-    _ = attach;
+    _ = dll_attach;
 }
 
 pub fn panic(
@@ -123,9 +123,9 @@ fn writeStackTrace(
     try writer.flush();
 }
 
-pub const mutiny_options: mainthread.Options = .{
-    .onUpdate = mainthread.onUpdate,
-    .onGui = mainthread.onGui,
+pub const mutiny_options: dll_main.Options = .{
+    .onUpdate = dll_main.onUpdate,
+    .onGui = dll_main.onGui,
 };
 
 pub const std_options: std.Options = .{
@@ -228,7 +228,7 @@ const fmtW = std.unicode.fmtUtf16Le;
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
-const mainthread = @import("mainthread");
-const attach = @import("dll.attach");
+const dll_main = @import("dll_main");
+const dll_attach = @import("dll_attach");
 
-const logfile = mainthread.logfile;
+const logfile = dll_main.logfile;

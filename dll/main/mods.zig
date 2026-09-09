@@ -96,9 +96,8 @@ const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
 const dotnet = mutiny.dotnet;
-const mainthread = @import("mainthread.zig");
 
 const ModEvent = @import("ModEvent.zig");
 const Mod = @import("Mod.zig");
 const ModNameSlice = @import("ModNameSlice.zig");
-const Mutex = mainthread.Mutex;
+const Mutex = mutiny.Mutex;

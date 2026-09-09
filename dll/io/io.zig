@@ -197,7 +197,7 @@ fn loadScript(name: []const u16, localappdata: []const u16, request: *const Load
     defer _ = global.file_arena.reset(.retain_capacity);
 
     if (readScript(name, localappdata, request, writer)) |text| {
-        mainthread.ioThreadQueueScript(request.pid, request.pipe, request.nameSlice(), .{ .file = text }) catch {
+        dll_main.ioThreadQueueScript(request.pid, request.pipe, request.nameSlice(), .{ .file = text }) catch {
             reportError(writer, "out of memory creating script '{s}'", .{request.name.slice()}) catch {};
             win32.closeHandle(request.pipe);
         };
@@ -385,20 +385,20 @@ fn readFile(file: std.fs.File, mem: []u8) (error{EndOfStream} || std.fs.File.Rea
     }
 }
 
-const arenaIsClear = mainthread.arenaIsClear;
+const arenaIsClear = dll_main.arenaIsClear;
 const fmtW = std.unicode.fmtUtf16Le;
 
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
-const mainthread = @import("mainthread");
+const dll_main = @import("dll_main");
 
 const modfiles = @import("modfiles.zig");
 
-const appdata = mainthread.appdata;
-const mutinyipc = mainthread.mutinyipc;
+const appdata = dll_main.appdata;
+const mutinyipc = dll_main.mutinyipc;
 
-const BoundedArray = mainthread.BoundedArray;
-const ModNameSlice = mainthread.ModNameSlice;
-const Mutex = mainthread.Mutex;
-const Pool = mainthread.Pool;
+const BoundedArray = dll_main.BoundedArray;
+const ModNameSlice = dll_main.ModNameSlice;
+const Mutex = dll_main.Mutex;
+const Pool = dll_main.Pool;

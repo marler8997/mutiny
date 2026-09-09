@@ -35,10 +35,10 @@ pub fn deinit(script: *Script) void {
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
-const mainthread = @import("mainthread.zig");
+const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
 
-const BoundedArray = mainthread.BoundedArray;
-const Builtin = mainthread.Builtin;
+const BoundedArray = mutiny.BoundedArray;
+const Builtin = @import("builtins.zig").Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");

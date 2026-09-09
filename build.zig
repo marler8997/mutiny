@@ -68,8 +68,8 @@ pub fn build(b: *std.Build) void {
     mutiny_mod.sanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
     mutiny_mod.unsanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
 
-    const mainthread_mod = b.createModule(.{
-        .root_source_file = b.path("mainthread/mainthread.zig"),
+    const dll_main_mod = b.createModule(.{
+        .root_source_file = b.path("dll/main/main.zig"),
         .target = target,
         .imports = &.{
             // zydis_mod_santized pulls in ubsan_rt which causes Zig's panic
@@ -79,26 +79,26 @@ pub fn build(b: *std.Build) void {
         },
     });
     if (target.result.os.tag == .windows) {
-        mainthread_mod.addImport("win32", win32_mod);
+        dll_main_mod.addImport("win32", win32_mod);
     }
 
     const dll_io_mod = b.createModule(.{
         .root_source_file = b.path("dll/io/io.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "mainthread", .module = mainthread_mod },
+            .{ .name = "dll_main", .module = dll_main_mod },
         },
     });
     if (target.result.os.tag == .windows) {
         dll_io_mod.addImport("win32", win32_mod);
     }
-    mainthread_mod.addImport("dll.io", dll_io_mod);
+    dll_main_mod.addImport("dll_io", dll_io_mod);
 
     const attach_mod = b.createModule(.{
         .root_source_file = b.path("dll/attach/attach.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "mainthread", .module = mainthread_mod },
+            .{ .name = "dll_main", .module = dll_main_mod },
         },
     });
     if (target.result.os.tag == .windows) {
@@ -113,8 +113,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "mainthread", .module = mainthread_mod },
-                .{ .name = "dll.attach", .module = attach_mod },
+                .{ .name = "dll_main", .module = dll_main_mod },
+                .{ .name = "dll_attach", .module = attach_mod },
                 // .{ .name = "managed_dll", .module = b.createModule(.{
                 //     .root_source_file = mutiny_managed_dll,
                 // }) },

@@ -253,7 +253,7 @@ fn addScript(
         .{name_a},
     );
 
-    io.requestLoad(pid, pipe, script_name) catch return reportError(
+    dll_io.requestLoad(pid, pipe, script_name) catch return reportError(
         writer,
         "out of memory requesting script '{f}'",
         .{fmtW(name_w)},
@@ -266,10 +266,9 @@ const std = @import("std");
 const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
 
-const mainthread = @import("mainthread.zig");
 const mutinyipc = mutiny.mutinyipc;
 const scripts = @import("scripts.zig");
-const io = @import("dll.io");
+const dll_io = @import("dll_io");
 
-const Builtin = mainthread.Builtin;
+const Builtin = @import("builtins.zig").Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");

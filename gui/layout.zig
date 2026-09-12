@@ -238,9 +238,6 @@ pub const Details = struct {
 pub const MouseButton = enum { left };
 pub const ButtonState = enum { down, up };
 
-pub const empty_title = "No games yet.";
-pub const empty_body = "Attach to a running Unity game and it will be listed here from then on.";
-
 pub fn scale(value: i32, s: f32) i32 {
     return @intFromFloat(@round(@as(f32, @floatFromInt(value)) * s));
 }

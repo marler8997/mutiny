@@ -555,9 +555,6 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
         var buf: [512]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{s}: {s}", .{ err.what, err.name }) catch err.what;
         p.text(text, g.textLine(0), layout.color.text, .left);
-    } else if (games.slice().len == 0) {
-        p.text(layout.empty_title, g.textLine(0), layout.color.text, .left);
-        p.text(layout.empty_body, g.textLine(1), layout.color.muted, .left);
     } else {
         const range = g.visibleRange();
         p.pushClip(g.viewport);

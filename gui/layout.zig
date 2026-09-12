@@ -28,6 +28,8 @@ pub const Rgb = struct {
 
 pub const color = struct {
     pub const window: Rgb = .{ .r = 49, .g = 49, .b = 49 };
+    pub const bar: Rgb = .{ .r = 43, .g = 43, .b = 43 };
+    pub const dropdown: Rgb = .{ .r = 36, .g = 36, .b = 36 };
     pub const track: Rgb = .{ .r = 42, .g = 42, .b = 42 };
     pub const thumb: Rgb = .{ .r = 90, .g = 90, .b = 90 };
     pub const thumb_hover: Rgb = .{ .r = 106, .g = 106, .b = 106 };
@@ -101,6 +103,66 @@ const points = struct {
     const scrollbar_width = 8;
     const scrollbar_gap = 6;
     const thumb_min_height = 24;
+    const bar_height = 36;
+    const bar_pad = 10;
+    const bar_gap = 10;
+    const bar_label_width = 150;
+    const bar_attach_width = 90;
+    const dropdown_item_height = 26;
+};
+
+pub const bar_text = struct {
+    pub const none_running = "No Unity games are running. Launch one; it appears here when its window opens.";
+    pub const all_known = "Every running Unity game is set up. New ones appear here when their window opens.";
+    pub const one_new = "New game running:";
+    pub const many_new = "new games running:";
+};
+
+pub const Bar = struct {
+    rect: Rect,
+    label: Rect,
+    name: Rect,
+    attach: Rect,
+    item_height: i32,
+
+    pub fn init(client: XY, s: f32) Bar {
+        const margin = scale(points.margin, s);
+        const pad = scale(points.bar_pad, s);
+        const gap = scale(points.bar_gap, s);
+        const height = scale(points.bar_height, s);
+        const rect = Rect.ltwh(margin, margin, @max(0, client.x - margin * 2), height);
+        const inner_top = rect.top + pad;
+        const inner_bottom = rect.bottom - pad;
+        const label_width = scale(points.bar_label_width, s);
+        const attach_width = scale(points.bar_attach_width, s);
+        const label: Rect = .{ .left = rect.left + pad, .top = inner_top, .right = rect.left + pad + label_width, .bottom = inner_bottom };
+        const attach: Rect = .{ .left = rect.right - pad - attach_width, .top = inner_top, .right = rect.right - pad, .bottom = inner_bottom };
+        return .{
+            .rect = rect,
+            .label = label,
+            .name = .{ .left = label.right + gap, .top = inner_top, .right = @max(label.right + gap, attach.left - gap), .bottom = inner_bottom },
+            .attach = attach,
+            .item_height = scale(points.dropdown_item_height, s),
+        };
+    }
+
+    pub fn message(bar: Bar) Rect {
+        return .{ .left = bar.label.left, .top = bar.label.top, .right = bar.rect.right - (bar.label.left - bar.rect.left), .bottom = bar.label.bottom };
+    }
+
+    pub fn dropdownRect(bar: Bar, count: usize) Rect {
+        return Rect.ltwh(bar.name.left, bar.name.bottom + 2, bar.name.right - bar.name.left, bar.item_height * @as(i32, @intCast(count)));
+    }
+
+    pub fn dropdownItem(bar: Bar, index: usize) Rect {
+        const list = bar.dropdownRect(index + 1);
+        return .{ .left = list.left, .top = list.bottom - bar.item_height, .right = list.right, .bottom = list.bottom };
+    }
+
+    pub fn hitDropdown(bar: Bar, count: usize, p: XY) ?usize {
+        for (0..count) |index| if (bar.dropdownItem(index).contains(p)) return index;
+        return null;
+    }
 };
 
 pub const Key = enum { up, down, page_up, page_down, home, end };
@@ -135,7 +197,8 @@ pub const Grid = struct {
         const margin = scale(points.margin, s);
         const tile: XY = .{ .x = scale(points.tile_width, s), .y = scale(points.tile_height, s) };
         const gap: XY = .{ .x = scale(points.gap, s), .y = scale(points.gap, s) };
-        const usable_y = @max(0, client.y - margin * 2);
+        const top = margin + scale(points.bar_height, s) + gap.y;
+        const usable_y = @max(0, client.y - top - margin);
 
         var usable_x = @max(0, client.x - margin * 2);
         var columns: usize = @max(1, @as(usize, @intCast(@divTrunc(usable_x + gap.x, tile.x + gap.x))));
@@ -146,10 +209,10 @@ pub const Grid = struct {
             usable_x = @max(0, usable_x - bar_width - scale(points.scrollbar_gap, s));
             columns = @max(1, @as(usize, @intCast(@divTrunc(usable_x + gap.x, tile.x + gap.x))));
             content_height = contentHeight(count, columns, tile.y, gap.y);
-            scrollbar = Rect.ltwh(client.x - margin - bar_width, margin, bar_width, usable_y);
+            scrollbar = Rect.ltwh(client.x - margin - bar_width, top, bar_width, usable_y);
         }
         var grid: Grid = .{
-            .viewport = Rect.ltwh(margin, margin, usable_x, usable_y),
+            .viewport = Rect.ltwh(margin, top, usable_x, usable_y),
             .tile = tile,
             .gap = gap,
             .pad = .{ .x = scale(points.tile_pad, s), .y = scale(points.tile_pad, s) },

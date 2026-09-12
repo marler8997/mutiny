@@ -16,6 +16,13 @@ pub const SetModEnabledResult = enum(win32.LRESULT) {
 };
 
 pub const wm_heartbeat = win32.WM_APP + 0;
+
+/// Registered with RegisterWindowMessage on both sides and posted to HWND_BROADCAST by the
+/// DLL once its mutiny window exists, with the game's pid as wParam, so a GUI learns about an
+/// attach it did not perform (one from the CLI) without polling.
+pub const attached_broadcast_message = win32.L("MutinyAttached");
+/// winuser.h's HWND_BROADCAST, which zigwin32 does not bind.
+pub const hwnd_broadcast: win32.HWND = @ptrFromInt(0xffff);
 pub const heartbeat_result: win32.LRESULT = 0x6c4d2e91;
 
 pub const max_string_len = std.math.maxInt(u16);

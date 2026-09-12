@@ -73,6 +73,15 @@ pub fn ensureWindow() void {
     };
     std.log.info("mutiny window 0x{x} created on the main thread", .{@intFromPtr(hwnd)});
     global.state = .{ .ready = hwnd };
+
+    const broadcast = win32.RegisterWindowMessageW(mutinyipc.attached_broadcast_message);
+    if (broadcast == 0) {
+        std.log.err("RegisterWindowMessage for the attached broadcast failed, error={f}", .{win32.GetLastError()});
+        return;
+    }
+    if (0 == win32.PostMessageW(mutinyipc.hwnd_broadcast, broadcast, win32.GetCurrentProcessId(), 0)) {
+        std.log.err("broadcasting the attach failed, error={f}", .{win32.GetLastError()});
+    }
 }
 
 fn wndProc(

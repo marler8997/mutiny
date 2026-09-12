@@ -16,6 +16,9 @@ const global = struct {
     var text_formats: ?TextFormats = null;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var dll_path: []const u8 = undefined;
+    var exit_waits: std.ArrayListUnmanaged(ExitWait) = .empty;
+    var wm_shellhook: u32 = undefined;
+    var wm_attached: u32 = undefined;
 };
 
 const TextFormats = struct {
@@ -66,25 +69,60 @@ fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT) *win32.IDW
 
 const wm_attach_done = win32.WM_APP + 1;
 
-pub fn runningGames(allocator: std.mem.Allocator) ![]app.Running {
-    const games = try mutiny.scan.unityGames(allocator);
-    defer allocator.free(games);
-    var running: std.ArrayListUnmanaged(app.Running) = .empty;
-    for (games) |game| {
-        var path_buf: [mutiny.scan.max_exe_path:0]u16 = undefined;
-        const path = mutiny.scan.exePath(game.pid, &path_buf) orelse continue;
-        const name_w = mutiny.getname.fromExe(path) catch |err| {
-            std.log.err("pid {} has an unusable exe path '{f}': {t}", .{ game.pid, std.unicode.fmtUtf16Le(path), err });
-            continue;
-        };
-        const name = try std.unicode.wtf16LeToWtf8Alloc(allocator, name_w);
-        try running.append(allocator, .{ .pid = game.pid, .name = name, .status = switch (mutiny.scan.status(game.pid)) {
-            .not_attached => .not_attached,
-            .attached => .attached,
-            .unresponsive => .unresponsive,
-        } });
+const wm_game_exited = win32.WM_APP + 2;
+
+const ExitWait = struct {
+    pid: u32,
+    process: win32.HANDLE,
+    wait: win32.HANDLE,
+};
+
+fn reportGame(pid: u32) void {
+    for (global.exit_waits.items) |wait| if (wait.pid == pid) return;
+
+    var path_buf: [mutiny.scan.max_exe_path:0]u16 = undefined;
+    const path = mutiny.scan.exePath(pid, &path_buf) orelse return;
+    const name_w = mutiny.getname.fromExe(path) catch |err| {
+        std.log.err("pid {} has an unusable exe path '{f}': {t}", .{ pid, std.unicode.fmtUtf16Le(path), err });
+        return;
+    };
+    var name_buf: [layout.max_game_name * 3]u8 = undefined;
+    const name_len = std.unicode.calcWtf8Len(name_w);
+    if (name_len > name_buf.len) {
+        std.log.err("pid {} exe name is {} bytes, too long", .{ pid, name_len });
+        return;
     }
-    return running.toOwnedSlice(allocator);
+    std.debug.assert(name_len == std.unicode.wtf16LeToWtf8(&name_buf, name_w));
+
+    const process = win32.OpenProcess(.{ .SYNCHRONIZE = 1 }, 0, pid) orelse {
+        std.log.err("OpenProcess(SYNCHRONIZE) pid {} failed, error={f}", .{ pid, win32.GetLastError() });
+        return;
+    };
+    var wait: ?win32.HANDLE = null;
+    if (0 == win32.RegisterWaitForSingleObject(&wait, process, exitCallback, @ptrFromInt(pid), win32.INFINITE, win32.WT_EXECUTEONLYONCE)) {
+        std.log.err("RegisterWaitForSingleObject pid {} failed, error={f}", .{ pid, win32.GetLastError() });
+        win32.closeHandle(process);
+        return;
+    }
+    global.exit_waits.append(std.heap.smp_allocator, .{ .pid = pid, .process = process, .wait = wait.? }) catch |err| {
+        std.log.err("out of memory tracking pid {}: {t}", .{ pid, err });
+        return;
+    };
+
+    app.onGameWindowCreated(pid, name_buf[0..name_len], switch (mutiny.scan.status(pid)) {
+        .not_attached => .not_attached,
+        .attached => .attached,
+        .unresponsive => .unresponsive,
+    });
+}
+
+fn exitCallback(context: ?*anyopaque, timed_out: win32.BOOLEAN) callconv(.winapi) void {
+    _ = timed_out;
+    const pid: u32 = @intCast(@intFromPtr(context));
+    if (0 == win32.PostMessageW(global.hwnd, wm_game_exited, pid, 0)) win32.panicWin32(
+        "PostMessage(game exited)",
+        win32.GetLastError(),
+    );
 }
 
 pub fn attach(pid: u32) void {
@@ -272,6 +310,20 @@ pub fn main() void {
         )) win32.panicWin32("SetWindowPos", win32.GetLastError());
     }
 
+    global.wm_shellhook = win32.RegisterWindowMessageW(win32.L("SHELLHOOK"));
+    if (global.wm_shellhook == 0) win32.panicWin32("RegisterWindowMessage(SHELLHOOK)", win32.GetLastError());
+    global.wm_attached = win32.RegisterWindowMessageW(mutiny.mutinyipc.attached_broadcast_message);
+    if (global.wm_attached == 0) win32.panicWin32("RegisterWindowMessage(MutinyAttached)", win32.GetLastError());
+    if (0 == win32.RegisterShellHookWindow(hwnd)) win32.panicWin32("RegisterShellHookWindow", win32.GetLastError());
+
+    {
+        const games = mutiny.scan.unityGames(global.arena.allocator()) catch |err| switch (err) {
+            error.Reported => &.{},
+            else => |e| std.debug.panic("scanning for Unity windows failed: {t}", .{e}),
+        };
+        for (games) |game| reportGame(game.pid);
+    }
+
     _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
 
     var handles = [_]?win32.HANDLE{watch};
@@ -446,6 +498,21 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             app.onAttachDone(@intCast(wparam), lparam != 0);
             return 0;
         },
+        wm_game_exited => {
+            const pid: u32 = @intCast(wparam);
+            for (global.exit_waits.items, 0..) |wait, index| {
+                if (wait.pid != pid) continue;
+                if (0 == win32.UnregisterWaitEx(wait.wait, null)) switch (win32.GetLastError()) {
+                    .ERROR_IO_PENDING => {},
+                    else => |e| win32.panicWin32("UnregisterWaitEx", e),
+                };
+                win32.closeHandle(wait.process);
+                _ = global.exit_waits.swapRemove(index);
+                break;
+            }
+            app.onGameExited(pid);
+            return 0;
+        },
         win32.WM_KEYDOWN => {
             const key: ?layout.Key = switch (@as(win32.VIRTUAL_KEY, @enumFromInt(wparam))) {
                 win32.VK_UP => .up,
@@ -459,7 +526,19 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             if (key) |k| app.onKey(k);
             return 0;
         },
-        else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
+        else => if (msg == global.wm_shellhook) {
+            if (wparam == win32.HSHELL_WINDOWCREATED) {
+                const created: win32.HWND = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                if (mutiny.scan.isUnityWindow(created)) {
+                    var pid: u32 = undefined;
+                    if (0 != win32.GetWindowThreadProcessId(created, &pid)) reportGame(pid);
+                }
+            }
+            return 0;
+        } else if (msg == global.wm_attached) {
+            app.onGameAttached(@intCast(wparam));
+            return 0;
+        } else return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 

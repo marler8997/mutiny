@@ -11,8 +11,10 @@ const global = struct {
     var tracking_mouse = false;
     var d2d_factory: *win32.ID2D1Factory = undefined;
     var dwrite_factory: *win32.IDWriteFactory = undefined;
+    var wic_factory: *win32.IWICImagingFactory = undefined;
     var d2d_store: D2d = undefined;
     var d2d: ?*D2d = null;
+    var target_generation: u32 = 0;
     var text_formats: ?TextFormats = null;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     var dll_path: []const u8 = undefined;
@@ -232,6 +234,20 @@ pub fn main() void {
     {
         const hr = win32.DWriteCreateFactory(.SHARED, win32.IID_IDWriteFactory, @ptrCast(&global.dwrite_factory));
         if (hr < 0) win32.panicHresult("DWriteCreateFactory", hr);
+    }
+    {
+        const hr = win32.CoInitializeEx(null, win32.COINIT_APARTMENTTHREADED);
+        if (hr < 0) win32.panicHresult("CoInitializeEx", hr);
+    }
+    {
+        const hr = win32.CoCreateInstance(
+            &win32.CLSID_WICImagingFactory,
+            null,
+            win32.CLSCTX_INPROC_SERVER,
+            win32.IID_IWICImagingFactory,
+            @ptrCast(&global.wic_factory),
+        );
+        if (hr < 0) win32.panicHresult("CoCreateInstance(WICImagingFactory)", hr);
     }
 
     var apps_path_buf: [mutiny.appdata.max_path]u16 = undefined;
@@ -478,6 +494,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
                 }
                 global.d2d_store = .{ .target = target, .brush = brush };
                 global.d2d = &global.d2d_store;
+                global.target_generation += 1;
                 break :blk &global.d2d_store;
             };
 
@@ -662,6 +679,81 @@ pub const Painter = struct {
 
     pub fn popClip(p: *const Painter) void {
         p.target.PopAxisAlignedClip();
+    }
+
+    pub fn drawIcon(p: *const Painter, icon: *Icon, r: layout.Rect) void {
+        if (icon.d2d == null or icon.generation != global.target_generation) {
+            if (icon.d2d) |old| _ = old.IUnknown.Release();
+            var bitmap: *win32.ID2D1Bitmap = undefined;
+            const hr = p.target.CreateBitmapFromWicBitmap(&icon.source.IWICBitmapSource, null, &bitmap);
+            if (hr < 0) win32.panicHresult("CreateBitmapFromWicBitmap", hr);
+            icon.d2d = bitmap;
+            icon.generation = global.target_generation;
+        }
+        p.target.DrawBitmap(icon.d2d.?, &rectF(r), 1.0, .LINEAR, null);
+    }
+};
+
+pub const Icon = struct {
+    source: *win32.IWICFormatConverter,
+    d2d: ?*win32.ID2D1Bitmap = null,
+    generation: u32 = 0,
+
+    pub fn load(exe: []const u8, size: u32) ?Icon {
+        var wide: [mutiny.appdata.max_exepath + 1]u16 = undefined;
+        const len = std.unicode.wtf8ToWtf16Le(wide[0..mutiny.appdata.max_exepath], exe) catch |err| {
+            std.log.err("exe path is not valid WTF-8 '{s}': {t}", .{ exe, err });
+            return null;
+        };
+        wide[len] = 0;
+        var maybe_hicon: ?win32.HICON = null;
+        {
+            const hr = win32.SHDefExtractIconW(wide[0..len :0], 0, 0, &maybe_hicon, null, size);
+            if (hr == win32.S_FALSE) {
+                std.log.info("'{s}' has no icon", .{exe});
+                return null;
+            }
+            if (hr < 0) {
+                std.log.err("SHDefExtractIcon for '{s}' (size {}) failed, hresult=0x{x}", .{ exe, size, @as(u32, @bitCast(hr)) });
+                return null;
+            }
+        }
+        const hicon = maybe_hicon orelse {
+            std.log.err("SHDefExtractIcon for '{s}' returned S_OK with no icon", .{exe});
+            return null;
+        };
+        defer if (0 == win32.DestroyIcon(hicon)) win32.panicWin32("DestroyIcon", win32.GetLastError());
+
+        var bitmap: ?*win32.IWICBitmap = null;
+        {
+            const hr = global.wic_factory.CreateBitmapFromHICON(hicon, &bitmap);
+            if (hr < 0) win32.panicHresult("CreateBitmapFromHICON", hr);
+        }
+        defer _ = bitmap.?.IUnknown.Release();
+
+        var converter: ?*win32.IWICFormatConverter = null;
+        {
+            const hr = global.wic_factory.CreateFormatConverter(&converter);
+            if (hr < 0) win32.panicHresult("CreateFormatConverter", hr);
+        }
+        {
+            const hr = converter.?.Initialize(
+                &bitmap.?.IWICBitmapSource,
+                @constCast(&win32.GUID_WICPixelFormat32bppPBGRA),
+                .itmapDitherTypeNone,
+                null,
+                0,
+                .itmapPaletteTypeCustom,
+            );
+            if (hr < 0) win32.panicHresult("IWICFormatConverter.Initialize", hr);
+        }
+        return .{ .source = converter.? };
+    }
+
+    pub fn deinit(icon: *Icon) void {
+        if (icon.d2d) |bitmap| _ = bitmap.IUnknown.Release();
+        _ = icon.source.IUnknown.Release();
+        icon.* = undefined;
     }
 };
 

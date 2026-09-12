@@ -49,6 +49,43 @@ const Game = struct {
     }
 };
 
+const IconEntry = struct {
+    name_buf: [layout.max_game_name]u8,
+    name_len: usize,
+    size: u32,
+    icon: ?platform.Icon,
+
+    fn name(e: *const IconEntry) []const u8 {
+        return e.name_buf[0..e.name_len];
+    }
+};
+
+fn gameIcon(game_name: []const u8, r: layout.Rect) ?*platform.Icon {
+    const size: u32 = @intCast(@max(0, r.right - r.left));
+    if (size == 0) return null;
+    const entry: *IconEntry = blk: {
+        for (global.icons.items) |*e| {
+            if (!std.ascii.eqlIgnoreCase(e.name(), game_name)) continue;
+            if (e.size == size) return if (e.icon) |*icon| icon else null;
+            if (e.icon) |*icon| icon.deinit();
+            break :blk e;
+        }
+        const new = global.icons.addOne(running_allocator) catch |e| {
+            std.log.err("out of memory caching the icon for '{s}': {t}", .{ game_name, e });
+            return null;
+        };
+        new.name_len = game_name.len;
+        @memcpy(new.name_buf[0..game_name.len], game_name);
+        break :blk new;
+    };
+    entry.size = size;
+    entry.icon = null;
+    var exe_buf: [max_exepath]u8 = undefined;
+    const exe = readExePath(game_name, &exe_buf) catch return null;
+    entry.icon = platform.Icon.load(exe, size);
+    return if (entry.icon) |*icon| icon else null;
+}
+
 const Launch = struct {
     id: u32,
     name_buf: [layout.max_game_name]u8,
@@ -80,6 +117,7 @@ const global = struct {
     var games: Games = .{};
     var running: std.ArrayListUnmanaged(Running) = .empty;
     var launches: std.ArrayListUnmanaged(Launch) = .empty;
+    var icons: std.ArrayListUnmanaged(IconEntry) = .empty;
     var next_launch_id: u32 = 1;
     var picked_pid: ?u32 = null;
     var dropdown_open = false;
@@ -530,7 +568,7 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
             const header = g.headerRect(tile);
             const header_hot = hovered_tile == index and (if (global.mouse) |m| header.contains(m) else false);
             if (header_hot) p.fill(header, layout.color.tile_hover);
-            p.fill(g.iconRect(tile), layout.color.icon);
+            paintIcon(p, game.name, g.iconRect(tile));
             p.text(game.name, g.nameRect(tile), if (header_hot) layout.color.name_hover else layout.color.name, .left);
             if (game.running()) |r| {
                 var buf: [32]u8 = undefined;
@@ -566,6 +604,14 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     }
 }
 
+fn paintIcon(p: *const platform.Painter, game_name: []const u8, r: layout.Rect) void {
+    if (gameIcon(game_name, r)) |icon| {
+        p.drawIcon(icon, r);
+    } else {
+        p.fill(r, layout.color.icon);
+    }
+}
+
 fn paintDetails(p: *const platform.Painter, client: layout.XY, scale: f32, d: *const Details, game: *Game) void {
     const dl: layout.Details = .init(client, scale);
     const hot = struct {
@@ -575,7 +621,7 @@ fn paintDetails(p: *const platform.Painter, client: layout.XY, scale: f32, d: *c
     };
 
     p.text(layout.details_text.back, dl.back, if (hot.over(dl.back)) layout.color.text else layout.color.muted, .left);
-    p.fill(dl.icon, layout.color.icon);
+    paintIcon(p, game.name, dl.icon);
     p.text(game.name, dl.title, layout.color.name, .left);
 
     var dir_buf: [max_exepath]u8 = undefined;

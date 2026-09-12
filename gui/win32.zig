@@ -342,6 +342,20 @@ pub fn main() void {
     global.hwnd = hwnd;
 
     {
+        const dark: win32.BOOL = 1;
+        const hr = win32.DwmSetWindowAttribute(
+            hwnd,
+            win32.DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark,
+            @sizeOf(win32.BOOL),
+        );
+        if (hr < 0) std.log.warn(
+            "DwmSetWindowAttribute(dark mode) failed, hresult=0x{x}",
+            .{@as(u32, @bitCast(hr))},
+        );
+    }
+
+    {
         const dpi = win32.dpiFromHwnd(hwnd);
         const s = dpiScale(dpi);
         var rect: win32.RECT = .{

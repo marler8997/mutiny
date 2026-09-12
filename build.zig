@@ -1,5 +1,6 @@
 const std = @import("std");
 const UpdateDll = @import("UpdateDll.zig");
+const UpdateIco = @import("UpdateIco.zig");
 
 fn SanitizeVariants(comptime T: type) type {
     return struct {
@@ -226,8 +227,15 @@ pub fn build(b: *std.Build) void {
         });
         b.step("install-gui", "").dependOn(&install.step);
         b.getInstallStep().dependOn(&install.step);
+        const ico = UpdateIco.create(b, .{
+            .svg_path = "gui/mutiny.svg",
+            .script_path = "gui/svg2ico.ps1",
+            .out_path = "gui/mutiny.ico",
+        });
+        const rc_files = b.addWriteFiles();
+        _ = rc_files.addCopyFile(ico.path(), "mutiny.ico");
         exe.addWin32ResourceFile(.{
-            .file = b.path("gui/mutiny.rc"),
+            .file = rc_files.addCopyFile(b.path("gui/mutiny.rc"), "mutiny.rc"),
         });
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);

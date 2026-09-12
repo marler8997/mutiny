@@ -9,6 +9,11 @@ fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
 const global = struct {
     var hwnd: win32.HWND = undefined;
     var tracking_mouse = false;
+    var d2d_factory: *win32.ID2D1Factory = undefined;
+    var dwrite_factory: *win32.IDWriteFactory = undefined;
+    var d2d_store: D2d = undefined;
+    var d2d: ?*D2d = null;
+    var text_format: ?struct { dpi: u32, format: *win32.IDWriteTextFormat } = null;
 };
 
 const window_class_name = win32.L("MutinyMainWindow");
@@ -23,6 +28,15 @@ pub fn main() void {
             .PER_MONITOR_DPI_AWARE => {},
             else => |a| std.debug.panic("the process is {t}, the manifest should make it PER_MONITOR_DPI_AWARE", .{a}),
         }
+    }
+
+    {
+        const hr = win32.D2D1CreateFactory(.SINGLE_THREADED, win32.IID_ID2D1Factory, null, @ptrCast(&global.d2d_factory));
+        if (hr < 0) win32.panicHresult("D2D1CreateFactory", hr);
+    }
+    {
+        const hr = win32.DWriteCreateFactory(.SHARED, win32.IID_IDWriteFactory, @ptrCast(&global.dwrite_factory));
+        if (hr < 0) win32.panicHresult("DWriteCreateFactory", hr);
     }
 
     var apps_path_buf: [appdata.max_path]u16 = undefined;
@@ -166,6 +180,12 @@ pub fn invalidate() void {
     win32.invalidateHwnd(global.hwnd);
 }
 
+pub fn captureMouse(capture: bool) void {
+    if (capture) {
+        _ = win32.SetCapture(global.hwnd);
+    } else if (0 == win32.ReleaseCapture()) win32.panicWin32("ReleaseCapture", win32.GetLastError());
+}
+
 fn dpiScale(dpi: u32) f32 {
     return @as(f32, @floatFromInt(dpi)) / 96.0;
 }
@@ -178,43 +198,103 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
         },
         win32.WM_ERASEBKGND => return 1,
         win32.WM_PAINT => {
-            const paintdc, const ps = win32.beginPaint(hwnd);
+            _, const ps = win32.beginPaint(hwnd);
             defer win32.endPaint(hwnd, &ps);
 
             const size = win32.getClientSize(hwnd);
-            const memdc = win32.CreateCompatibleDC(paintdc);
-            defer win32.deleteDc(memdc);
-            const bmp = win32.CreateCompatibleBitmap(paintdc, size.cx, size.cy) orelse win32.panicWin32("CreateCompatibleBitmap", win32.GetLastError());
-            defer win32.deleteObject(bmp);
-            const old_bmp = win32.SelectObject(memdc, bmp);
-            defer _ = win32.SelectObject(memdc, old_bmp);
-
             const dpi = win32.dpiFromHwnd(hwnd);
-            const font = win32.CreateFontW(
-                -@as(i32, @intCast(win32.MulDiv(layout.font_points, @intCast(dpi), 72))),
-                0,
-                0,
-                0,
-                @intCast(win32.FW_NORMAL),
-                0,
-                0,
-                0,
-                win32.DEFAULT_CHARSET,
-                .DEFAULT_PRECIS,
-                win32.CLIP_DEFAULT_PRECIS,
-                .CLEARTYPE_QUALITY,
-                .DONTCARE,
-                win32.L("Segoe UI"),
-            ) orelse win32.panicWin32("CreateFont", win32.GetLastError());
-            defer win32.deleteObject(font);
-            const old_font = win32.SelectObject(memdc, font);
-            defer _ = win32.SelectObject(memdc, old_font);
-            if (0 == win32.SetBkMode(memdc, .TRANSPARENT)) win32.panicWin32("SetBkMode", win32.GetLastError());
 
-            const painter: Painter = .{ .hdc = memdc };
+            const d2d: *D2d = global.d2d orelse blk: {
+                var target: *win32.ID2D1HwndRenderTarget = undefined;
+                const target_props: win32.D2D1_RENDER_TARGET_PROPERTIES = .{
+                    .type = .DEFAULT,
+                    .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .PREMULTIPLIED },
+                    .dpiX = 0,
+                    .dpiY = 0,
+                    .usage = .{},
+                    .minLevel = .DEFAULT,
+                };
+                const hwnd_props: win32.D2D1_HWND_RENDER_TARGET_PROPERTIES = .{
+                    .hwnd = hwnd,
+                    .pixelSize = .{ .width = @intCast(size.cx), .height = @intCast(size.cy) },
+                    .presentOptions = .{},
+                };
+                {
+                    const hr = global.d2d_factory.CreateHwndRenderTarget(&target_props, &hwnd_props, &target);
+                    if (hr < 0) win32.panicHresult("CreateHwndRenderTarget", hr);
+                }
+                target.ID2D1RenderTarget.SetDpi(96, 96);
+                var brush: *win32.ID2D1SolidColorBrush = undefined;
+                {
+                    const black: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
+                    const hr = target.ID2D1RenderTarget.CreateSolidColorBrush(&black, null, &brush);
+                    if (hr < 0) win32.panicHresult("CreateSolidColorBrush", hr);
+                }
+                global.d2d_store = .{ .target = target, .brush = brush };
+                global.d2d = &global.d2d_store;
+                break :blk &global.d2d_store;
+            };
+
+            const text_format = blk: {
+                if (global.text_format) |cached| {
+                    if (cached.dpi == dpi) break :blk cached.format;
+                    _ = cached.format.IUnknown.Release();
+                    global.text_format = null;
+                }
+                var format: *win32.IDWriteTextFormat = undefined;
+                {
+                    const size_px: f32 = @as(f32, layout.font_points) * @as(f32, @floatFromInt(dpi)) / 72.0;
+                    const hr = global.dwrite_factory.CreateTextFormat(
+                        win32.L("Segoe UI"),
+                        null,
+                        win32.DWRITE_FONT_WEIGHT_NORMAL,
+                        win32.DWRITE_FONT_STYLE_NORMAL,
+                        win32.DWRITE_FONT_STRETCH_NORMAL,
+                        size_px,
+                        win32.L(""),
+                        &format,
+                    );
+                    if (hr < 0) win32.panicHresult("CreateTextFormat", hr);
+                }
+                {
+                    const hr = format.SetParagraphAlignment(.CENTER);
+                    if (hr < 0) win32.panicHresult("SetParagraphAlignment", hr);
+                }
+                {
+                    const hr = format.SetWordWrapping(.NO_WRAP);
+                    if (hr < 0) win32.panicHresult("SetWordWrapping", hr);
+                }
+                {
+                    var ellipsis: *win32.IDWriteInlineObject = undefined;
+                    const create_hr = global.dwrite_factory.CreateEllipsisTrimmingSign(format, &ellipsis);
+                    if (create_hr < 0) win32.panicHresult("CreateEllipsisTrimmingSign", create_hr);
+                    defer _ = ellipsis.IUnknown.Release();
+                    const trimming: win32.DWRITE_TRIMMING = .{ .granularity = .CHARACTER, .delimiter = 0, .delimiterCount = 0 };
+                    const hr = format.SetTrimming(&trimming, ellipsis);
+                    if (hr < 0) win32.panicHresult("SetTrimming", hr);
+                }
+                global.text_format = .{ .dpi = dpi, .format = format };
+                break :blk format;
+            };
+
+            {
+                const pixel_size: win32.D2D_SIZE_U = .{ .width = @intCast(size.cx), .height = @intCast(size.cy) };
+                const hr = d2d.target.Resize(&pixel_size);
+                if (hr < 0) win32.panicHresult("Resize", hr);
+            }
+
+            const target = &d2d.target.ID2D1RenderTarget;
+            target.BeginDraw();
+            const painter: Painter = .{ .target = target, .brush = d2d.brush, .text_format = text_format };
             app.onPaint(&painter, .{ .x = size.cx, .y = size.cy }, dpiScale(dpi));
-
-            if (0 == win32.BitBlt(paintdc, 0, 0, size.cx, size.cy, memdc, 0, 0, win32.SRCCOPY)) win32.panicWin32("BitBlt", win32.GetLastError());
+            const hr = target.EndDraw(null, null);
+            if (hr == win32.D2DERR_RECREATE_TARGET) {
+                std.log.info("D2DERR_RECREATE_TARGET", .{});
+                _ = d2d.brush.IUnknown.Release();
+                _ = d2d.target.IUnknown.Release();
+                global.d2d = null;
+                win32.invalidateHwnd(hwnd);
+            } else if (hr < 0) win32.panicHresult("EndDraw", hr);
             return 0;
         },
         win32.WM_SIZE => {
@@ -255,38 +335,84 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             app.onMouse(null);
             return 0;
         },
+        win32.WM_LBUTTONDOWN, win32.WM_LBUTTONUP => {
+            const p = win32.pointFromLparam(lparam);
+            app.onMouseButton(.left, if (msg == win32.WM_LBUTTONDOWN) .down else .up, .{ .x = p.x, .y = p.y });
+            return 0;
+        },
+        win32.WM_MOUSEWHEEL => {
+            const delta: i16 = @bitCast(win32.hiword(wparam));
+            app.onWheel(@as(f32, @floatFromInt(delta)) / @as(f32, @floatFromInt(win32.WHEEL_DELTA)));
+            return 0;
+        },
+        win32.WM_KEYDOWN => {
+            const key: ?layout.Key = switch (@as(win32.VIRTUAL_KEY, @enumFromInt(wparam))) {
+                win32.VK_UP => .up,
+                win32.VK_DOWN => .down,
+                win32.VK_PRIOR => .page_up,
+                win32.VK_NEXT => .page_down,
+                win32.VK_HOME => .home,
+                win32.VK_END => .end,
+                else => null,
+            };
+            if (key) |k| app.onKey(k);
+            return 0;
+        },
         else => return win32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
+const D2d = struct {
+    target: *win32.ID2D1HwndRenderTarget,
+    brush: *win32.ID2D1SolidColorBrush,
+};
+
 pub const Painter = struct {
-    hdc: win32.HDC,
+    target: *const win32.ID2D1RenderTarget,
+    brush: *win32.ID2D1SolidColorBrush,
+    text_format: *win32.IDWriteTextFormat,
+
+    fn setColor(p: *const Painter, rgb: layout.Rgb) *win32.ID2D1Brush {
+        const color: win32.D2D_COLOR_F = .{
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = 1,
+        };
+        p.brush.SetColor(&color);
+        return &p.brush.ID2D1Brush;
+    }
 
     pub fn fill(p: *const Painter, r: layout.Rect, rgb: layout.Rgb) void {
-        const brush = win32.createSolidBrush(colorref(rgb));
-        defer win32.deleteObject(brush);
-        win32.fillRect(p.hdc, .{ .left = r.left, .top = r.top, .right = r.right, .bottom = r.bottom }, brush);
+        p.target.FillRectangle(&rectF(r), p.setColor(rgb));
     }
 
     pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb) void {
-        var wide: [layout.max_text_len]u16 = undefined;
-        const len = std.unicode.wtf8ToWtf16Le(&wide, utf8) catch {
+        var wide: [layout.max_text_len + 1]u16 = undefined;
+        const len = std.unicode.wtf8ToWtf16Le(wide[0..layout.max_text_len], utf8) catch {
             std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
             return;
         };
-        if (win32.CLR_INVALID == win32.SetTextColor(p.hdc, colorref(rgb))) win32.panicWin32("SetTextColor", win32.GetLastError());
-        var rect: win32.RECT = .{ .left = r.left, .top = r.top, .right = r.right, .bottom = r.bottom };
-        if (0 == win32.DrawTextW(p.hdc, @ptrCast(&wide), @intCast(len), &rect, .{
-            .SINGLELINE = 1,
-            .VCENTER = 1,
-            .END_ELLIPSIS = 1,
-            .NOPREFIX = 1,
-        })) win32.panicWin32("DrawText", win32.GetLastError());
+        wide[len] = 0;
+        p.target.DrawText(wide[0..len :0], @intCast(len), p.text_format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
+    }
+
+    pub fn pushClip(p: *const Painter, r: layout.Rect) void {
+        p.target.PushAxisAlignedClip(&rectF(r), .ALIASED);
+    }
+
+    pub fn popClip(p: *const Painter) void {
+        p.target.PopAxisAlignedClip();
     }
 };
 
-fn colorref(rgb: layout.Rgb) u32 {
-    return @as(u32, rgb.r) | (@as(u32, rgb.g) << 8) | (@as(u32, rgb.b) << 16);
+fn rectF(r: layout.Rect) win32.D2D_RECT_F {
+    return .{
+        .left = @floatFromInt(r.left),
+        .top = @floatFromInt(r.top),
+        .right = @floatFromInt(r.right),
+        .bottom = @floatFromInt(r.bottom),
+    };
 }
 
 const std = @import("std");

@@ -20,7 +20,62 @@ const global = struct {
     var apps_dir: std.fs.Dir = undefined;
     var games: Games = .{};
     var mouse: ?layout.XY = null;
+    var scroll: i32 = 0;
+    var drag: ?struct { start_y: i32, start_scroll: i32 } = null;
+    var client: layout.XY = .{ .x = 0, .y = 0 };
+    var scale: f32 = 1;
 };
+
+fn grid() layout.Grid {
+    return .init(global.client, global.scale, global.games.slice().len, global.scroll);
+}
+
+fn scrollTo(scroll: i32) void {
+    const clamped = grid().clampScroll(scroll);
+    if (clamped == global.scroll) return;
+    global.scroll = clamped;
+    platform.invalidate();
+}
+
+fn scrollBy(pixels: i32) void {
+    scrollTo(global.scroll +| pixels);
+}
+
+pub fn onWheel(notches: f32) void {
+    scrollBy(-layout.scale(grid().rowPitch(), notches));
+}
+
+pub fn onKey(key: layout.Key) void {
+    const g = grid();
+    switch (key) {
+        .up => scrollBy(-g.rowPitch()),
+        .down => scrollBy(g.rowPitch()),
+        .page_up => scrollBy(-g.viewportHeight()),
+        .page_down => scrollBy(g.viewportHeight()),
+        .home => scrollTo(0),
+        .end => scrollTo(g.maxScroll()),
+    }
+}
+
+pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, position: layout.XY) void {
+    _ = button;
+    global.mouse = position;
+    switch (state) {
+        .down => {
+            if (grid().thumbRect()) |thumb| if (thumb.contains(position)) {
+                global.drag = .{ .start_y = position.y, .start_scroll = global.scroll };
+                platform.captureMouse(true);
+            };
+        },
+        .up => {
+            if (global.drag != null) {
+                global.drag = null;
+                platform.captureMouse(false);
+            }
+        },
+    }
+    platform.invalidate();
+}
 
 pub fn init(apps_dir: std.fs.Dir) void {
     global.apps_dir = apps_dir;
@@ -34,6 +89,9 @@ pub fn onAppsDirChanged() void {
 
 pub fn onMouse(position: ?layout.XY) void {
     global.mouse = position;
+    if (global.drag) |drag| if (position) |p| {
+        scrollTo(grid().scrollFromDrag(drag.start_scroll, p.y - drag.start_y));
+    };
     platform.invalidate();
 }
 
@@ -85,29 +143,42 @@ fn nameLessThan(_: void, a: []const u8, b: []const u8) bool {
 }
 
 pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
+    global.client = client;
+    global.scale = scale;
     p.fill(.{ .left = 0, .top = 0, .right = client.x, .bottom = client.y }, layout.color.window);
-    const grid: layout.Grid = .init(client, scale);
+    const g = grid();
+    global.scroll = g.scroll;
     const games = &global.games;
 
     if (games.err) |err| {
         var buf: [512]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{s}: {s}", .{ err.what, err.name }) catch err.what;
-        p.text(text, grid.textLine(grid.origin, 0), layout.color.text);
+        p.text(text, g.textLine(0), layout.color.text);
         return;
     }
     if (games.slice().len == 0) {
-        p.text(layout.empty_title, grid.textLine(grid.origin, 0), layout.color.text);
-        p.text(layout.empty_body, grid.textLine(grid.origin, 1), layout.color.muted);
+        p.text(layout.empty_title, g.textLine(0), layout.color.text);
+        p.text(layout.empty_body, g.textLine(1), layout.color.muted);
         return;
     }
 
-    for (games.slice()[0..@min(games.slice().len, grid.visible())], 0..) |name, index| {
-        const tile = grid.tileRect(index);
-        const hovered = if (global.mouse) |m| tile.contains(m) else false;
+    const hovered_tile = if (global.mouse) |m| g.hitTile(m) else null;
+    const range = g.visibleRange();
+    p.pushClip(g.viewport);
+    for (games.slice()[range.first..range.end], range.first..) |name, index| {
+        const tile = g.tileRect(index);
         p.fill(tile, layout.color.tile_edge);
-        p.fill(tile.inset(1), if (hovered) layout.color.tile_hover else layout.color.tile);
-        p.fill(grid.iconRect(tile), layout.color.icon);
-        p.text(name, grid.nameRect(tile), layout.color.name);
+        p.fill(tile.inset(1), if (hovered_tile == index) layout.color.tile_hover else layout.color.tile);
+        p.fill(g.iconRect(tile), layout.color.icon);
+        p.text(name, g.nameRect(tile), layout.color.name);
+    }
+    p.popClip();
+
+    if (g.scrollbar) |track| {
+        p.fill(track, layout.color.track);
+        const thumb = g.thumbRect().?;
+        const hot = global.drag != null or (if (global.mouse) |m| thumb.contains(m) else false);
+        p.fill(thumb, if (hot) layout.color.thumb_hover else layout.color.thumb);
     }
 }
 

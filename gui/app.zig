@@ -148,7 +148,12 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
                 platform.captureMouse(false);
             } else if (g.hitTile(position)) |index| {
                 const game = &global.games.slice()[index];
-                if (g.buttonRect(g.tileRect(index)).contains(position)) clickButton(game);
+                const tile = g.tileRect(index);
+                if (g.buttonRect(tile).contains(position)) {
+                    clickButton(game);
+                } else if (g.headerRect(tile).contains(position)) {
+                    std.log.info("details for '{s}': not implemented yet", .{game.name});
+                }
             }
         },
     }
@@ -240,9 +245,12 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     for (games.slice()[range.first..range.end], range.first..) |*game, index| {
         const tile = g.tileRect(index);
         p.fill(tile, layout.color.tile_edge);
-        p.fill(tile.inset(1), if (hovered_tile == index) layout.color.tile_hover else layout.color.tile);
+        p.fill(tile.inset(1), layout.color.tile);
+        const header = g.headerRect(tile);
+        const header_hot = hovered_tile == index and (if (global.mouse) |m| header.contains(m) else false);
+        if (header_hot) p.fill(header, layout.color.tile_hover);
         p.fill(g.iconRect(tile), layout.color.icon);
-        p.text(game.name, g.nameRect(tile), layout.color.name, .left);
+        p.text(game.name, g.nameRect(tile), if (header_hot) layout.color.name_hover else layout.color.name, .left);
         if (game.running) |running| {
             var buf: [32]u8 = undefined;
             const pid_text = std.fmt.bufPrint(&buf, "pid {}", .{running.pid}) catch unreachable;

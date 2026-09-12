@@ -38,6 +38,7 @@ pub const color = struct {
     pub const text: Rgb = .{ .r = 232, .g = 230, .b = 225 };
     pub const muted: Rgb = .{ .r = 154, .g = 152, .b = 147 };
     pub const name: Rgb = .{ .r = 140, .g = 204, .b = 255 };
+    pub const name_hover: Rgb = .{ .r = 184, .g = 223, .b = 255 };
     pub const button: Rgb = .{ .r = 76, .g = 76, .b = 76 };
     pub const button_hover: Rgb = .{ .r = 88, .g = 88, .b = 88 };
     pub const button_disabled: Rgb = .{ .r = 63, .g = 63, .b = 63 };
@@ -229,6 +230,15 @@ pub const Grid = struct {
         if (travel <= 0) return start_scroll;
         const delta = @divTrunc(@as(i64, dy) * @as(i64, grid.maxScroll()), @as(i64, travel));
         return grid.clampScroll(@intCast(std.math.clamp(@as(i64, start_scroll) + delta, 0, std.math.maxInt(i32))));
+    }
+
+    pub fn headerRect(grid: Grid, tile: Rect) Rect {
+        return .{
+            .left = tile.left + grid.pad.x,
+            .top = tile.top + grid.pad.y,
+            .right = tile.right - grid.pad.x,
+            .bottom = tile.top + grid.pad.y + grid.icon.y,
+        };
     }
 
     pub fn iconRect(grid: Grid, tile: Rect) Rect {

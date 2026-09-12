@@ -109,6 +109,9 @@ const points = struct {
     const bar_label_width = 150;
     const bar_attach_width = 90;
     const dropdown_item_height = 26;
+    const details_back_width = 70;
+    const details_label_width = 90;
+    const details_button_width = 120;
 };
 
 pub const bar_text = struct {
@@ -165,7 +168,68 @@ pub const Bar = struct {
     }
 };
 
-pub const Key = enum { up, down, page_up, page_down, home, end };
+pub const Key = enum { up, down, page_up, page_down, home, end, escape };
+
+pub const details_text = struct {
+    pub const back = "← Games";
+    pub const labels = [_][]const u8{ "Executable", "Process", "Directory", "Mods", "Log" };
+    pub const open_directory = "Open directory";
+    pub const open_log = "Open log";
+};
+
+pub const Details = struct {
+    back: Rect,
+    icon: Rect,
+    title: Rect,
+    label_column: i32,
+    value_left: i32,
+    rows_top: i32,
+    line_height: i32,
+    action: Rect,
+    open_directory: Rect,
+    open_log: Rect,
+
+    pub fn init(client: XY, s: f32) Details {
+        const margin = scale(points.margin, s);
+        const line_height = scale(points.line_height, s);
+        const bar_height = scale(points.bar_height, s);
+        const pad = scale(points.bar_pad, s);
+        const gap = scale(points.bar_gap, s);
+        const width = @max(0, client.x - margin * 2);
+        const head_top = margin;
+        const head_bottom = margin + bar_height;
+        const back_width = scale(points.details_back_width, s);
+        const label_width = scale(points.details_label_width, s);
+        const button_height = scale(points.button_height, s);
+        const button_width = scale(points.details_button_width, s);
+        const icon = scale(points.icon_size, s);
+        const icon_left = margin + back_width + gap;
+        const rows_top = head_bottom + gap;
+        const actions_top = rows_top + line_height * @as(i32, @intCast(details_text.labels.len)) + gap * 2;
+        return .{
+            .back = .{ .left = margin, .top = head_top, .right = margin + back_width, .bottom = head_bottom },
+            .icon = Rect.ltwh(icon_left, head_top + @divTrunc(bar_height - icon, 2), icon, icon),
+            .title = .{ .left = icon_left + icon + gap, .top = head_top, .right = margin + width, .bottom = head_bottom },
+            .label_column = margin + pad,
+            .value_left = margin + pad + label_width,
+            .rows_top = rows_top,
+            .line_height = line_height,
+            .action = Rect.ltwh(margin, actions_top, button_width, button_height),
+            .open_directory = Rect.ltwh(margin + button_width + gap, actions_top, button_width, button_height),
+            .open_log = Rect.ltwh(margin + (button_width + gap) * 2, actions_top, button_width, button_height),
+        };
+    }
+
+    pub fn labelRect(d: Details, row: usize) Rect {
+        const top = d.rows_top + d.line_height * @as(i32, @intCast(row));
+        return .{ .left = d.label_column, .top = top, .right = d.value_left, .bottom = top + d.line_height };
+    }
+
+    pub fn valueRect(d: Details, row: usize, client: XY) Rect {
+        const top = d.rows_top + d.line_height * @as(i32, @intCast(row));
+        return .{ .left = d.value_left, .top = top, .right = client.x - d.label_column, .bottom = top + d.line_height };
+    }
+};
 
 pub const MouseButton = enum { left };
 pub const ButtonState = enum { down, up };

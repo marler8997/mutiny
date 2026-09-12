@@ -19,6 +19,8 @@ const global = struct {
     var exit_waits: std.ArrayListUnmanaged(ExitWait) = .empty;
     var wm_shellhook: u32 = undefined;
     var wm_attached: u32 = undefined;
+    var apps_dir_path_buf: [mutiny.appdata.max_path * 3]u8 = undefined;
+    var apps_dir_path: []const u8 = undefined;
 };
 
 const TextFormats = struct {
@@ -209,6 +211,8 @@ pub fn main() void {
             .too_long => std.debug.panic("LOCALAPPDATA ({} chars) is too long", .{localappdata.len}),
         };
         if (mutiny.appdata.makeDirs(&apps_path_buf, path.len)) |err| win32.panicWin32("CreateDirectory", err);
+        const utf8_len = std.unicode.wtf16LeToWtf8(&global.apps_dir_path_buf, path);
+        global.apps_dir_path = global.apps_dir_path_buf[0..utf8_len];
         break :blk path;
     };
 
@@ -354,6 +358,37 @@ pub fn main() void {
 
 pub fn invalidate() void {
     win32.invalidateHwnd(global.hwnd);
+}
+
+pub fn appsDirPath() []const u8 {
+    return global.apps_dir_path;
+}
+
+pub fn openDirectory(path: []const u8) void {
+    shellOpen(null, path);
+}
+
+pub fn openTextFile(path: []const u8) void {
+    shellOpen(win32.L("notepad.exe"), path);
+}
+
+fn shellOpen(program: ?[*:0]const u16, path: []const u8) void {
+    var wide: [mutiny.appdata.max_path * 2 + 1]u16 = undefined;
+    const len = std.unicode.wtf8ToWtf16Le(wide[0 .. wide.len - 1], path) catch |err| {
+        std.log.err("cannot open '{s}': {t}", .{ path, err });
+        return;
+    };
+    wide[len] = 0;
+    const path_z = wide[0..len :0];
+    const result = win32.ShellExecuteW(
+        null,
+        win32.L("open"),
+        program orelse path_z,
+        if (program == null) null else path_z,
+        null,
+        @bitCast(win32.SW_SHOWNORMAL),
+    );
+    if (@intFromPtr(result) <= 32) std.log.err("ShellExecute '{s}' failed with {}", .{ path, @intFromPtr(result) });
 }
 
 pub fn captureMouse(capture: bool) void {
@@ -521,6 +556,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
                 win32.VK_NEXT => .page_down,
                 win32.VK_HOME => .home,
                 win32.VK_END => .end,
+                win32.VK_ESCAPE => .escape,
                 else => null,
             };
             if (key) |k| app.onKey(k);

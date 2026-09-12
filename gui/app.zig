@@ -64,9 +64,91 @@ const global = struct {
     var drag: ?struct { start_y: i32, start_scroll: i32 } = null;
     var client: layout.XY = .{ .x = 0, .y = 0 };
     var scale: f32 = 1;
+    var details: ?Details = null;
 };
 
 const running_allocator = std.heap.smp_allocator;
+
+const Details = struct {
+    name_buf: [layout.max_game_name]u8,
+    name_len: usize,
+    exe_buf: [max_exepath]u8,
+    exe_len: usize,
+    exe_err: ?anyerror,
+    mods: ?usize,
+
+    fn name(d: *const Details) []const u8 {
+        return d.name_buf[0..d.name_len];
+    }
+
+    fn exe(d: *const Details) []const u8 {
+        return d.exe_buf[0..d.exe_len];
+    }
+
+    fn game(d: *const Details) ?*Game {
+        for (global.games.slice()) |*g| if (std.mem.eql(u8, g.name, d.name())) return g;
+        return null;
+    }
+};
+
+const max_exepath = 4096;
+
+fn openDetails(game_name: []const u8) void {
+    var d: Details = .{
+        .name_buf = undefined,
+        .name_len = game_name.len,
+        .exe_buf = undefined,
+        .exe_len = 0,
+        .exe_err = null,
+        .mods = null,
+    };
+    @memcpy(d.name_buf[0..game_name.len], game_name);
+
+    var path_buf: [layout.max_game_name + 1 + "exepath".len]u8 = undefined;
+    const exepath = std.fmt.bufPrint(&path_buf, "{s}{c}exepath", .{ game_name, std.fs.path.sep }) catch unreachable;
+    if (global.apps_dir.readFile(exepath, &d.exe_buf)) |contents| {
+        d.exe_len = contents.len;
+    } else |err| {
+        std.log.err("read '{s}' failed: {t}", .{ exepath, err });
+        d.exe_err = err;
+    }
+
+    const mods_rel = std.fmt.bufPrint(&path_buf, "{s}{c}mods", .{ game_name, std.fs.path.sep }) catch unreachable;
+    if (global.apps_dir.openDir(mods_rel, .{ .iterate = true })) |mods_dir| {
+        var mods = mods_dir;
+        defer mods.close();
+        var count: usize = 0;
+        var it = mods.iterate();
+        while (it.next() catch |err| blk: {
+            std.log.err("list '{s}' failed: {t}", .{ mods_rel, err });
+            break :blk null;
+        }) |entry| {
+            if (entry.kind == .file) count += 1;
+        }
+        d.mods = count;
+    } else |err| switch (err) {
+        error.FileNotFound => d.mods = 0,
+        else => std.log.err("open '{s}' failed: {t}", .{ mods_rel, err }),
+    }
+
+    global.details = d;
+    platform.invalidate();
+}
+
+fn closeDetails() void {
+    global.details = null;
+    platform.invalidate();
+}
+
+fn appPath(buf: []u8, game_name: []const u8, sub: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}{c}{s}{s}{s}", .{
+        platform.appsDirPath(),
+        std.fs.path.sep,
+        game_name,
+        if (sub.len == 0) "" else std.fs.path.sep_str,
+        sub,
+    }) catch buf;
+}
 
 pub fn init(apps_dir: std.fs.Dir) void {
     global.apps_dir = apps_dir;
@@ -183,12 +265,18 @@ fn scrollBy(pixels: i32) void {
 }
 
 pub fn onWheel(notches: f32) void {
+    if (global.details != null) return;
     scrollBy(-layout.scale(grid().rowPitch(), notches));
 }
 
 pub fn onKey(key: layout.Key) void {
+    if (global.details != null) {
+        if (key == .escape) closeDetails();
+        return;
+    }
     const g = grid();
     switch (key) {
+        .escape => {},
         .up => scrollBy(-g.rowPitch()),
         .down => scrollBy(g.rowPitch()),
         .page_up => scrollBy(-g.viewportHeight()),
@@ -205,6 +293,7 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
     const g = grid();
     switch (state) {
         .down => {
+            if (global.details != null) return;
             if (g.thumbRect()) |thumb| if (thumb.contains(position)) {
                 global.drag = .{ .start_y = position.y, .start_scroll = global.scroll };
                 platform.captureMouse(true);
@@ -214,6 +303,16 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
             if (global.drag != null) {
                 global.drag = null;
                 platform.captureMouse(false);
+                return;
+            }
+            if (global.details) |*d| {
+                const dl: layout.Details = .init(global.client, global.scale);
+                if (dl.back.contains(position)) return closeDetails();
+                const game = d.game() orelse return closeDetails();
+                if (dl.action.contains(position)) return clickButton(game);
+                var path_buf: [max_exepath]u8 = undefined;
+                if (dl.open_directory.contains(position)) return platform.openDirectory(appPath(&path_buf, game.name, ""));
+                if (dl.open_log.contains(position)) return platform.openTextFile(appPath(&path_buf, game.name, "log"));
                 return;
             }
             var unknown_buf: [max_unknown]*Running = undefined;
@@ -240,7 +339,7 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
                 if (g.buttonRect(tile).contains(position)) {
                     clickButton(game);
                 } else if (g.headerRect(tile).contains(position)) {
-                    std.log.info("details for '{s}': not implemented yet", .{game.name});
+                    openDetails(game.name);
                 }
             }
         },
@@ -315,6 +414,10 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     global.client = client;
     global.scale = scale;
     p.fill(.{ .left = 0, .top = 0, .right = client.x, .bottom = client.y }, layout.color.window);
+    if (global.details) |*d| {
+        if (d.game()) |game| return paintDetails(p, client, scale, d, game);
+        global.details = null;
+    }
     const g = grid();
     global.scroll = g.scroll;
     const games = &global.games;
@@ -393,6 +496,43 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
             p.text(text, item.inset(4), if (picked != null and picked.?.pid == r.pid) layout.color.name else layout.color.text, .left);
         }
     }
+}
+
+fn paintDetails(p: *const platform.Painter, client: layout.XY, scale: f32, d: *const Details, game: *Game) void {
+    const dl: layout.Details = .init(client, scale);
+    const hot = struct {
+        fn over(r: layout.Rect) bool {
+            return if (global.mouse) |m| r.contains(m) else false;
+        }
+    };
+
+    p.text(layout.details_text.back, dl.back, if (hot.over(dl.back)) layout.color.text else layout.color.muted, .left);
+    p.fill(dl.icon, layout.color.icon);
+    p.text(game.name, dl.title, layout.color.name, .left);
+
+    var dir_buf: [max_exepath]u8 = undefined;
+    var log_buf: [max_exepath]u8 = undefined;
+    var mods_buf: [32]u8 = undefined;
+    var pid_buf: [32]u8 = undefined;
+    const values = [layout.details_text.labels.len][]const u8{
+        if (d.exe_err) |err| @errorName(err) else d.exe(),
+        if (game.running()) |r| std.fmt.bufPrint(&pid_buf, "pid {}", .{r.pid}) catch unreachable else "not running",
+        appPath(&dir_buf, game.name, ""),
+        if (d.mods) |count| std.fmt.bufPrint(&mods_buf, "{}", .{count}) catch unreachable else "?",
+        appPath(&log_buf, game.name, "log"),
+    };
+    for (layout.details_text.labels, values, 0..) |label, value, row| {
+        p.text(label, dl.labelRect(row), layout.color.muted, .left);
+        p.text(value, dl.valueRect(row, client), layout.color.text, .left);
+    }
+
+    const style = game.button().style();
+    p.fill(dl.action, if (style.enabled and hot.over(dl.action)) style.fill_hover else style.fill);
+    p.text(style.label, dl.action, style.ink, .center);
+    p.fill(dl.open_directory, if (hot.over(dl.open_directory)) layout.color.button_hover else layout.color.button);
+    p.text(layout.details_text.open_directory, dl.open_directory, layout.color.text, .center);
+    p.fill(dl.open_log, if (hot.over(dl.open_log)) layout.color.button_hover else layout.color.button);
+    p.text(layout.details_text.open_log, dl.open_log, layout.color.text, .center);
 }
 
 const std = @import("std");

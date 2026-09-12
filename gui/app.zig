@@ -32,9 +32,31 @@ const Game = struct {
         return null;
     }
 
+    fn launch(game: *const Game) ?*Launch {
+        for (global.launches.items) |*l| {
+            if (std.ascii.eqlIgnoreCase(l.name(), game.name)) return l;
+        }
+        return null;
+    }
+
     fn button(game: *const Game) layout.Button {
+        if (game.launch()) |l| return switch (l.state) {
+            .launching => .launching,
+            .failed => .launch_failed,
+        };
         const r = game.running() orelse return .launch;
         return r.button();
+    }
+};
+
+const Launch = struct {
+    id: u32,
+    name_buf: [layout.max_game_name]u8,
+    name_len: usize,
+    state: enum { launching, failed },
+
+    fn name(l: *const Launch) []const u8 {
+        return l.name_buf[0..l.name_len];
     }
 };
 
@@ -57,6 +79,8 @@ const global = struct {
     var apps_dir: std.fs.Dir = undefined;
     var games: Games = .{};
     var running: std.ArrayListUnmanaged(Running) = .empty;
+    var launches: std.ArrayListUnmanaged(Launch) = .empty;
+    var next_launch_id: u32 = 1;
     var picked_pid: ?u32 = null;
     var dropdown_open = false;
     var mouse: ?layout.XY = null;
@@ -91,7 +115,7 @@ const Details = struct {
     }
 };
 
-const max_exepath = 4096;
+const max_exepath = platform.max_exepath;
 
 fn openDetails(game_name: []const u8) void {
     var d: Details = .{
@@ -104,15 +128,13 @@ fn openDetails(game_name: []const u8) void {
     };
     @memcpy(d.name_buf[0..game_name.len], game_name);
 
-    var path_buf: [layout.max_game_name + 1 + "exepath".len]u8 = undefined;
-    const exepath = std.fmt.bufPrint(&path_buf, "{s}{c}exepath", .{ game_name, std.fs.path.sep }) catch unreachable;
-    if (global.apps_dir.readFile(exepath, &d.exe_buf)) |contents| {
-        d.exe_len = contents.len;
+    if (readExePath(game_name, &d.exe_buf)) |exe| {
+        d.exe_len = exe.len;
     } else |err| {
-        std.log.err("read '{s}' failed: {t}", .{ exepath, err });
         d.exe_err = err;
     }
 
+    var path_buf: [layout.max_game_name + 1 + "exepath".len]u8 = undefined;
     const mods_rel = std.fmt.bufPrint(&path_buf, "{s}{c}mods", .{ game_name, std.fs.path.sep }) catch unreachable;
     if (global.apps_dir.openDir(mods_rel, .{ .iterate = true })) |mods_dir| {
         var mods = mods_dir;
@@ -133,6 +155,15 @@ fn openDetails(game_name: []const u8) void {
 
     global.details = d;
     platform.invalidate();
+}
+
+fn readExePath(game_name: []const u8, buf: *[max_exepath]u8) ![]const u8 {
+    var path_buf: [layout.max_game_name + 1 + "exepath".len]u8 = undefined;
+    const exepath = std.fmt.bufPrint(&path_buf, "{s}{c}exepath", .{ game_name, std.fs.path.sep }) catch unreachable;
+    return global.apps_dir.readFile(exepath, buf) catch |err| {
+        std.log.err("read '{s}' failed: {t}", .{ exepath, err });
+        return err;
+    };
 }
 
 fn closeDetails() void {
@@ -348,9 +379,46 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
 
 fn clickButton(game: *Game) void {
     switch (game.button()) {
-        .launch => std.log.info("launch '{s}': not implemented yet", .{game.name}),
+        .launch, .launch_failed => clickLaunch(game),
+        .launching => {},
         else => clickAttach(game.running().?),
     }
+}
+
+fn clickLaunch(game: *Game) void {
+    var exe_buf: [max_exepath]u8 = undefined;
+    const exe = readExePath(game.name, &exe_buf) catch return;
+    const l: *Launch = game.launch() orelse blk: {
+        const new = global.launches.addOne(running_allocator) catch |e| {
+            std.log.err("out of memory launching '{s}': {t}", .{ game.name, e });
+            return;
+        };
+        new.name_len = game.name.len;
+        @memcpy(new.name_buf[0..game.name.len], game.name);
+        break :blk new;
+    };
+    l.id = global.next_launch_id;
+    global.next_launch_id += 1;
+    l.state = .launching;
+    std.log.info("launch '{s}': {s}", .{ game.name, exe });
+    platform.launch(l.id, exe);
+    platform.invalidate();
+}
+
+pub fn onLaunchDone(id: u32, success: bool) void {
+    for (global.launches.items, 0..) |*l, index| {
+        if (l.id != id) continue;
+        if (success) {
+            for (global.running.items) |*r| {
+                if (std.ascii.eqlIgnoreCase(r.name, l.name())) r.status = .attached;
+            }
+            _ = global.launches.swapRemove(index);
+        } else {
+            l.state = .failed;
+        }
+        break;
+    }
+    platform.invalidate();
 }
 
 fn clickAttach(r: *Running) void {

@@ -60,6 +60,8 @@ pub const TextAlign = enum { left, center };
 
 pub const Button = enum {
     launch,
+    launching,
+    launch_failed,
     attach,
     attached,
     attaching,
@@ -77,6 +79,8 @@ pub const Button = enum {
     pub fn style(button: Button) Style {
         return switch (button) {
             .launch => .{ .label = "Launch", .fill = color.launch, .fill_hover = color.launch_hover, .ink = color.launch_ink, .enabled = true },
+            .launching => .{ .label = "Launching…", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.muted, .enabled = false },
+            .launch_failed => .{ .label = "Launch failed · retry", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
             .attach => .{ .label = "Attach", .fill = color.accent, .fill_hover = color.accent_hover, .ink = color.accent_ink, .enabled = true },
             .attached => .{ .label = "Attached", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.ok, .enabled = false },
             .attaching => .{ .label = "Attaching…", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.muted, .enabled = false },

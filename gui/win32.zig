@@ -149,6 +149,41 @@ fn attachThread(pid: u32) void {
     );
 }
 
+pub const max_exepath = mutiny.appdata.max_exepath;
+
+const wm_launch_done = win32.WM_APP + 3;
+
+const LaunchArgs = struct {
+    id: u32,
+    exe_buf: [mutiny.appdata.max_exepath]u8,
+    exe_len: usize,
+};
+
+pub fn launch(id: u32, exe: []const u8) void {
+    var args: LaunchArgs = .{ .id = id, .exe_buf = undefined, .exe_len = exe.len };
+    @memcpy(args.exe_buf[0..exe.len], exe);
+    const thread = std.Thread.spawn(.{}, launchThread, .{args}) catch |err| {
+        std.log.err("cannot start the launch thread for '{s}': {t}", .{ exe, err });
+        app.onLaunchDone(id, false);
+        return;
+    };
+    thread.detach();
+}
+
+fn launchThread(args: LaunchArgs) void {
+    var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_instance.deinit();
+    const exe = args.exe_buf[0..args.exe_len];
+    const success = if (mutiny.injector.startExe(arena_instance.allocator(), global.dll_path, exe)) true else |err| blk: {
+        if (err != error.Reported) std.log.err("launch '{s}' failed: {t}", .{ exe, err });
+        break :blk false;
+    };
+    if (0 == win32.PostMessageW(global.hwnd, wm_launch_done, args.id, @intFromBool(success))) win32.panicWin32(
+        "PostMessage(launch done)",
+        win32.GetLastError(),
+    );
+}
+
 const window_class_name = win32.L("MutinyMainWindow");
 const window_title = win32.L(app.title);
 
@@ -531,6 +566,10 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
         },
         wm_attach_done => {
             app.onAttachDone(@intCast(wparam), lparam != 0);
+            return 0;
+        },
+        wm_launch_done => {
+            app.onLaunchDone(@intCast(wparam), lparam != 0);
             return 0;
         },
         wm_game_exited => {

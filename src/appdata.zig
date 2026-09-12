@@ -52,6 +52,8 @@ fn resolve() ?PathLen {
 pub const max_path = 350;
 pub const PathLen = std.math.IntFittingRange(0, max_path);
 
+pub const max_exepath = 4096;
+
 pub fn format(
     path_buf: *[max_path]u16,
     localappdata: []const u16,

@@ -165,7 +165,7 @@ pub fn writeLogPrefix(writer: *std.Io.Writer) error{WriteFailed}!void {
     );
 }
 
-fn getImagePathName() ?[]const u16 {
+pub fn getImagePathName() ?[]const u16 {
     const str = &std.os.windows.peb().ProcessParameters.ImagePathName;
     if (str.Buffer) |buffer|
         return buffer[0..@divTrunc(str.Length, 2)];

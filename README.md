@@ -27,6 +27,7 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
 
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
+  exepath          the path to the executable
   log              what the injected DLL logs, including @Log output from your scripts
   mods\<name>      mods, run from the top on every frame
   scripts\<name>   one-off scripts, inert until you ask for them by name

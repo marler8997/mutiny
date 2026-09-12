@@ -340,6 +340,7 @@ pub fn main() void {
         null,
     ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
     global.hwnd = hwnd;
+    setWindowIcons(hwnd, win32.dpiFromHwnd(hwnd));
 
     {
         const dark: win32.BOOL = 1;
@@ -466,6 +467,20 @@ fn dpiScale(dpi: u32) f32 {
     return @as(f32, @floatFromInt(dpi)) / 96.0;
 }
 
+fn setWindowIcons(hwnd: win32.HWND, dpi: u32) void {
+    const hinstance = win32.GetModuleHandleW(null);
+    const sizes = [_]struct { which: u32, metric: i32 }{
+        .{ .which = win32.ICON_SMALL, .metric = @intFromEnum(win32.SM_CXSMICON) },
+        .{ .which = win32.ICON_BIG, .metric = @intFromEnum(win32.SM_CXICON) },
+    };
+    for (sizes) |size| {
+        const px = win32.GetSystemMetricsForDpi(size.metric, dpi);
+        const icon = win32.LoadImageW(hinstance, @ptrFromInt(1), .ICON, px, px, win32.LR_SHARED) orelse
+            win32.panicWin32("LoadImage(icon)", win32.GetLastError());
+        _ = win32.SendMessageW(hwnd, win32.WM_SETICON, size.which, @bitCast(@intFromPtr(icon)));
+    }
+}
+
 fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
     switch (msg) {
         win32.WM_CLOSE => {
@@ -562,6 +577,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
                 suggested.bottom - suggested.top,
                 .{ .NOZORDER = 1, .NOACTIVATE = 1 },
             )) win32.panicWin32("SetWindowPos", win32.GetLastError());
+            setWindowIcons(hwnd, win32.loword(wparam));
             win32.invalidateHwnd(hwnd);
             return 0;
         },

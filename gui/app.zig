@@ -97,8 +97,8 @@ pub fn onMouse(position: ?layout.XY) void {
 
 fn loadGames() void {
     const games = &global.games;
-    games.names.clearRetainingCapacity();
     _ = games.arena.reset(.retain_capacity);
+    games.names = .empty;
     games.err = null;
     const allocator = games.arena.allocator();
 

@@ -20,6 +20,33 @@ const window_class_name = win32.L("MutinyMainWindow");
 const window_title = win32.L(app.title);
 
 pub fn main() void {
+    if (@intFromPtr(std.os.windows.peb().ProcessParameters.hStdError) == 0) {
+        const localappdata = appdata.get() orelse std.debug.panic("no LOCALAPPDATA environment variable", .{});
+        var path_buf: [appdata.max_path]u16 = undefined;
+        const path = switch (appdata.format(&path_buf, localappdata, &.{ win32.L("mutiny"), win32.L("gui.log") })) {
+            .ok => |p| p,
+            .too_long => std.debug.panic("LOCALAPPDATA ({} chars) is too long", .{localappdata.len}),
+        };
+        if (appdata.makeDirs(&path_buf, appdata.parentDirLen(path))) |err| win32.panicWin32("CreateDirectory", err);
+        const handle = win32.CreateFileW(
+            path,
+            .{ .FILE_APPEND_DATA = 1 },
+            .{ .READ = 1 },
+            null,
+            .OPEN_ALWAYS,
+            .{ .FILE_ATTRIBUTE_NORMAL = 1 },
+            null,
+        );
+        if (handle == win32.INVALID_HANDLE_VALUE) win32.panicWin32("CreateFile(gui.log)", win32.GetLastError());
+        if (0 == win32.SetStdHandle(win32.STD_ERROR_HANDLE, handle)) win32.panicWin32("SetStdHandle", win32.GetLastError());
+        var time: win32.SYSTEMTIME = undefined;
+        win32.GetLocalTime(&time);
+        std.log.info("started {}-{:0>2}-{:0>2} {:0>2}:{:0>2}:{:0>2}, stderr is this file", .{
+            time.wYear, time.wMonth,  time.wDay,
+            time.wHour, time.wMinute, time.wSecond,
+        });
+    }
+
     {
         var awareness: win32.PROCESS_DPI_AWARENESS = undefined;
         const hr = win32.GetProcessDpiAwareness(null, &awareness);

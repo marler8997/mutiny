@@ -220,6 +220,7 @@ pub fn build(b: *std.Build) void {
             }),
             .win32_manifest = b.path("gui/win32dpiaware.manifest"),
         });
+        exe.subsystem = .Windows;
         const install = b.addInstallArtifact(exe, .{
             .dest_dir = .{ .override = .{ .custom = "appdata" } },
         });

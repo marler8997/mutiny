@@ -12,10 +12,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zin_dep = b.dependency("zin", .{});
-    const zin_mod = zin_dep.module("zin");
-    const win32_dep = zin_dep.builder.dependency("win32", .{});
-    // const win32_dep = b.dependency("win32", .{});
+    const win32_dep = b.dependency("win32", .{});
     const win32_mod = win32_dep.module("win32");
 
     const zydis: SanitizeVariants(*std.Build.Module) = .{
@@ -210,12 +207,14 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "Mutiny",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("gui/gui.zig"),
+                .root_source_file = switch (target.result.os.tag) {
+                    .windows => b.path("gui/win32.zig"),
+                    else => @panic("the gui has no platform layer for this os yet"),
+                },
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "mutiny", .module = mutiny_mod.sanitized },
-                    .{ .name = "zin", .module = zin_mod },
                     .{ .name = "win32", .module = win32_mod },
                 },
             }),

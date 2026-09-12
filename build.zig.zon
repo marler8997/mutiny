@@ -8,10 +8,6 @@
             .url = "git+https://github.com/marlersoft/zigwin32#5587b16fa040573846a6bf531301f6206d31a6bf",
             .hash = "zigwin32-25.0.28-preview-AAAAAICM5AMResOGQnQ85mfe60TTOQeMtt7GRATUOKoP",
         },
-        .zin = .{
-            .url = "git+https://github.com/marler8997/zin#d3e230690f09debdb99dffe4586ad19f9dfb4716",
-            .hash = "zin-0.0.0-W7QDx6kKAwCVg-wWMO4FdpvZMH66NJpc9wFDdxp5c8E2",
-        },
         // Zydis (x86-64 decoder) for the il2cpp detour
         .zydis = .{
             .url = "git+https://github.com/zyantific/zydis#a95bb71013436547f689fc0b380f48edf663066e",

@@ -1,6 +1,6 @@
 const usage =
     \\Usage:
-    \\  mutiny scan                  every process with a mono/il2cpp runtime, and whether Mutiny is in it.
+    \\  mutiny scan                  every running Unity game (by its window), and whether Mutiny is attached.
     \\  mutiny start EXE [ARGS...]   launch a game with Mutiny.dll injected before it runs.
     \\
     \\  mutiny PID attach            get Mutiny running inside an already-running game.
@@ -12,6 +12,13 @@ const usage =
 ;
 
 pub fn main() !u8 {
+    return run() catch |err| switch (err) {
+        error.Reported => 0xff,
+        else => |e| e,
+    };
+}
+
+fn run() !u8 {
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     // no need to deinit
     const arena = arena_instance.allocator();
@@ -57,10 +64,12 @@ fn cmdAttach(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32)
             maybe_dll = args.next() orelse errExit("--dll requires an argument", .{});
         } else errExit("unknown cli option '{s}'", .{arg});
     }
-    const dll = maybe_dll orelse try findDll(arena);
+    const dll = maybe_dll orelse try injector.findDll(arena, dll_relative_dir);
     try injector.attach(arena, dll, pid);
     return 0;
 }
+
+const dll_relative_dir = "..\\dll";
 
 fn cmdStart(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
     var maybe_dll: ?[]const u8 = null;
@@ -74,42 +83,11 @@ fn cmdStart(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
             } else errExit("unknown cli option '{s}'", .{arg});
         }
     };
-    const dll = maybe_dll orelse try findDll(arena);
+    const dll = maybe_dll orelse try injector.findDll(arena, dll_relative_dir);
     if (args.next() != null) errExit("TODO: support extra start cmdline args to pass on to exe", .{});
     try injector.startExe(arena, dll, exe);
     return 0;
 }
-
-fn findDll(arena: std.mem.Allocator) ![]const u8 {
-    const exe_dir = std.fs.selfExeDirPathAlloc(arena) catch |err| errExit(
-        "unable to locate our own directory to find " ++ dll_name ++ " ({s})",
-        .{@errorName(err)},
-    );
-    defer arena.free(exe_dir);
-    const path = std.fs.path.resolve(
-        arena,
-        &.{ exe_dir, "..", "dll", dll_name },
-    ) catch |e| oom(e);
-    var path_owned = true;
-    defer if (path_owned) arena.free(path);
-    if (!try exists(path)) errExit(
-        "no " ++ dll_name ++ " at '{s}' (pass --dll to point at it)",
-        .{path},
-    );
-    std.log.info("found dll at '{s}'", .{path});
-    path_owned = false;
-    return path;
-}
-
-const dll_name = "Mutiny.dll";
-
-fn exists(path: []const u8) !bool {
-    return if (std.fs.cwd().access(path, .{})) true else |err| switch (err) {
-        error.FileNotFound => false,
-        else => |e| e,
-    };
-}
-
 
 fn cmdRunScript(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32) !u8 {
     const script = args.next() orelse errExit("run-script requires a script name", .{});
@@ -293,4 +271,4 @@ const mutiny = @import("mutiny");
 const mutinyipc = mutiny.mutinyipc;
 
 const cliscan = @import("cliscan.zig");
-const injector = @import("injector.zig");
+const injector = mutiny.injector;

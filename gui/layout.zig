@@ -38,6 +38,49 @@ pub const color = struct {
     pub const text: Rgb = .{ .r = 232, .g = 230, .b = 225 };
     pub const muted: Rgb = .{ .r = 154, .g = 152, .b = 147 };
     pub const name: Rgb = .{ .r = 140, .g = 204, .b = 255 };
+    pub const button: Rgb = .{ .r = 76, .g = 76, .b = 76 };
+    pub const button_hover: Rgb = .{ .r = 88, .g = 88, .b = 88 };
+    pub const button_disabled: Rgb = .{ .r = 63, .g = 63, .b = 63 };
+    pub const accent: Rgb = .{ .r = 140, .g = 204, .b = 255 };
+    pub const accent_hover: Rgb = .{ .r = 166, .g = 216, .b = 255 };
+    pub const accent_ink: Rgb = .{ .r = 18, .g = 40, .b = 58 };
+    pub const launch: Rgb = .{ .r = 232, .g = 230, .b = 225 };
+    pub const launch_hover: Rgb = .{ .r = 255, .g = 255, .b = 255 };
+    pub const launch_ink: Rgb = .{ .r = 31, .g = 31, .b = 31 };
+    pub const failed: Rgb = .{ .r = 74, .g = 53, .b = 53 };
+    pub const failed_hover: Rgb = .{ .r = 90, .g = 64, .b = 64 };
+    pub const ok: Rgb = .{ .r = 127, .g = 212, .b = 138 };
+    pub const bad: Rgb = .{ .r = 255, .g = 102, .b = 102 };
+};
+
+pub const TextAlign = enum { left, center };
+
+pub const Button = enum {
+    launch,
+    attach,
+    attached,
+    attaching,
+    not_responding,
+    attach_failed,
+
+    pub const Style = struct {
+        label: []const u8,
+        fill: Rgb,
+        fill_hover: Rgb,
+        ink: Rgb,
+        enabled: bool,
+    };
+
+    pub fn style(button: Button) Style {
+        return switch (button) {
+            .launch => .{ .label = "Launch", .fill = color.launch, .fill_hover = color.launch_hover, .ink = color.launch_ink, .enabled = true },
+            .attach => .{ .label = "Attach", .fill = color.accent, .fill_hover = color.accent_hover, .ink = color.accent_ink, .enabled = true },
+            .attached => .{ .label = "Attached", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.ok, .enabled = false },
+            .attaching => .{ .label = "Attaching…", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.muted, .enabled = false },
+            .not_responding => .{ .label = "Not responding", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.bad, .enabled = false },
+            .attach_failed => .{ .label = "Attach failed · retry", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
+        };
+    }
 };
 
 pub const font_points = 10;
@@ -47,12 +90,13 @@ pub const max_text_len = 512;
 const points = struct {
     const margin = 12;
     const tile_width = 170;
-    const tile_height = 100;
+    const tile_height = 110;
     const gap = 10;
     const tile_pad = 10;
     const icon_size = 32;
     const icon_text_gap = 8;
     const line_height = 18;
+    const button_height = 24;
     const scrollbar_width = 8;
     const scrollbar_gap = 6;
     const thumb_min_height = 24;
@@ -78,6 +122,7 @@ pub const Grid = struct {
     icon: XY,
     icon_text_gap: i32,
     line_height: i32,
+    button_height: i32,
     columns: usize,
     count: usize,
     content_height: i32,
@@ -110,6 +155,7 @@ pub const Grid = struct {
             .icon = .{ .x = scale(points.icon_size, s), .y = scale(points.icon_size, s) },
             .icon_text_gap = scale(points.icon_text_gap, s),
             .line_height = scale(points.line_height, s),
+            .button_height = scale(points.button_height, s),
             .columns = columns,
             .count = count,
             .content_height = content_height,
@@ -195,6 +241,25 @@ pub const Grid = struct {
             .top = tile.top + grid.pad.y,
             .right = tile.right - grid.pad.x,
             .bottom = tile.top + grid.pad.y + grid.icon.y,
+        };
+    }
+
+    pub fn pidRect(grid: Grid, tile: Rect) Rect {
+        const top = tile.top + grid.pad.y + grid.icon.y + @divTrunc(grid.gap.y, 2);
+        return .{
+            .left = tile.left + grid.pad.x,
+            .top = top,
+            .right = tile.right - grid.pad.x,
+            .bottom = top + grid.line_height,
+        };
+    }
+
+    pub fn buttonRect(grid: Grid, tile: Rect) Rect {
+        return .{
+            .left = tile.left + grid.pad.x,
+            .top = tile.bottom - grid.pad.y - grid.button_height,
+            .right = tile.right - grid.pad.x,
+            .bottom = tile.bottom - grid.pad.y,
         };
     }
 

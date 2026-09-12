@@ -398,7 +398,6 @@ pub fn GetClassName(hwnd: win32.HWND, buf: []u16) GetClassNameError!usize {
     return @intCast(len);
 }
 
-const unity_window_class = std.unicode.utf8ToUtf16LeStringLiteral("UnityWndClass");
 fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi) win32.BOOL {
     const ctx: *FindContext = @ptrFromInt(@as(usize, @bitCast(lparam)));
     const tid, const pid = GetWindowThreadProcessId(hwnd) catch |err| switch (err) {
@@ -416,7 +415,7 @@ fn findUnityWindowProc(hwnd: win32.HWND, lparam: win32.LPARAM) callconv(.winapi)
     if (owned) return win32.TRUE; // ignore child windows
     // TODO: should we filter on visible windows? probably not?
     // const visible = win32.IsWindowVisible(hwnd) != 0;
-    if (!std.mem.eql(u16, class_name, unity_window_class)) return win32.TRUE;
+    if (!std.mem.eql(u16, class_name, mutinyipc.unity_window_class)) return win32.TRUE;
     ctx.unity_window_threads.add(tid);
     ctx.candidate_count += 1;
     if (ctx.first_candidate == null) {

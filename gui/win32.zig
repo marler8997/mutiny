@@ -13,21 +13,114 @@ const global = struct {
     var dwrite_factory: *win32.IDWriteFactory = undefined;
     var d2d_store: D2d = undefined;
     var d2d: ?*D2d = null;
-    var text_format: ?struct { dpi: u32, format: *win32.IDWriteTextFormat } = null;
+    var text_formats: ?TextFormats = null;
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var dll_path: []const u8 = undefined;
 };
+
+const TextFormats = struct {
+    dpi: u32,
+    left: *win32.IDWriteTextFormat,
+    center: *win32.IDWriteTextFormat,
+};
+
+fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT) *win32.IDWriteTextFormat {
+    var format: *win32.IDWriteTextFormat = undefined;
+    {
+        const size_px: f32 = @as(f32, layout.font_points) * @as(f32, @floatFromInt(dpi)) / 72.0;
+        const hr = global.dwrite_factory.CreateTextFormat(
+            win32.L("Segoe UI"),
+            null,
+            win32.DWRITE_FONT_WEIGHT_NORMAL,
+            win32.DWRITE_FONT_STYLE_NORMAL,
+            win32.DWRITE_FONT_STRETCH_NORMAL,
+            size_px,
+            win32.L(""),
+            &format,
+        );
+        if (hr < 0) win32.panicHresult("CreateTextFormat", hr);
+    }
+    {
+        const hr = format.SetTextAlignment(alignment);
+        if (hr < 0) win32.panicHresult("SetTextAlignment", hr);
+    }
+    {
+        const hr = format.SetParagraphAlignment(.CENTER);
+        if (hr < 0) win32.panicHresult("SetParagraphAlignment", hr);
+    }
+    {
+        const hr = format.SetWordWrapping(.NO_WRAP);
+        if (hr < 0) win32.panicHresult("SetWordWrapping", hr);
+    }
+    {
+        var ellipsis: *win32.IDWriteInlineObject = undefined;
+        const create_hr = global.dwrite_factory.CreateEllipsisTrimmingSign(format, &ellipsis);
+        if (create_hr < 0) win32.panicHresult("CreateEllipsisTrimmingSign", create_hr);
+        defer _ = ellipsis.IUnknown.Release();
+        const trimming: win32.DWRITE_TRIMMING = .{ .granularity = .CHARACTER, .delimiter = 0, .delimiterCount = 0 };
+        const hr = format.SetTrimming(&trimming, ellipsis);
+        if (hr < 0) win32.panicHresult("SetTrimming", hr);
+    }
+    return format;
+}
+
+const wm_attach_done = win32.WM_APP + 1;
+
+pub fn runningGames(allocator: std.mem.Allocator) ![]app.Running {
+    const games = try mutiny.scan.unityGames(allocator);
+    defer allocator.free(games);
+    var running: std.ArrayListUnmanaged(app.Running) = .empty;
+    for (games) |game| {
+        var path_buf: [mutiny.scan.max_exe_path:0]u16 = undefined;
+        const path = mutiny.scan.exePath(game.pid, &path_buf) orelse continue;
+        const name_w = mutiny.getname.fromExe(path) catch |err| {
+            std.log.err("pid {} has an unusable exe path '{f}': {t}", .{ game.pid, std.unicode.fmtUtf16Le(path), err });
+            continue;
+        };
+        const name = try std.unicode.wtf16LeToWtf8Alloc(allocator, name_w);
+        try running.append(allocator, .{ .pid = game.pid, .name = name, .status = switch (mutiny.scan.status(game.pid)) {
+            .not_attached => .not_attached,
+            .attached => .attached,
+            .unresponsive => .unresponsive,
+        } });
+    }
+    return running.toOwnedSlice(allocator);
+}
+
+pub fn attach(pid: u32) void {
+    const thread = std.Thread.spawn(.{}, attachThread, .{pid}) catch |err| {
+        std.log.err("cannot start the attach thread for pid {}: {t}", .{ pid, err });
+        app.onAttachDone(pid, false);
+        return;
+    };
+    thread.detach();
+}
+
+fn attachThread(pid: u32) void {
+    var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_instance.deinit();
+    const success = if (mutiny.injector.attach(arena_instance.allocator(), global.dll_path, pid)) true else |err| blk: {
+        if (err != error.Reported) std.log.err("attach to pid {} failed: {t}", .{ pid, err });
+        break :blk false;
+    };
+    if (0 == win32.PostMessageW(global.hwnd, wm_attach_done, pid, @intFromBool(success))) win32.panicWin32(
+        "PostMessage(attach done)",
+        win32.GetLastError(),
+    );
+}
 
 const window_class_name = win32.L("MutinyMainWindow");
 const window_title = win32.L(app.title);
 
 pub fn main() void {
     if (@intFromPtr(std.os.windows.peb().ProcessParameters.hStdError) == 0) {
-        const localappdata = appdata.get() orelse std.debug.panic("no LOCALAPPDATA environment variable", .{});
-        var path_buf: [appdata.max_path]u16 = undefined;
-        const path = switch (appdata.format(&path_buf, localappdata, &.{ win32.L("mutiny"), win32.L("gui.log") })) {
+        const localappdata = mutiny.appdata.get() orelse std.debug.panic("no LOCALAPPDATA environment variable", .{});
+        var path_buf: [mutiny.appdata.max_path]u16 = undefined;
+        const path = switch (mutiny.appdata.format(&path_buf, localappdata, &.{ win32.L("mutiny"), win32.L("gui.log") })) {
             .ok => |p| p,
             .too_long => std.debug.panic("LOCALAPPDATA ({} chars) is too long", .{localappdata.len}),
         };
-        if (appdata.makeDirs(&path_buf, appdata.parentDirLen(path))) |err| win32.panicWin32("CreateDirectory", err);
+        if (mutiny.appdata.makeDirs(&path_buf, mutiny.appdata.parentDirLen(path))) |err| win32.panicWin32("CreateDirectory", err);
         const handle = win32.CreateFileW(
             path,
             .{ .FILE_APPEND_DATA = 1 },
@@ -66,10 +159,10 @@ pub fn main() void {
         if (hr < 0) win32.panicHresult("DWriteCreateFactory", hr);
     }
 
-    var apps_path_buf: [appdata.max_path]u16 = undefined;
+    var apps_path_buf: [mutiny.appdata.max_path]u16 = undefined;
     const apps_path = blk: {
-        const localappdata = appdata.get() orelse std.debug.panic("no LOCALAPPDATA environment variable", .{});
-        const path = switch (appdata.format(
+        const localappdata = mutiny.appdata.get() orelse std.debug.panic("no LOCALAPPDATA environment variable", .{});
+        const path = switch (mutiny.appdata.format(
             &apps_path_buf,
             localappdata,
             &.{ win32.L("mutiny"), win32.L("app") },
@@ -77,7 +170,7 @@ pub fn main() void {
             .ok => |p| p,
             .too_long => std.debug.panic("LOCALAPPDATA ({} chars) is too long", .{localappdata.len}),
         };
-        if (appdata.makeDirs(&apps_path_buf, path.len)) |err| win32.panicWin32("CreateDirectory", err);
+        if (mutiny.appdata.makeDirs(&apps_path_buf, path.len)) |err| win32.panicWin32("CreateDirectory", err);
         break :blk path;
     };
 
@@ -105,6 +198,10 @@ pub fn main() void {
         );
         app.init(dir);
     }
+    global.dll_path = mutiny.injector.findDll(global.arena.allocator(), "dll") catch |err| switch (err) {
+        error.Reported => std.debug.panic("Mutiny.dll is not beside this exe, see the log", .{}),
+        else => |e| std.debug.panic("finding Mutiny.dll failed: {t}", .{e}),
+    };
 
     const hinstance = win32.GetModuleHandleW(null);
     {
@@ -262,46 +359,19 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
                 break :blk &global.d2d_store;
             };
 
-            const text_format = blk: {
-                if (global.text_format) |cached| {
-                    if (cached.dpi == dpi) break :blk cached.format;
-                    _ = cached.format.IUnknown.Release();
-                    global.text_format = null;
+            const text_formats: *const TextFormats = blk: {
+                if (global.text_formats) |*cached| {
+                    if (cached.dpi == dpi) break :blk cached;
+                    _ = cached.left.IUnknown.Release();
+                    _ = cached.center.IUnknown.Release();
+                    global.text_formats = null;
                 }
-                var format: *win32.IDWriteTextFormat = undefined;
-                {
-                    const size_px: f32 = @as(f32, layout.font_points) * @as(f32, @floatFromInt(dpi)) / 72.0;
-                    const hr = global.dwrite_factory.CreateTextFormat(
-                        win32.L("Segoe UI"),
-                        null,
-                        win32.DWRITE_FONT_WEIGHT_NORMAL,
-                        win32.DWRITE_FONT_STYLE_NORMAL,
-                        win32.DWRITE_FONT_STRETCH_NORMAL,
-                        size_px,
-                        win32.L(""),
-                        &format,
-                    );
-                    if (hr < 0) win32.panicHresult("CreateTextFormat", hr);
-                }
-                {
-                    const hr = format.SetParagraphAlignment(.CENTER);
-                    if (hr < 0) win32.panicHresult("SetParagraphAlignment", hr);
-                }
-                {
-                    const hr = format.SetWordWrapping(.NO_WRAP);
-                    if (hr < 0) win32.panicHresult("SetWordWrapping", hr);
-                }
-                {
-                    var ellipsis: *win32.IDWriteInlineObject = undefined;
-                    const create_hr = global.dwrite_factory.CreateEllipsisTrimmingSign(format, &ellipsis);
-                    if (create_hr < 0) win32.panicHresult("CreateEllipsisTrimmingSign", create_hr);
-                    defer _ = ellipsis.IUnknown.Release();
-                    const trimming: win32.DWRITE_TRIMMING = .{ .granularity = .CHARACTER, .delimiter = 0, .delimiterCount = 0 };
-                    const hr = format.SetTrimming(&trimming, ellipsis);
-                    if (hr < 0) win32.panicHresult("SetTrimming", hr);
-                }
-                global.text_format = .{ .dpi = dpi, .format = format };
-                break :blk format;
+                global.text_formats = .{
+                    .dpi = dpi,
+                    .left = createTextFormat(dpi, .LEADING),
+                    .center = createTextFormat(dpi, .CENTER),
+                };
+                break :blk &global.text_formats.?;
             };
 
             {
@@ -312,7 +382,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
 
             const target = &d2d.target.ID2D1RenderTarget;
             target.BeginDraw();
-            const painter: Painter = .{ .target = target, .brush = d2d.brush, .text_format = text_format };
+            const painter: Painter = .{ .target = target, .brush = d2d.brush, .text_formats = text_formats };
             app.onPaint(&painter, .{ .x = size.cx, .y = size.cy }, dpiScale(dpi));
             const hr = target.EndDraw(null, null);
             if (hr == win32.D2DERR_RECREATE_TARGET) {
@@ -372,6 +442,10 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             app.onWheel(@as(f32, @floatFromInt(delta)) / @as(f32, @floatFromInt(win32.WHEEL_DELTA)));
             return 0;
         },
+        wm_attach_done => {
+            app.onAttachDone(@intCast(wparam), lparam != 0);
+            return 0;
+        },
         win32.WM_KEYDOWN => {
             const key: ?layout.Key = switch (@as(win32.VIRTUAL_KEY, @enumFromInt(wparam))) {
                 win32.VK_UP => .up,
@@ -397,7 +471,7 @@ const D2d = struct {
 pub const Painter = struct {
     target: *const win32.ID2D1RenderTarget,
     brush: *win32.ID2D1SolidColorBrush,
-    text_format: *win32.IDWriteTextFormat,
+    text_formats: *const TextFormats,
 
     fn setColor(p: *const Painter, rgb: layout.Rgb) *win32.ID2D1Brush {
         const color: win32.D2D_COLOR_F = .{
@@ -414,14 +488,18 @@ pub const Painter = struct {
         p.target.FillRectangle(&rectF(r), p.setColor(rgb));
     }
 
-    pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb) void {
+    pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb, alignment: layout.TextAlign) void {
         var wide: [layout.max_text_len + 1]u16 = undefined;
         const len = std.unicode.wtf8ToWtf16Le(wide[0..layout.max_text_len], utf8) catch {
             std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
             return;
         };
         wide[len] = 0;
-        p.target.DrawText(wide[0..len :0], @intCast(len), p.text_format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
+        const format = switch (alignment) {
+            .left => p.text_formats.left,
+            .center => p.text_formats.center,
+        };
+        p.target.DrawText(wide[0..len :0], @intCast(len), format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
     }
 
     pub fn pushClip(p: *const Painter, r: layout.Rect) void {
@@ -445,7 +523,6 @@ fn rectF(r: layout.Rect) win32.D2D_RECT_F {
 const std = @import("std");
 const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
-const appdata = mutiny.appdata;
 
 const app = @import("app.zig");
 const layout = @import("layout.zig");

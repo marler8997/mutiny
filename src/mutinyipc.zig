@@ -1,4 +1,9 @@
 pub const window_class_name = "MutinyWindow";
+
+/// The class of a Unity game's main window, on every Unity version we have seen. It is how
+/// the attach thread finds the main thread and how the CLI and GUI find running games.
+pub const unity_window_class_utf8 = "UnityWndClass";
+pub const unity_window_class = win32.L(unity_window_class_utf8);
 pub const wm_copydata_run_script: usize = 0x4d55544e;
 pub const wm_copydata_result: win32.LRESULT = 0x3b7e15a2;
 

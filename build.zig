@@ -251,17 +251,6 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(t);
         unittest_step.dependOn(&run.step);
     }
-    {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("cli/steam.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        const run = b.addRunArtifact(t);
-        unittest_step.dependOn(&run.step);
-    }
 
     const test_step = b.step("test", "");
     test_step.dependOn(unittest_step);

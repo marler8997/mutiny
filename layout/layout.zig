@@ -56,6 +56,8 @@ pub const color = struct {
     pub const bad: Rgb = .{ .r = 255, .g = 102, .b = 102 };
 };
 
+pub const window_alpha: f32 = 0.95;
+
 pub const TextAlign = enum { left, center };
 
 pub const Button = enum {

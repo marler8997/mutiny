@@ -519,7 +519,7 @@ fn gameLessThan(_: void, a: Game, b: Game) bool {
 pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     global.client = client;
     global.scale = scale;
-    p.fill(.{ .left = 0, .top = 0, .right = client.x, .bottom = client.y }, layout.color.window);
+    p.clear(layout.color.window, layout.window_alpha);
     if (global.details) |*d| {
         if (d.game()) |game| return paintDetails(p, client, scale, d, game);
         global.details = null;

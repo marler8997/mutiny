@@ -9,11 +9,9 @@ fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
 const global = struct {
     var hwnd: win32.HWND = undefined;
     var tracking_mouse = false;
-    var d2d_factory: *win32.ID2D1Factory = undefined;
     var dwrite_factory: *win32.IDWriteFactory = undefined;
     var wic_factory: *win32.IWICImagingFactory = undefined;
-    var d2d_store: D2d = undefined;
-    var d2d: ?*D2d = null;
+    var d2d: ?D2d = null;
     var target_generation: u32 = 0;
     var text_formats: ?TextFormats = null;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -228,10 +226,6 @@ pub fn main() void {
     }
 
     {
-        const hr = win32.D2D1CreateFactory(.SINGLE_THREADED, win32.IID_ID2D1Factory, null, @ptrCast(&global.d2d_factory));
-        if (hr < 0) win32.panicHresult("D2D1CreateFactory", hr);
-    }
-    {
         const hr = win32.DWriteCreateFactory(.SHARED, win32.IID_IDWriteFactory, @ptrCast(&global.dwrite_factory));
         if (hr < 0) win32.panicHresult("DWriteCreateFactory", hr);
     }
@@ -324,7 +318,7 @@ pub fn main() void {
     }
 
     const style: win32.WINDOW_STYLE = win32.WS_OVERLAPPEDWINDOW;
-    const style_ex: win32.WINDOW_EX_STYLE = .{};
+    const style_ex: win32.WINDOW_EX_STYLE = .{ .NOREDIRECTIONBITMAP = 1 };
     const hwnd = win32.CreateWindowExW(
         style_ex,
         window_class_name,
@@ -394,6 +388,7 @@ pub fn main() void {
         for (games) |game| reportGame(game.pid);
     }
 
+    paint(hwnd);
     _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
 
     var handles = [_]?win32.HANDLE{watch};
@@ -489,77 +484,7 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
         },
         win32.WM_ERASEBKGND => return 1,
         win32.WM_PAINT => {
-            _, const ps = win32.beginPaint(hwnd);
-            defer win32.endPaint(hwnd, &ps);
-
-            const size = win32.getClientSize(hwnd);
-            const dpi = win32.dpiFromHwnd(hwnd);
-
-            const d2d: *D2d = global.d2d orelse blk: {
-                var target: *win32.ID2D1HwndRenderTarget = undefined;
-                const target_props: win32.D2D1_RENDER_TARGET_PROPERTIES = .{
-                    .type = .DEFAULT,
-                    .pixelFormat = .{ .format = .B8G8R8A8_UNORM, .alphaMode = .PREMULTIPLIED },
-                    .dpiX = 0,
-                    .dpiY = 0,
-                    .usage = .{},
-                    .minLevel = .DEFAULT,
-                };
-                const hwnd_props: win32.D2D1_HWND_RENDER_TARGET_PROPERTIES = .{
-                    .hwnd = hwnd,
-                    .pixelSize = .{ .width = @intCast(size.cx), .height = @intCast(size.cy) },
-                    .presentOptions = .{},
-                };
-                {
-                    const hr = global.d2d_factory.CreateHwndRenderTarget(&target_props, &hwnd_props, &target);
-                    if (hr < 0) win32.panicHresult("CreateHwndRenderTarget", hr);
-                }
-                target.ID2D1RenderTarget.SetDpi(96, 96);
-                var brush: *win32.ID2D1SolidColorBrush = undefined;
-                {
-                    const black: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
-                    const hr = target.ID2D1RenderTarget.CreateSolidColorBrush(&black, null, &brush);
-                    if (hr < 0) win32.panicHresult("CreateSolidColorBrush", hr);
-                }
-                global.d2d_store = .{ .target = target, .brush = brush };
-                global.d2d = &global.d2d_store;
-                global.target_generation += 1;
-                break :blk &global.d2d_store;
-            };
-
-            const text_formats: *const TextFormats = blk: {
-                if (global.text_formats) |*cached| {
-                    if (cached.dpi == dpi) break :blk cached;
-                    _ = cached.left.IUnknown.Release();
-                    _ = cached.center.IUnknown.Release();
-                    global.text_formats = null;
-                }
-                global.text_formats = .{
-                    .dpi = dpi,
-                    .left = createTextFormat(dpi, .LEADING),
-                    .center = createTextFormat(dpi, .CENTER),
-                };
-                break :blk &global.text_formats.?;
-            };
-
-            {
-                const pixel_size: win32.D2D_SIZE_U = .{ .width = @intCast(size.cx), .height = @intCast(size.cy) };
-                const hr = d2d.target.Resize(&pixel_size);
-                if (hr < 0) win32.panicHresult("Resize", hr);
-            }
-
-            const target = &d2d.target.ID2D1RenderTarget;
-            target.BeginDraw();
-            const painter: Painter = .{ .target = target, .brush = d2d.brush, .text_formats = text_formats };
-            app.onPaint(&painter, .{ .x = size.cx, .y = size.cy }, dpiScale(dpi));
-            const hr = target.EndDraw(null, null);
-            if (hr == win32.D2DERR_RECREATE_TARGET) {
-                std.log.info("D2DERR_RECREATE_TARGET", .{});
-                _ = d2d.brush.IUnknown.Release();
-                _ = d2d.target.IUnknown.Release();
-                global.d2d = null;
-                win32.invalidateHwnd(hwnd);
-            } else if (hr < 0) win32.panicHresult("EndDraw", hr);
+            paint(hwnd);
             return 0;
         },
         win32.WM_SIZE => {
@@ -664,9 +589,204 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
     }
 }
 
+fn paint(hwnd: win32.HWND) void {
+    _, const ps = win32.beginPaint(hwnd);
+    defer win32.endPaint(hwnd, &ps);
+
+    const size = win32.getClientSize(hwnd);
+    const dpi = win32.dpiFromHwnd(hwnd);
+
+    const d2d: *D2d = if (global.d2d) |*d| d else blk: {
+        global.d2d = D2d.init(hwnd);
+        global.target_generation += 1;
+        break :blk &global.d2d.?;
+    };
+
+    const text_formats: *const TextFormats = blk: {
+        if (global.text_formats) |*cached| {
+            if (cached.dpi == dpi) break :blk cached;
+            _ = cached.left.IUnknown.Release();
+            _ = cached.center.IUnknown.Release();
+            global.text_formats = null;
+        }
+        global.text_formats = .{
+            .dpi = dpi,
+            .left = createTextFormat(dpi, .LEADING),
+            .center = createTextFormat(dpi, .CENTER),
+        };
+        break :blk &global.text_formats.?;
+    };
+
+    const dc = d2d.beginFrame(size);
+    const target = &dc.ID2D1RenderTarget;
+    const painter: Painter = .{ .target = target, .brush = d2d.brush, .text_formats = text_formats };
+    app.onPaint(&painter, .{ .x = size.cx, .y = size.cy }, dpiScale(dpi));
+    d2d.endFrame() catch |err| switch (err) {
+        error.RecreateTarget => {
+            std.log.info("the render device was lost, recreating it", .{});
+            d2d.deinit();
+            global.d2d = null;
+            win32.invalidateHwnd(hwnd);
+        },
+    };
+}
+
 const D2d = struct {
-    target: *win32.ID2D1HwndRenderTarget,
+    d3d_device: *win32.ID3D11Device,
+    d2d_device: *win32.ID2D1Device,
+    res_dc: *win32.ID2D1DeviceContext,
+    dcomp: *win32.IDCompositionDesktopDevice,
+    target: *win32.IDCompositionTarget,
+    visual: *win32.IDCompositionVisual2,
     brush: *win32.ID2D1SolidColorBrush,
+    surface: ?*win32.IDCompositionSurface = null,
+    surface_size: win32.D2D_SIZE_U = .{ .width = 0, .height = 0 },
+    frame_dc: ?*win32.ID2D1DeviceContext = null,
+
+    fn init(hwnd: win32.HWND) D2d {
+        var d3d_device: *win32.ID3D11Device = undefined;
+        {
+            const hr = win32.D3D11CreateDevice(
+                null,
+                win32.D3D_DRIVER_TYPE_HARDWARE,
+                null,
+                win32.D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                null,
+                0,
+                win32.D3D11_SDK_VERSION,
+                &d3d_device,
+                null,
+                null,
+            );
+            if (hr < 0) win32.panicHresult("D3D11CreateDevice", hr);
+        }
+        var dxgi_device: *win32.IDXGIDevice = undefined;
+        {
+            const hr = d3d_device.IUnknown.QueryInterface(win32.IID_IDXGIDevice, @ptrCast(&dxgi_device));
+            if (hr < 0) win32.panicHresult("QueryInterface(IDXGIDevice)", hr);
+        }
+        defer _ = dxgi_device.IUnknown.Release();
+        var d2d_device: *win32.ID2D1Device = undefined;
+        {
+            const hr = win32.D2D1CreateDevice(dxgi_device, null, @ptrCast(&d2d_device));
+            if (hr < 0) win32.panicHresult("D2D1CreateDevice", hr);
+        }
+        var res_dc: *win32.ID2D1DeviceContext = undefined;
+        {
+            const hr = d2d_device.CreateDeviceContext(win32.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &res_dc);
+            if (hr < 0) win32.panicHresult("CreateDeviceContext", hr);
+        }
+        var brush: *win32.ID2D1SolidColorBrush = undefined;
+        {
+            const black: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
+            const hr = res_dc.ID2D1RenderTarget.CreateSolidColorBrush(&black, null, &brush);
+            if (hr < 0) win32.panicHresult("CreateSolidColorBrush", hr);
+        }
+        var dcomp: *win32.IDCompositionDesktopDevice = undefined;
+        {
+            const hr = win32.DCompositionCreateDevice2(&d2d_device.IUnknown, win32.IID_IDCompositionDesktopDevice, @ptrCast(&dcomp));
+            if (hr < 0) win32.panicHresult("DCompositionCreateDevice2", hr);
+        }
+        var target: *win32.IDCompositionTarget = undefined;
+        {
+            const hr = dcomp.CreateTargetForHwnd(hwnd, 1, @ptrCast(&target));
+            if (hr < 0) win32.panicHresult("CreateTargetForHwnd", hr);
+        }
+        var visual: *win32.IDCompositionVisual2 = undefined;
+        {
+            const hr = dcomp.IDCompositionDevice2.CreateVisual(@ptrCast(&visual));
+            if (hr < 0) win32.panicHresult("CreateVisual", hr);
+        }
+        {
+            const hr = target.SetRoot(&visual.IDCompositionVisual);
+            if (hr < 0) win32.panicHresult("SetRoot", hr);
+        }
+        return .{
+            .d3d_device = d3d_device,
+            .d2d_device = d2d_device,
+            .res_dc = res_dc,
+            .dcomp = dcomp,
+            .target = target,
+            .visual = visual,
+            .brush = brush,
+        };
+    }
+
+    fn deinit(d2d: *D2d) void {
+        if (d2d.surface) |s| _ = s.IUnknown.Release();
+        _ = d2d.visual.IUnknown.Release();
+        _ = d2d.target.IUnknown.Release();
+        _ = d2d.dcomp.IUnknown.Release();
+        _ = d2d.brush.IUnknown.Release();
+        _ = d2d.res_dc.IUnknown.Release();
+        _ = d2d.d2d_device.IUnknown.Release();
+        _ = d2d.d3d_device.IUnknown.Release();
+        d2d.* = undefined;
+    }
+
+    fn ensureSurface(d2d: *D2d, size: win32.D2D_SIZE_U) void {
+        if (d2d.surface != null and d2d.surface_size.width == size.width and d2d.surface_size.height == size.height) return;
+        if (d2d.surface) |s| {
+            _ = s.IUnknown.Release();
+            d2d.surface = null;
+        }
+        var surface: *win32.IDCompositionSurface = undefined;
+        {
+            const hr = d2d.dcomp.IDCompositionDevice2.CreateSurface(
+                size.width,
+                size.height,
+                win32.DXGI_FORMAT_B8G8R8A8_UNORM,
+                win32.DXGI_ALPHA_MODE_PREMULTIPLIED,
+                @ptrCast(&surface),
+            );
+            if (hr < 0) win32.panicHresult("CreateSurface", hr);
+        }
+        {
+            const hr = d2d.visual.IDCompositionVisual.SetContent(&surface.IUnknown);
+            if (hr < 0) win32.panicHresult("SetContent", hr);
+        }
+        d2d.surface = surface;
+        d2d.surface_size = size;
+    }
+
+    fn beginFrame(d2d: *D2d, client: win32.SIZE) *win32.ID2D1DeviceContext {
+        d2d.ensureSurface(.{ .width = @intCast(@max(client.cx, 1)), .height = @intCast(@max(client.cy, 1)) });
+        var dc: *win32.ID2D1DeviceContext = undefined;
+        var offset: win32.POINT = undefined;
+        {
+            const hr = d2d.surface.?.BeginDraw(null, win32.IID_ID2D1DeviceContext, @ptrCast(&dc), &offset);
+            if (hr < 0) win32.panicHresult("IDCompositionSurface.BeginDraw", hr);
+        }
+        dc.ID2D1RenderTarget.SetDpi(96, 96);
+        dc.ID2D1RenderTarget.SetTextAntialiasMode(.GRAYSCALE);
+        const translate: win32.D2D_MATRIX_3X2_F = .{ .Anonymous = .{ .Anonymous1 = .{
+            .m11 = 1,
+            .m12 = 0,
+            .m21 = 0,
+            .m22 = 1,
+            .dx = @floatFromInt(offset.x),
+            .dy = @floatFromInt(offset.y),
+        } } };
+        dc.ID2D1RenderTarget.SetTransform(&translate);
+        d2d.frame_dc = dc;
+        return dc;
+    }
+
+    fn endFrame(d2d: *D2d) error{RecreateTarget}!void {
+        if (d2d.frame_dc) |dc| {
+            _ = dc.IUnknown.Release();
+            d2d.frame_dc = null;
+        }
+        {
+            const hr = d2d.surface.?.EndDraw();
+            if (hr == win32.D2DERR_RECREATE_TARGET or hr == win32.DXGI_ERROR_DEVICE_REMOVED) return error.RecreateTarget;
+            if (hr < 0) win32.panicHresult("IDCompositionSurface.EndDraw", hr);
+        }
+        {
+            const hr = d2d.dcomp.IDCompositionDevice2.Commit();
+            if (hr < 0) win32.panicHresult("Commit", hr);
+        }
+    }
 };
 
 pub const Painter = struct {
@@ -687,6 +807,16 @@ pub const Painter = struct {
 
     pub fn fill(p: *const Painter, r: layout.Rect, rgb: layout.Rgb) void {
         p.target.FillRectangle(&rectF(r), p.setColor(rgb));
+    }
+
+    pub fn clear(p: *const Painter, rgb: layout.Rgb, alpha: f32) void {
+        const color: win32.D2D_COLOR_F = .{
+            .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+            .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+            .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+            .a = alpha,
+        };
+        p.target.Clear(&color);
     }
 
     pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb, alignment: layout.TextAlign) void {

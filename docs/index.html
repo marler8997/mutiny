@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mutiny</title>
+<meta name="description" content="A scriptable mod tool for Unity games. Attach to a running game and edit your mods while you play, no restart.">
+<link rel="icon" href="mutiny.svg" type="image/svg+xml">
+<style>
+  :root {
+    --window: #313131;
+    --tile: #3a3a3a;
+    --edge: #474747;
+    --bar: #2b2b2b;
+    --text: #e8e6e1;
+    --muted: #9a9893;
+    --accent: #8cccff;
+    --accent-hover: #a6d8ff;
+    --accent-ink: #12283a;
+    --red: #fb0404;
+    --ok: #7fd48a;
+    --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "Cascadia Code", Consolas, ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--window); color: var(--text); font: 16px/1.55 var(--sans); }
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-hover); }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 24px 64px; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+  header img { width: 56px; height: 56px; }
+  header h1 { font-size: 40px; margin: 0; letter-spacing: 0.01em; font-weight: 600; }
+  .pitch { font-size: 20px; margin: 8px 0 28px; max-width: 34em; }
+  .pitch b { color: var(--text); font-weight: 600; }
+  .download { display: inline-block; background: var(--accent); color: var(--accent-ink); font-weight: 600; text-decoration: none; padding: 12px 22px; border-radius: 4px; font-size: 17px; }
+  .download:hover { background: var(--accent-hover); color: var(--accent-ink); }
+  .fine { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 44px 0 12px; font-weight: 600; }
+  p { margin: 0 0 12px; max-width: 40em; }
+  pre { background: var(--bar); border: 1px solid var(--edge); border-radius: 4px; padding: 14px 16px; overflow-x: auto; font: 14px/1.5 var(--mono); margin: 0 0 12px; }
+  code { font-family: var(--mono); font-size: 0.95em; background: var(--bar); padding: 1px 5px; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  .c { color: var(--muted); }
+  .k { color: var(--accent); }
+  .s { color: var(--ok); }
+  ul { padding-left: 20px; margin: 0 0 12px; max-width: 40em; }
+  li { margin-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .cell { background: var(--tile); border: 1px solid var(--edge); border-radius: 4px; padding: 14px 16px; }
+  .cell b { display: block; margin-bottom: 4px; font-weight: 600; }
+  .cell span { color: var(--muted); font-size: 15px; }
+  footer { margin-top: 56px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--edge); padding-top: 16px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="mutiny.svg" alt="">
+    <h1>Mutiny</h1>
+  </header>
+  <p class="pitch">A scriptable mod tool for Unity games. <b>Attach it to a game that's already running, then edit your mods while you play.</b> Every save takes effect on the next frame. No restart, no rebuild.</p>
+  <a class="download" href="https://github.com/marler8997/mutiny/releases/latest/download/MutinySetup.exe">Download MutinySetup.exe</a>
+  <p class="fine">Windows. Installs to your user profile, no admin needed. <a href="https://github.com/marler8997/mutiny">Source on GitHub</a>.</p>
+
+  <h2>How it works</h2>
+  <div class="grid">
+    <div class="cell"><b>Attach</b><span>Open Mutiny while a Unity game is running and click Attach. Or launch the game from Mutiny.</span></div>
+    <div class="cell"><b>Write a mod</b><span>Save a script into the game's <code>mods</code> folder. It runs on the next frame.</span></div>
+    <div class="cell"><b>Edit while playing</b><span>Change the file, alt-tab back. The new version is already running.</span></div>
+  </div>
+  <p>A panel inside the game lists your mods with their status, and each has a checkbox to turn it off and on.</p>
+
+  <h2>What a mod looks like</h2>
+  <p>A mod runs from the top on every frame. This one keeps the player's stamina full in PEAK:</p>
+<pre><code><span class="c">// %LOCALAPPDATA%\mutiny\app\PEAK\mods\stamina</span>
+<span class="k">@Section</span>(.update)
+<span class="k">var</span> game = <span class="k">@Assembly</span>(<span class="s">"Assembly-CSharp"</span>)
+<span class="k">var</span> Character = <span class="k">@Class</span>(game.Character)
+<span class="k">if</span> (Character.get_localCharacterExists() == 0) { <span class="k">@Exit</span>(<span class="s">"no character"</span>) }
+<span class="k">var</span> me = Character.localCharacter
+me.data.set_currentStamina(me.GetMaxStamina())</code></pre>
+  <p>The script talks to the game's own classes and methods, the same ones a C# mod would use, without a compiler or a game restart between edits. <code>@Exit</code> ends the frame's run and its text is the mod's status in the panel.</p>
+
+  <h2>Works with</h2>
+  <ul>
+    <li>Unity games on Windows, both scripting backends: Mono and IL2CPP.</li>
+    <li>Games that are already running. Mutiny attaches to the process; it never touches the game's files.</li>
+    <li>Scripts and AI agents, through the <code>mutiny</code> command line and a <a href="https://github.com/marler8997/mutiny/blob/master/mutiny-agent.md">language reference</a> written for them.</li>
+  </ul>
+  <p>Not for games with anti-cheat. Attaching to one is the kind of thing anti-cheat exists to stop, and online play with mods is against most games' rules anyway.</p>
+
+  <footer>
+    <a href="https://github.com/marler8997/mutiny">GitHub</a> ·
+    <a href="https://github.com/marler8997/mutiny/releases">Releases</a> ·
+    <a href="https://github.com/marler8997/mutiny/blob/master/mutiny-agent.md">Language reference</a>
+  </footer>
+</main>
+</body>
+</html>

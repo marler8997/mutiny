@@ -1,7 +1,6 @@
 const std = @import("std");
 const UpdateDll = @import("UpdateDll.zig");
 const UpdateIco = @import("UpdateIco.zig");
-const zon = @import("build.zig.zon");
 
 fn SanitizeVariants(comptime T: type) type {
     return struct {
@@ -207,7 +206,7 @@ pub fn build(b: *std.Build) void {
 
     const mutiny_rc = blk: {
         const ico = UpdateIco.create(b, .{
-            .svg_path = "gui/mutiny.svg",
+            .svg_path = "docs/mutiny.svg",
             .script_path = "gui/svg2ico.ps1",
             .out_path = "gui/mutiny.ico",
         });

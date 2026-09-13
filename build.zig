@@ -1,6 +1,7 @@
 const std = @import("std");
 const UpdateDll = @import("UpdateDll.zig");
 const UpdateIco = @import("UpdateIco.zig");
+const zon = @import("build.zig.zon");
 
 fn SanitizeVariants(comptime T: type) type {
     return struct {
@@ -174,21 +175,21 @@ pub fn build(b: *std.Build) void {
         b.step("testgamemono-raw", "").dependOn(&run.step);
     }
 
+    const cli = b.addExecutable(.{
+        .name = "mutiny",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("cli/cli.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mutiny", .module = mutiny_mod.sanitized },
+            },
+        }),
+    });
+    if (target.result.os.tag == .windows) {
+        cli.root_module.addImport("win32", win32_mod);
+    }
     {
-        const cli = b.addExecutable(.{
-            .name = "mutiny",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("cli/cli.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "mutiny", .module = mutiny_mod.sanitized },
-                },
-            }),
-        });
-        if (target.result.os.tag == .windows) {
-            cli.root_module.addImport("win32", win32_mod);
-        }
         const install = b.addInstallArtifact(cli, .{
             .dest_dir = .{ .override = .{ .custom = "appdata/bin" } },
         });
@@ -204,29 +205,7 @@ pub fn build(b: *std.Build) void {
         b.step("cli", "").dependOn(&run.step);
     }
 
-    {
-        const exe = b.addExecutable(.{
-            .name = "Mutiny",
-            .root_module = b.createModule(.{
-                .root_source_file = switch (target.result.os.tag) {
-                    .windows => b.path("gui/win32.zig"),
-                    else => @panic("the gui has no platform layer for this os yet"),
-                },
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "mutiny", .module = mutiny_mod.sanitized },
-                    .{ .name = "win32", .module = win32_mod },
-                },
-            }),
-            .win32_manifest = b.path("gui/win32dpiaware.manifest"),
-        });
-        exe.subsystem = .Windows;
-        const install = b.addInstallArtifact(exe, .{
-            .dest_dir = .{ .override = .{ .custom = "appdata" } },
-        });
-        b.step("install-gui", "").dependOn(&install.step);
-        b.getInstallStep().dependOn(&install.step);
+    const mutiny_rc = blk: {
         const ico = UpdateIco.create(b, .{
             .svg_path = "gui/mutiny.svg",
             .script_path = "gui/svg2ico.ps1",
@@ -234,13 +213,119 @@ pub fn build(b: *std.Build) void {
         });
         const rc_files = b.addWriteFiles();
         _ = rc_files.addCopyFile(ico.path(), "mutiny.ico");
-        exe.addWin32ResourceFile(.{
-            .file = rc_files.addCopyFile(b.path("gui/mutiny.rc"), "mutiny.rc"),
+        break :blk rc_files.addCopyFile(b.path("gui/mutiny.rc"), "mutiny.rc");
+    };
+
+    const layout_mod = b.createModule(.{ .root_source_file = b.path("layout/layout.zig") });
+
+    const gui = b.addExecutable(.{
+        .name = "Mutiny",
+        .root_module = b.createModule(.{
+            .root_source_file = switch (target.result.os.tag) {
+                .windows => b.path("gui/win32.zig"),
+                else => @panic("the gui has no platform layer for this os yet"),
+            },
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mutiny", .module = mutiny_mod.sanitized },
+                .{ .name = "win32", .module = win32_mod },
+                .{ .name = "layout", .module = layout_mod },
+            },
+        }),
+        .win32_manifest = b.path("gui/win32dpiaware.manifest"),
+    });
+    gui.subsystem = .Windows;
+    gui.addWin32ResourceFile(.{ .file = mutiny_rc });
+    {
+        const install = b.addInstallArtifact(gui, .{
+            .dest_dir = .{ .override = .{ .custom = "appdata" } },
         });
-        const run = b.addRunArtifact(exe);
+        b.step("install-gui", "").dependOn(&install.step);
+        b.getInstallStep().dependOn(&install.step);
+        const run = b.addRunArtifact(gui);
         run.step.dependOn(&install.step);
         if (b.args) |a| run.addArgs(a);
         b.step("gui", "").dependOn(&run.step);
+    }
+
+    const installer_step = b.step("installer", "build MutinySetup.exe, this build packaged as an installer");
+    if (target.result.os.tag == .windows) {
+        const lzma_host = dependencyLibrary(b.dependency("fast_lzma2", .{
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }), "fast-lzma2");
+        const lzma_target = dependencyLibrary(b.dependency("fast_lzma2", .{
+            .target = target,
+            .optimize = .ReleaseFast,
+        }), "fast-lzma2");
+
+        const compress = b.addExecutable(.{
+            .name = "mutinycompress",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("installer/compress.zig"),
+                .target = b.graph.host,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        compress.linkLibrary(lzma_host);
+
+        const installer_mod = b.createModule(.{
+            .root_source_file = b.path("installer/installer.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "win32", .module = win32_mod },
+                .{ .name = "layout", .module = layout_mod },
+            },
+        });
+
+        const payload = [_]struct { import: []const u8, file: std.Build.LazyPath }{
+            .{ .import = "bin_mutiny_exe", .file = cli.getEmittedBin() },
+            .{ .import = "dll_Mutiny_dll", .file = mutiny_native_dll.getEmittedBin() },
+            .{ .import = "Mutiny_exe", .file = gui.getEmittedBin() },
+            .{ .import = "mutiny_agent_md", .file = b.path("mutiny-agent.md") },
+        };
+        for (payload) |p| {
+            const run = b.addRunArtifact(compress);
+            run.addFileArg(p.file);
+            const compressed = run.addOutputFileArg(b.fmt("{s}.lzma2", .{p.import}));
+            installer_mod.addAnonymousImport(p.import, .{ .root_source_file = compressed });
+        }
+
+        const installer = b.addExecutable(.{
+            .name = "MutinySetup",
+            .root_module = installer_mod,
+        });
+        installer.subsystem = .Windows;
+        installer.linkLibrary(lzma_target);
+        installer.addWin32ResourceFile(.{ .file = mutiny_rc });
+        const install = b.addInstallArtifact(installer, .{
+            .dest_dir = .{ .override = .prefix },
+        });
+        installer_step.dependOn(&install.step);
+    }
+
+    {
+        const tool = b.addExecutable(.{
+            .name = "release",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("release.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+            }),
+        });
+        const run = b.addRunArtifact(tool);
+        run.has_side_effects = true;
+        run.addArg(b.graph.zig_exe);
+        run.addArg(b.build_root.path orelse ".");
+        if (b.args) |a| run.addArgs(a);
+        b.step(
+            "release",
+            "release HEAD of master on GitHub: build the installer and upload it, unless this commit is already released",
+        ).dependOn(&run.step);
     }
 
     const unittest_step = b.step("unittest", "");
@@ -251,6 +336,9 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/testroot.zig"),
                 .target = target,
                 .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "layout", .module = layout_mod },
+                },
             }),
         });
         if (target.result.os.tag == .windows) {
@@ -380,6 +468,22 @@ const test_games = [_]TestGame{
     .{ .name = "Schedule I", .step = "schedule1", .steam_dir = "Schedule I", .runtime = .il2cpp },
     .{ .name = "Gnomium", .step = "gnome", .steam_dir = "Burglin' Gnomes", .runtime = .mono },
 };
+
+fn dependencyLibrary(d: *std.Build.Dependency, name: []const u8) *std.Build.Step.Compile {
+    var found: ?*std.Build.Step.Compile = null;
+    for (d.builder.install_tls.step.dependencies.items) |dep_step| {
+        const inst = dep_step.cast(std.Build.Step.InstallArtifact) orelse continue;
+        switch (inst.artifact.kind) {
+            .exe, .obj, .@"test", .test_obj => continue,
+            .lib => {},
+        }
+        if (std.mem.eql(u8, inst.artifact.name, name)) {
+            if (found != null) std.debug.panic("artifact name '{s}' is ambiguous", .{name});
+            found = inst.artifact;
+        }
+    }
+    return found orelse std.debug.panic("dependency has no library named '{s}'", .{name});
+}
 
 fn createZydisModule(
     b: *std.Build,

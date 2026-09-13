@@ -17,6 +17,10 @@
             .url = "git+https://github.com/zyantific/zycore-c#c1fa01cea7fd457dcec468104d477c8b0ca675f7",
             .hash = "N-V-__8AAKTLBwDJqBaCpfJE7euS8iny9atzzOG_8eyyObPP",
         },
+        .fast_lzma2 = .{
+            .url = "git+https://github.com/allyourcodebase/fast-lzma2#d7615e0c957a62fcd6691b3fe9519a091885bfa2",
+            .hash = "fastlzma2-0.0.0-gNWHgVeLAAD0Tlak3xhNcgpPSYcjyJppq0tlGmPKCC_V",
+        },
     },
     .paths = .{""},
 }

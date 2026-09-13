@@ -94,6 +94,33 @@ pub const font_points = 10;
 pub const max_game_name = 255;
 pub const max_text_len = 512;
 
+pub fn toWide(utf8: []const u8, buf: []u16) error{InvalidWtf8}![:0]const u16 {
+    std.debug.assert(buf.len >= 2);
+    const limit = buf.len - 2;
+    var take = utf8;
+    if (utf8.len > limit) {
+        var end = limit;
+        while (end > 0 and (utf8[end] & 0xC0) == 0x80) end -= 1;
+        take = utf8[0..end];
+    }
+    var len = try std.unicode.wtf8ToWtf16Le(buf[0..limit], take);
+    if (take.len != utf8.len) {
+        buf[len] = 0x2026;
+        len += 1;
+    }
+    buf[len] = 0;
+    return buf[0..len :0];
+}
+
+test toWide {
+    var buf: [12]u16 = undefined;
+    try std.testing.expectEqualSlices(u16, &.{ 'h', 'i' }, try toWide("hi", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'é', 'é', 'é', 'é', 'é', 0x2026 }, try toWide("é" ** 9, &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j' }, try toWide("abcdefghij", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 0x2026 }, try toWide("abcdefghijk", &buf));
+    try std.testing.expectError(error.InvalidWtf8, toWide("\xff", &buf));
+}
+
 const points = struct {
     const margin = 12;
     const tile_width = 170;

@@ -59,7 +59,9 @@ pub fn main() !u8 {
         }
     }
 
-    const tag = try std.fmt.allocPrint(arena, "release-{s}", .{short});
+    const committed = try run(arena, root, &.{ "git", "show", "-s", "--format=%ct", "HEAD" });
+    const stamp = try commitStamp(arena, committed);
+    const tag = try std.fmt.allocPrint(arena, "{s}-{s}", .{ stamp, short });
     if (std.process.Child.run(.{
         .allocator = arena,
         .argv = &.{ "gh", "release", "view", tag, "--json", "url", "--jq", ".url" },
@@ -78,7 +80,7 @@ pub fn main() !u8 {
     std.log.info("building the installer for {s}", .{short});
     try runInherit(arena, root, &.{ zig_exe, "build", "installer", "-Doptimize=ReleaseSafe" });
 
-    const title = try std.fmt.allocPrint(arena, "Mutiny {s}", .{short});
+    const title = tag;
     const notes = try std.fmt.allocPrint(arena, "Built from {s}.", .{sha});
     const create = [_][]const u8{
         "gh",      "release",  "create", tag,
@@ -93,6 +95,33 @@ pub fn main() !u8 {
     const url = try run(arena, root, &.{ "gh", "release", "view", tag, "--json", "url", "--jq", ".url" });
     std.log.info("released {s}: {s}", .{ short, url });
     return 0;
+}
+
+fn commitStamp(arena: std.mem.Allocator, unix_seconds: []const u8) ![]const u8 {
+    const seconds = std.fmt.parseInt(u64, unix_seconds, 10) catch |err| {
+        std.log.err("git gave an unusable commit time '{s}': {t}", .{ unix_seconds, err });
+        return error.Reported;
+    };
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch.getDaySeconds();
+    return std.fmt.allocPrint(arena, "{d:0>4}_{d:0>2}_{d:0>2}_{d:0>2}_{d:0>2}", .{
+        year_day.year,
+        month_day.month.numeric(),
+        @as(u32, month_day.day_index) + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+    });
+}
+
+test commitStamp {
+    var arena_instance: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    try std.testing.expectEqualStrings("1970_01_01_00_00", try commitStamp(arena, "0"));
+    try std.testing.expectEqualStrings("2000_02_29_12_00", try commitStamp(arena, "951825600"));
+    try std.testing.expectEqualStrings("2026_09_13_02_28", try commitStamp(arena, "1789266495"));
 }
 
 fn run(arena: std.mem.Allocator, cwd: []const u8, argv: []const []const u8) ![]const u8 {

@@ -690,17 +690,18 @@ pub const Painter = struct {
     }
 
     pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb, alignment: layout.TextAlign) void {
-        var wide: [layout.max_text_len + 1]u16 = undefined;
-        const len = std.unicode.wtf8ToWtf16Le(wide[0..layout.max_text_len], utf8) catch {
-            std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
-            return;
+        var buf: [layout.max_text_len + 1]u16 = undefined;
+        const wide = layout.toWide(utf8, &buf) catch |err| switch (err) {
+            error.InvalidWtf8 => {
+                std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
+                return;
+            },
         };
-        wide[len] = 0;
         const format = switch (alignment) {
             .left => p.text_formats.left,
             .center => p.text_formats.center,
         };
-        p.target.DrawText(wide[0..len :0], @intCast(len), format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
+        p.target.DrawText(wide, @intCast(wide.len), format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
     }
 
     pub fn pushClip(p: *const Painter, r: layout.Rect) void {
@@ -801,4 +802,4 @@ const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
 
 const app = @import("app.zig");
-const layout = @import("layout.zig");
+const layout = @import("layout");

@@ -648,5 +648,5 @@ fn paintDetails(p: *const platform.Painter, client: layout.XY, scale: f32, d: *c
 
 const std = @import("std");
 
-const layout = @import("layout.zig");
+const layout = @import("layout");
 const platform = @import("root");

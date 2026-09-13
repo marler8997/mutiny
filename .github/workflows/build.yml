@@ -1,0 +1,16 @@
+name: build
+on:
+  push:
+  pull_request:
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: marler8997/setup-anyzig@master
+      - run: zig build unittest
+      - run: zig build installer -Doptimize=ReleaseSafe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MutinySetup
+          path: zig-out/MutinySetup.exe

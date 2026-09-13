@@ -82,6 +82,12 @@
 me.data.set_currentStamina(me.GetMaxStamina())</code></pre>
   <p>The script talks to the game's own classes and methods, the same ones a C# mod would use, without a compiler or a game restart between edits. <code>@Exit</code> ends the frame's run and its text is the mod's status in the panel.</p>
 
+  <h2>Or let an agent write it</h2>
+  <p>You don't have to learn the script language. Hand an AI agent <a href="https://github.com/marler8997/mutiny/blob/master/mutiny-agent.md">mutiny-agent.md</a>, a prompt that teaches it the language and the <code>mutiny</code> command, and ask for what you want: <i>make me invincible</i>, <i>infinite stamina</i>, <i>no fall damage</i>.</p>
+  <p>The agent can ask the running game which classes and methods it has, write the mod into your <code>mods</code> folder, and read the game's own log to see whether it worked, all while you keep playing. Every edit it makes lands on the next frame, the same as yours.</p>
+  <pre><code><span class="c"># the prompt is installed with Mutiny, so from any agent:</span>
+Read %LOCALAPPDATA%\mutiny\mutiny-agent.md, then give me infinite stamina in PEAK.</code></pre>
+
   <h2>Works with</h2>
   <ul>
     <li>Unity games on Windows, both scripting backends: Mono and IL2CPP.</li>

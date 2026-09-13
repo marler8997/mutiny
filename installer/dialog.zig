@@ -113,13 +113,18 @@ pub fn show(spec: Spec) Result {
     return .{ .button = global.result, .checked = global.checked };
 }
 
-fn place(hwnd: win32.HWND, dpi: u32) void {
+fn frameSize(dpi: u32) win32.SIZE {
     const l = layoutFor(global.spec, dpi);
     var frame: win32.RECT = .{ .left = 0, .top = 0, .right = l.client.cx, .bottom = l.client.cy };
     const style: win32.WINDOW_STYLE = @bitCast(@as(u32, @bitCast(win32.WS_CAPTION)) | @as(u32, @bitCast(win32.WS_SYSMENU)));
     if (0 == win32.AdjustWindowRectExForDpi(&frame, style, 0, .{}, dpi)) win32.panicWin32("AdjustWindowRectExForDpi", win32.GetLastError());
-    const width = frame.right - frame.left;
-    const height = frame.bottom - frame.top;
+    return .{ .cx = frame.right - frame.left, .cy = frame.bottom - frame.top };
+}
+
+fn place(hwnd: win32.HWND, dpi: u32) void {
+    const size = frameSize(dpi);
+    const width = size.cx;
+    const height = size.cy;
     var work: win32.RECT = undefined;
     if (0 == win32.SystemParametersInfoW(win32.SPI_GETWORKAREA, 0, &work, .{})) win32.panicWin32("SystemParametersInfo", win32.GetLastError());
     const x = work.left + @divTrunc(work.right - work.left - width, 2);
@@ -349,8 +354,28 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             global.done = true;
             return 0;
         },
+        win32.WM_GETDPISCALEDSIZE => {
+            const size: *win32.SIZE = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            size.* = frameSize(@intCast(wparam));
+            return 1;
+        },
         win32.WM_DPICHANGED => {
-            place(hwnd, win32.hiword(wparam));
+            const dpi: u32 = win32.hiword(wparam);
+            const suggested: *const win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            const expected = frameSize(dpi);
+            if (expected.cx != suggested.right - suggested.left or expected.cy != suggested.bottom - suggested.top) std.debug.panic(
+                "WM_DPICHANGED to {} suggested {}x{} but WM_GETDPISCALEDSIZE asked for {}x{}",
+                .{ dpi, suggested.right - suggested.left, suggested.bottom - suggested.top, expected.cx, expected.cy },
+            );
+            if (0 == win32.SetWindowPos(
+                hwnd,
+                null,
+                suggested.left,
+                suggested.top,
+                suggested.right - suggested.left,
+                suggested.bottom - suggested.top,
+                .{ .NOZORDER = 1, .NOACTIVATE = 1 },
+            )) win32.panicWin32("SetWindowPos", win32.GetLastError());
             win32.invalidateHwnd(hwnd);
             return 0;
         },

@@ -85,6 +85,16 @@ fn join(parts: []const []const u8) []const u8 {
 }
 
 pub fn main() void {
+    {
+        var awareness: win32.PROCESS_DPI_AWARENESS = undefined;
+        const hr = win32.GetProcessDpiAwareness(null, &awareness);
+        if (hr < 0) std.debug.panic("GetProcessDpiAwareness failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        switch (awareness) {
+            .PER_MONITOR_DPI_AWARE => {},
+            else => |a| std.debug.panic("the process is {t}, the manifest should make it PER_MONITOR_DPI_AWARE", .{a}),
+        }
+    }
+
     const args = std.process.argsAlloc(global.arena) catch |err| std.debug.panic("reading the command line failed with {t}", .{err});
     var uninstall = false;
     for (args[1..]) |arg| {

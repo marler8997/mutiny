@@ -297,6 +297,7 @@ pub fn build(b: *std.Build) void {
         const installer = b.addExecutable(.{
             .name = "MutinySetup",
             .root_module = installer_mod,
+            .win32_manifest = b.path("gui/win32dpiaware.manifest"),
         });
         installer.subsystem = .Windows;
         installer.linkLibrary(lzma_target);
@@ -305,6 +306,11 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .prefix },
         });
         installer_step.dependOn(&install.step);
+
+        const run = b.addRunArtifact(installer);
+        run.step.dependOn(&install.step);
+        if (b.args) |a| run.addArgs(a);
+        b.step("run-installer", "build MutinySetup.exe and run it (-- --uninstall to uninstall)").dependOn(&run.step);
     }
 
     {

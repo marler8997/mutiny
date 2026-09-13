@@ -19,7 +19,7 @@ works.
 
 ## The loop you will follow
 
-1. `mutiny scan` - lists every process with a mono or il2cpp runtime. Find the game's PID.
+1. `mutiny scan` - lists every running Unity game with its PID and whether Mutiny is attached.
 2. `mutiny <PID> attach` - gets Mutiny running in the process. Only needed once per unique PID.
 3. `mutiny <PID> run-script @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
 4. Work out which classes and methods you need (see "Finding the right code").
@@ -67,7 +67,7 @@ like an effect you have *added to the game* rather than a script you run:
 - it is on while the file exists; the player can turn it off from the in-game panel, and
   `mutiny <PID> disable-mod <name>` / `enable-mod <name>` do the same from the CLI.
 
-Here's an example of a mod for "infinit stamina" in the game PEAK:
+Here's an example of a mod for "infinite stamina" in the game PEAK:
 
 ```
 @Section(.update)
@@ -83,7 +83,7 @@ When this is written to "mods/stamina", here's what it can look like in the log:
 ```
 13:54:46.239|98308|107484|PEAK|info|mod 'stamina' loaded (250 bytes)
 13:55:01.418|98308|107484|PEAK|info|stamina: no character
-13:55:01.799|98308|107484|PEAK|info|stamina: enabled
+13:55:01.799|98308|107484|PEAK|info|stamina: recovered
 ```
 
 Rules that differ from a script:
@@ -128,14 +128,46 @@ file.
 
 ### Examples
 
-Real mods from three games, as written. They show the shape; they are not rules. Note
-that none of them puts its own name in an `@Exit`: the log prefixes every result with
-the mod's name already.
+Real mods from two games, as written. They show the shape; they are not rules. Note that
+none of them puts its own name in an `@Exit`: the log prefixes every result with the mod's
+name already. And every mod that changes something the game will not put back on its own has
+a `.disable` section that restores the default, which the mod's header states.
 
-PEAK, fly - a mod sees every frame, so "while the button is held" is an `if` on the
-input state; the result carries the one thing the player has to know:
+PEAK, speed - the knobs are `var`s at the top with the game's defaults noted; the player
+edits a number and saves, and the changed file reloads the mod:
 
 ```
+// Faster movement. EDIT the numbers and SAVE to tune.
+//   movementForce:    game default = 25  (walk + sprint speed together)
+//   sprintMultiplier: game default = 2   (sprint speed relative to walking)
+// Disabling restores both defaults.
+@Section(.update)
+var movementForce = 120
+var sprintMultiplier = 4
+
+var game = @Assembly("Assembly-CSharp")
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
+var mv = Character.localCharacter.refs.movement
+set mv.movementForce = movementForce
+set mv.sprintMultiplier = sprintMultiplier
+
+@Section(.disable)
+var game = @Assembly("Assembly-CSharp")
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
+var mv = Character.localCharacter.refs.movement
+set mv.movementForce = 25
+set mv.sprintMultiplier = 2
+```
+
+PEAK, fly - a mod sees every frame, so "while the button is held" is an `if` on the input
+state; the result carries the one thing the player has to know:
+
+```
+// Fly: stronger jumps, unlimited air jumps, and auto-jump while the jump button is held.
+//   jumpImpulse: game default = 400
+// Disabling restores the jump strength and removes the extra jumps.
 @Section(.update)
 var jumpImpulse = 1080
 
@@ -155,92 +187,129 @@ set mv.jumpImpulse = jumpImpulse
 set a.totalExtraJumps = 999999
 set d.extraJumps = 999999
 
-// 2. auto-jump while held
+// 2. auto-jump while held (TryToJump refuses while isJumping is set or sinceJump is small)
 if (CharacterInput.action_jump.IsPressed() == 1) {
     set d.isJumping = 0
     set d.sinceJump = 10
     mv.TryToJump()
 }
-@Exit("enabled: hold jump to fly")
-```
+@Exit("hold jump to fly")
 
-Outer Wilds, jetpack - the knobs are `var`s at the top with the game's defaults noted; the
-player edits a number and saves, and the changed file reloads the mod:
-
-```
-// transThrust: thrust while holding the jetpack   (game default = 6)
-// boostThrust: the boost burst                    (game default = 23)
-@Section(.update)
-var transThrust = 18
-var boostThrust = 70
-
+@Section(.disable)
 var game = @Assembly("Assembly-CSharp")
-var Locator = @Class(game.Locator)
-var ctrl = Locator.GetPlayerController()
-if (@IsNull(ctrl)) { @Exit("waiting for player") }
-
-var jet = ctrl._jetpackModel
-if (@IsNull(jet)) { @Exit("waiting for jetpack") }
-
-set jet._maxTranslationalThrust = transThrust
-set jet._boostThrust = boostThrust
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
+var me = Character.localCharacter
+var d = me.data
+var a = me.refs.afflictions
+var mv = me.refs.movement
+set mv.jumpImpulse = 400
+set a.totalExtraJumps = 0
+set d.extraJumps = 0
+set d.jumpsRemaining = 1
 ```
 
-Outer Wilds, world speed - the mod's own header explains why it skips frames where
-`timeScale` is 0:
+PEAK, clear status - it reads before it writes, because a write can have side effects (here,
+a network packet) that a frame with nothing to do should not cause; there is nothing to undo:
 
 ```
-// === TIME LORD === (runs every frame)
-// World-speed dial for the whole physics-simulated solar system.
-// EDIT `speed` below, then SAVE.  1 = normal, 2-10 = fast-forward, 0.2 = slow-mo.
-//
-// It SKIPS when timeScale is 0, so the pause menu still works and you no longer
-// have to re-save after pausing (the old normal-mod version needed that).
-// To turn off: delete this file, or set speed = 1 and save.
-
-@Section(.update)
-var speed = 1
-
-var core = @Assembly("UnityEngine.CoreModule")
-var Time = @Class(core.UnityEngine.Time)
-var cur = Time.get_timeScale()
-
-// leave 0 alone (that is the pause menu); otherwise hold it at `speed`
-if (cur != 0) { Time.set_timeScale(speed) }
-```
-
-Outer Wilds, god mode - the header says what it does, what it does not, and what stays
-behind when it is turned off:
-
-```
-// === GOD MODE === (runs every frame, survives time-loop resets)
-//   1. Invincibility   - no damage / impact / suffocation death
-//   2. Infinite fuel   - jetpack never runs dry
-//   3. Infinite oxygen - never suffocate
-//   4. Infinite boost  - the jetpack boost meter never drains
-//
-// Does NOT stop scripted deaths (sun, black hole) or the ~22-min supernova reset.
-// To turn off: delete this file. (Invincibility flag clears on the next loop reset.)
-
+// No curable afflictions: Hunger, Injury, Cold, Poison, Hot, Drowsy, Thorns and Spores are
+// zeroed whenever they appear. Curse and Weight are left alone. Nothing to undo when disabled.
 @Section(.update)
 var game = @Assembly("Assembly-CSharp")
-var Locator = @Class(game.Locator)
-var ctrl = Locator.GetPlayerController()
-if (@IsNull(ctrl)) { @Exit("waiting for player") }
+var Character = @Class(game.Character)
+if (Character.get_localCharacterExists() == 0) { @Exit("no character") }
+var a = Character.localCharacter.refs.afflictions
+// NOTE: we check each status before because setting may result in sending network packets
+if (a.GetCurrentStatus(.Hunger) > 0) { a.SetStatus(.Hunger, 0, 0) }
+if (a.GetCurrentStatus(.Injury) > 0) { a.SetStatus(.Injury, 0, 0) }
+if (a.GetCurrentStatus(.Cold) > 0)   { a.SetStatus(.Cold, 0, 0) }
+if (a.GetCurrentStatus(.Poison) > 0) { a.SetStatus(.Poison, 0, 0) }
+if (a.GetCurrentStatus(.Hot) > 0)    { a.SetStatus(.Hot, 0, 0) }
+if (a.GetCurrentStatus(.Drowsy) > 0) { a.SetStatus(.Drowsy, 0, 0) }
+if (a.GetCurrentStatus(.Thorns) > 0) { a.SetStatus(.Thorns, 0, 0) }
+if (a.GetCurrentStatus(.Spores) > 0) { a.SetStatus(.Spores, 0, 0) }
+```
 
-var pr = ctrl._playerResources
-if (@IsNull(pr)) { @Exit("waiting for resources") }
+Schedule I, go fast - static fields need no instance, so there is nothing to wait for; the
+values are floats, so the literals are written as floats:
 
-var PR = @ClassOf(pr)
+```
+@Section(.update)
+var speed   = 5.0
+var jump    = 2.0
+var gravity = 1.0
+var game = @Assembly("Assembly-CSharp")
+var PM = @Class(game.ScheduleOne.PlayerScripts.PlayerMovement)
+set PM.StaticMoveSpeedMultiplier = speed
+set PM.JumpMultiplier = jump
+set PM.GravityMultiplier = gravity
 
-if (pr.IsInvincible() == 0) {
-    pr.ToggleInvincibility()
+@Section(.disable)
+var game = @Assembly("Assembly-CSharp")
+var PM = @Class(game.ScheduleOne.PlayerScripts.PlayerMovement)
+set PM.StaticMoveSpeedMultiplier = 1.0
+set PM.JumpMultiplier = 1.0
+set PM.GravityMultiplier = 1.0
+```
+
+Schedule I, infinite items - the equipped item can be anything, so `@HasField` tells a weapon
+from the rest before the mod touches a field only weapons have, and it writes only when the
+value is off:
+
+```
+@Section(.update)
+var game = @Assembly("Assembly-CSharp")
+var p = @Class(game.ScheduleOne.PlayerScripts.Player).Local
+if (@IsNull(p)) { @Exit("no player") }
+var item = p.GetEquippedItem()
+if (@IsNull(item)) { @Exit("nothing equipped") }
+if (@HasField(item, "Value") == 0) { @Exit("not a weapon") }
+var def = item.get_Definition()
+if (@IsNull(def)) { @Exit("no item definition") }
+if (item.Value < def.DefaultValue) {
+    set item.Value = def.DefaultValue
 }
-set pr._currentFuel = PR._maxFuel
-set pr._currentOxygen = PR._maxOxygen
-var jet = ctrl._jetpackModel
-if (@NotNull(jet)) {
-    set jet._boostChargeFraction = 1
+```
+
+Schedule I, no arrest - a `loop` over a list the game keeps, with `get_Count` and `get_Item`
+standing in for `.Count` and `[i]`:
+
+```
+@Section(.update)
+var game = @Assembly("Assembly-CSharp")
+var PO = @Class(game.ScheduleOne.Police.PoliceOfficer)
+var all = PO.Officers
+if (@IsNull(all)) { @Exit("no officer list") }
+var n = all.get_Count()
+var i = 0
+loop
+    if (i >= n) { break }
+    var off = all.get_Item(i)
+    if (@NotNull(off)) {
+        var pb = off.PursuitBehaviour
+        if (@NotNull(pb)) {
+            set pb.timeWithinArrestRange = 0.0
+        }
+    }
+    set i = i + 1
+continue
+```
+
+Schedule I, air jump - input comes from Unity's own `Input` class, which lives in another
+assembly than the game's code:
+
+```
+@Section(.update)
+var game = @Assembly("Assembly-CSharp")
+var legacy = @Assembly("UnityEngine.InputLegacyModule")
+var Input = @Class(legacy.UnityEngine.Input)
+var pm = @Class(game.ScheduleOne.PlayerScripts.PlayerMovement).get_Instance()
+if (@IsNull(pm)) { @Exit("no player") }
+if (pm.get_IsGrounded() == 0) {
+    if (Input.GetButtonDown("Jump")) {
+        pm.Jump()
+    }
 }
 ```
 
@@ -401,7 +470,6 @@ memory — see the rules below on argument types.
 | `@IsNull(v)` / `@NotNull(v)` | anything | return an integer 0 or 1 |
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
-| `@Nothing()` | no arguments | |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
 
 `@Log` output goes to the log, and also back to you over the pipe when the script was started

@@ -2,6 +2,13 @@
 
 A scriptable dll injector for modding Unity games.
 
+# Install
+
+Download and run [MutinySetup.exe](https://github.com/marler8997/mutiny/releases/latest/download/MutinySetup.exe).
+It installs to `%LOCALAPPDATA%\mutiny`, adds the `mutiny` command to your PATH, and puts
+Mutiny in the Start Menu. Uninstall from Apps & Features; your mods stay unless you say
+otherwise.
+
 # How
 
 Launch the game like normal. At any point you can inject `Mutiny.dll`. This can be done via a CLI:

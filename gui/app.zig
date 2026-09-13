@@ -127,6 +127,7 @@ const global = struct {
     var client: layout.XY = .{ .x = 0, .y = 0 };
     var scale: f32 = 1;
     var details: ?Details = null;
+    var copied: ?layout.DetailsButton = null;
 };
 
 const running_allocator = std.heap.smp_allocator;
@@ -192,6 +193,7 @@ fn openDetails(game_name: []const u8) void {
     }
 
     global.details = d;
+    platform.setTitle("{s} - {s}", .{ game_name, title });
     platform.invalidate();
 }
 
@@ -206,6 +208,8 @@ fn readExePath(game_name: []const u8, buf: *[max_exepath]u8) ![]const u8 {
 
 fn closeDetails() void {
     global.details = null;
+    global.copied = null;
+    platform.setTitle("{s}", .{title});
     platform.invalidate();
 }
 
@@ -378,10 +382,30 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
                 const dl: layout.Details = .init(global.client, global.scale);
                 if (dl.back.contains(position)) return closeDetails();
                 const game = d.game() orelse return closeDetails();
-                if (dl.action.contains(position)) return clickButton(game);
+                global.copied = null;
                 var path_buf: [max_exepath]u8 = undefined;
-                if (dl.open_directory.contains(position)) return platform.openDirectory(appPath(&path_buf, game.name, ""));
-                if (dl.open_log.contains(position)) return platform.openTextFile(appPath(&path_buf, game.name, "log"));
+                if (dl.hitButton(position)) |which| {
+                    switch (which) {
+                        .status => clickButton(game),
+                        .copy_prompt => copyPrompt(game),
+                        .copy_exe => copyText(which, d.exe()),
+                        .copy_directory => copyText(which, appPath(&path_buf, game.name, "")),
+                        .new_mod => newMod(game.name),
+                        .copy_mods => copyText(which, appPath(&path_buf, game.name, "mods")),
+                        .copy_log => copyText(which, appPath(&path_buf, game.name, "log")),
+                    }
+                } else if (dl.hitValue(position)) |row| {
+                    switch (row) {
+                        .directory => platform.openDirectory(appPath(&path_buf, game.name, "")),
+                        .mods => {
+                            ensureMods(game.name) catch return;
+                            platform.openDirectory(appPath(&path_buf, game.name, "mods"));
+                        },
+                        .log => platform.openTextFile(appPath(&path_buf, game.name, "log")),
+                        .executable, .process => {},
+                    }
+                }
+                platform.invalidate();
                 return;
             }
             var unknown_buf: [max_unknown]*Running = undefined;
@@ -622,28 +646,119 @@ fn paintDetails(p: *const platform.Painter, client: layout.XY, scale: f32, d: *c
     p.text(game.name, dl.title, layout.color.name, .left);
 
     var dir_buf: [max_exepath]u8 = undefined;
+    var mods_path_buf: [max_exepath]u8 = undefined;
     var log_buf: [max_exepath]u8 = undefined;
-    var mods_buf: [32]u8 = undefined;
+    var mods_label_buf: [32]u8 = undefined;
     var pid_buf: [32]u8 = undefined;
-    const values = [layout.details_text.labels.len][]const u8{
+    const labels = [layout.details_row_count][]const u8{
+        layout.details_text.labels[0],
+        layout.details_text.labels[1],
+        layout.details_text.labels[2],
+        if (d.mods) |count| std.fmt.bufPrint(&mods_label_buf, "{s} ({})", .{ layout.details_text.labels[3], count }) catch unreachable else layout.details_text.labels[3],
+        layout.details_text.labels[4],
+    };
+    const values = [layout.details_row_count][]const u8{
         if (d.exe_err) |err| @errorName(err) else d.exe(),
         if (game.running()) |r| std.fmt.bufPrint(&pid_buf, "pid {}", .{r.pid}) catch unreachable else "not running",
         appPath(&dir_buf, game.name, ""),
-        if (d.mods) |count| std.fmt.bufPrint(&mods_buf, "{}", .{count}) catch unreachable else "?",
+        appPath(&mods_path_buf, game.name, "mods"),
         appPath(&log_buf, game.name, "log"),
     };
-    for (layout.details_text.labels, values, 0..) |label, value, row| {
-        p.text(label, dl.labelRect(row), layout.color.muted, .left);
-        p.text(value, dl.valueRect(row, client), layout.color.text, .left);
+    for (std.enums.values(layout.DetailsRow), labels, values) |row, label, value| {
+        p.text(label, dl.label(row), layout.color.muted, .left);
+        const r = dl.value(row);
+        const ink = switch (row) {
+            .directory, .mods, .log => if (hot.over(r)) layout.color.name_hover else layout.color.name,
+            .executable, .process => layout.color.text,
+        };
+        p.text(value, r, ink, .left);
     }
 
-    const style = game.button().style();
-    p.fill(dl.action, if (style.enabled and hot.over(dl.action)) style.fill_hover else style.fill);
-    p.text(style.label, dl.action, style.ink, .center);
-    p.fill(dl.open_directory, if (hot.over(dl.open_directory)) layout.color.button_hover else layout.color.button);
-    p.text(layout.details_text.open_directory, dl.open_directory, layout.color.text, .center);
-    p.fill(dl.open_log, if (hot.over(dl.open_log)) layout.color.button_hover else layout.color.button);
-    p.text(layout.details_text.open_log, dl.open_log, layout.color.text, .center);
+    for (std.enums.values(layout.DetailsButton)) |which| {
+        const r = dl.button(which);
+        const style: layout.Button.Style = switch (which) {
+            .status => game.button().style(),
+            .new_mod => plainButton(layout.details_text.new),
+            .copy_prompt => plainButton(if (global.copied == which) layout.details_text.copied else layout.details_text.copy_prompt),
+            .copy_exe, .copy_directory, .copy_mods, .copy_log => plainButton(if (global.copied == which) layout.details_text.copied else layout.details_text.copy),
+        };
+        p.fill(r, if (style.enabled and hot.over(r)) style.fill_hover else style.fill);
+        p.text(style.label, r, style.ink, .center);
+    }
+}
+
+fn plainButton(label: []const u8) layout.Button.Style {
+    return .{
+        .label = label,
+        .fill = layout.color.button,
+        .fill_hover = layout.color.button_hover,
+        .ink = layout.color.text,
+        .enabled = true,
+    };
+}
+
+fn copyText(which: layout.DetailsButton, text: []const u8) void {
+    const units = std.unicode.calcWtf16LeLen(text) catch |err| {
+        std.log.err("cannot copy '{s}': {t}", .{ text, err });
+        return;
+    };
+    const clip = platform.ClipboardText.alloc(units + 1) orelse return;
+    const len = std.unicode.wtf8ToWtf16Le(clip.buf, text) catch |err| {
+        std.log.err("cannot copy '{s}': {t}", .{ text, err });
+        clip.discard();
+        return;
+    };
+    clip.buf[len] = 0;
+    clip.commit();
+    global.copied = which;
+}
+
+fn ensureMods(game_name: []const u8) !void {
+    var rel_buf: [layout.max_game_name + 1 + "mods".len]u8 = undefined;
+    const rel = std.fmt.bufPrint(&rel_buf, "{s}{c}mods", .{ game_name, std.fs.path.sep }) catch unreachable;
+    global.apps_dir.makePath(rel) catch |err| {
+        std.log.err("create '{s}' failed: {t}", .{ rel, err });
+        return err;
+    };
+}
+
+const new_mod_template =
+    \\// What this mod does, and what it changes that the game will not put back on its own.
+    \\@Section(.update)
+    \\var game = @Assembly("Assembly-CSharp")
+    \\@Exit("nothing yet")
+    \\
+;
+
+fn newMod(game_name: []const u8) void {
+    ensureMods(game_name) catch return;
+    var mods_buf: [max_exepath]u8 = undefined;
+    var path_buf: [max_exepath]u8 = undefined;
+    const path = platform.askSavePath(appPath(&mods_buf, game_name, "mods"), "New mod", &path_buf) orelse return;
+    std.fs.cwd().writeFile(.{ .sub_path = path, .data = new_mod_template }) catch |err| {
+        std.log.err("write '{s}' failed: {t}", .{ path, err });
+        return;
+    };
+    platform.openTextFile(path);
+}
+
+fn copyPrompt(game: *Game) void {
+    var mods_buf: [max_exepath]u8 = undefined;
+    const mods = appPath(&mods_buf, game.name, "mods");
+    var text_buf: [max_exepath * 3]u8 = undefined;
+    const text = if (game.running()) |r|
+        std.fmt.bufPrint(
+            &text_buf,
+            "Read {s}, then help me mod {s}. It is running as pid {} and its mods go in {s}. I want: ",
+            .{ platform.agentPromptPath(), game.name, r.pid, mods },
+        ) catch return
+    else
+        std.fmt.bufPrint(
+            &text_buf,
+            "Read {s}, then help me mod {s}. Its mods go in {s}. I want: ",
+            .{ platform.agentPromptPath(), game.name, mods },
+        ) catch return;
+    copyText(.copy_prompt, text);
 }
 
 const std = @import("std");

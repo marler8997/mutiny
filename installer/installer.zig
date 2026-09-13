@@ -264,7 +264,7 @@ fn installFile(install_dir: []const u8, dest_rel: []const u8, data: []const u8) 
         }
         const old = std.fmt.allocPrint(global.arena, "{s}.old", .{dest}) catch |e| oom(e);
         const old_w = wide(old);
-        _ = win32.DeleteFileW(old_w);
+        deleteFile(old);
         if (0 == win32.MoveFileExW(dest_w, old_w, .{ .REPLACE_EXISTING = 1 })) fail(
             "'{s}' is in use and cannot be moved aside, error={f}",
             .{ dest, win32.GetLastError() },
@@ -302,6 +302,11 @@ fn launch(argv: []const []const u8) void {
     child.spawn() catch |err| fail("launch '{s}' failed ({t})", .{ argv[0], err });
 }
 
+fn closeKey(key: win32.HKEY) void {
+    const err = win32.RegCloseKey(key);
+    if (err != .NO_ERROR) win32.panicWin32("RegCloseKey", err);
+}
+
 fn openEnvironmentKey() win32.HKEY {
     var key: ?win32.HKEY = null;
     const err = win32.RegOpenKeyExW(win32.HKEY_CURRENT_USER, win32.L("Environment"), 0, .{ .QUERY_VALUE = 1, .SET_VALUE = 1 }, &key);
@@ -331,7 +336,7 @@ fn writePath(key: win32.HKEY, kind: win32.REG_VALUE_TYPE, text: []const u16) voi
     const z = std.mem.concatWithSentinel(global.arena, u16, &.{text}, 0) catch |e| oom(e);
     const err = win32.RegSetValueExW(key, win32.L("Path"), 0, kind, @ptrCast(z.ptr), @intCast((z.len + 1) * 2));
     if (err != .NO_ERROR) fail("write the user PATH failed, error={f}", .{err});
-    _ = win32.SendMessageTimeoutW(
+    if (0 == win32.SendMessageTimeoutW(
         hwnd_broadcast,
         win32.WM_SETTINGCHANGE,
         0,
@@ -339,7 +344,7 @@ fn writePath(key: win32.HKEY, kind: win32.REG_VALUE_TYPE, text: []const u16) voi
         .{ .ABORTIFHUNG = 1 },
         5000,
         null,
-    );
+    )) std.log.warn("broadcasting the PATH change failed, error={f}", .{win32.GetLastError()});
 }
 
 fn pathHas(text: []const u16, dir: []const u8) bool {
@@ -352,7 +357,7 @@ fn pathHas(text: []const u16, dir: []const u8) bool {
 
 fn addToPath(dir: []const u8) void {
     const key = openEnvironmentKey();
-    defer _ = win32.RegCloseKey(key);
+    defer closeKey(key);
     const current = readPath(key);
     if (pathHas(current.text, dir)) {
         std.log.info("'{s}' is already on the user PATH", .{dir});
@@ -368,7 +373,7 @@ fn addToPath(dir: []const u8) void {
 
 fn removeFromPath(dir: []const u8) void {
     const key = openEnvironmentKey();
-    defer _ = win32.RegCloseKey(key);
+    defer closeKey(key);
     const current = readPath(key);
     if (!pathHas(current.text, dir)) return;
     var kept: std.ArrayListUnmanaged(u16) = .empty;
@@ -440,7 +445,7 @@ fn writeUninstallKey(install_dir: []const u8, uninstaller: []const u8, total_byt
     var key: ?win32.HKEY = null;
     const err = win32.RegCreateKeyExW(win32.HKEY_CURRENT_USER, uninstall_key, 0, null, .{}, .{ .SET_VALUE = 1, .QUERY_VALUE = 1 }, null, &key, null);
     if (err != .NO_ERROR) fail("create the uninstall entry failed, error={f}", .{err});
-    defer _ = win32.RegCloseKey(key.?);
+    defer closeKey(key.?);
     setString(key.?, win32.L("DisplayName"), "Mutiny");
     setString(key.?, win32.L("InstallLocation"), install_dir);
     setString(key.?, win32.L("DisplayIcon"), join(&.{ install_dir, gui_exe }));
@@ -511,7 +516,10 @@ fn runUninstall(install_dir: []const u8, self_exe: []const u8, temp: []const u8)
         std.fs.deleteTreeAbsolute(install_dir) catch |err| std.log.warn("delete '{s}' failed ({t})", .{ install_dir, err });
         std.log.info("deleted '{s}'", .{install_dir});
     } else {
-        _ = win32.RemoveDirectoryW(wide(install_dir));
+        if (0 == win32.RemoveDirectoryW(wide(install_dir))) switch (win32.GetLastError()) {
+            .ERROR_DIR_NOT_EMPTY, .ERROR_FILE_NOT_FOUND, .ERROR_PATH_NOT_FOUND => {},
+            else => |err| std.log.warn("remove '{s}' failed, error={f}", .{ install_dir, err }),
+        };
     }
 
     removeFromPath(join(&.{ install_dir, "bin" }));

@@ -20,9 +20,6 @@ pub const Result = struct {
     checked: bool,
 };
 
-const max_lines = 6;
-const max_buttons = 3;
-
 const points = struct {
     const width = 460;
     const margin = 16;
@@ -50,8 +47,6 @@ const global = struct {
 };
 
 pub fn show(spec: Spec) Result {
-    std.debug.assert(spec.lines.len <= max_lines);
-    std.debug.assert(spec.buttons.len >= 1 and spec.buttons.len <= max_buttons);
     global.spec = spec;
     global.checked = false;
     global.result = null;
@@ -94,11 +89,12 @@ pub fn show(spec: Spec) Result {
         hinstance,
         null,
     ) orelse win32.panicWin32("CreateWindowEx", win32.GetLastError());
-    defer _ = win32.DestroyWindow(hwnd);
+    defer if (0 == win32.DestroyWindow(hwnd)) win32.panicWin32("DestroyWindow", win32.GetLastError());
 
     {
         const dark: win32.BOOL = 1;
-        _ = win32.DwmSetWindowAttribute(hwnd, win32.DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, @sizeOf(win32.BOOL));
+        const hr = win32.DwmSetWindowAttribute(hwnd, win32.DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, @sizeOf(win32.BOOL));
+        if (hr < 0) std.log.warn("DwmSetWindowAttribute(dark mode) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
     place(hwnd, win32.dpiFromHwnd(hwnd));
     _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
@@ -148,10 +144,28 @@ const Layout = struct {
     client: win32.SIZE,
     icon: win32.RECT,
     title: win32.RECT,
-    lines: [max_lines]win32.RECT,
+    left: i32,
+    right: i32,
+    lines_top: i32,
+    line_height: i32,
     checkbox: win32.RECT,
     check_label: win32.RECT,
-    buttons: [max_buttons]win32.RECT,
+    buttons_top: i32,
+    button_width: i32,
+    button_height: i32,
+    gap: i32,
+
+    fn line(l: Layout, i: usize) win32.RECT {
+        const top = l.lines_top + l.line_height * @as(i32, @intCast(i));
+        return rect(l.left, top, l.right, top + l.line_height);
+    }
+
+    fn button(l: Layout, count: usize, i: usize) win32.RECT {
+        const n: i32 = @intCast(count);
+        const k: i32 = @intCast(i);
+        const x = l.right - (n - k) * l.button_width - (n - 1 - k) * l.gap;
+        return rect(x, l.buttons_top, x + l.button_width, l.buttons_top + l.button_height);
+    }
 };
 
 fn layoutFor(spec: Spec, dpi: u32) Layout {
@@ -164,31 +178,33 @@ fn layoutFor(spec: Spec, dpi: u32) Layout {
     const check = scale(points.check, dpi);
     const width = scale(points.width, dpi);
 
-    var l: Layout = undefined;
-    l.icon = rect(margin, margin, margin + icon, margin + icon);
-    l.title = rect(margin + icon + gap, margin, width - margin, margin + icon);
-    var y = margin + icon + gap;
-    for (spec.lines, 0..) |_, i| {
-        l.lines[i] = rect(margin, y, width - margin, y + line_height);
-        y += line_height;
-    }
+    const lines_top = margin + icon + gap;
+    var y = lines_top + line_height * @as(i32, @intCast(spec.lines.len));
+    var checkbox: win32.RECT = rect(0, 0, 0, 0);
+    var check_label: win32.RECT = rect(0, 0, 0, 0);
     if (spec.checkbox != null) {
         y += gap;
         const inset = @divTrunc(line_height - check, 2);
-        l.checkbox = rect(margin, y + inset, margin + check, y + inset + check);
-        l.check_label = rect(margin + check + gap, y, width - margin, y + line_height);
+        checkbox = rect(margin, y + inset, margin + check, y + inset + check);
+        check_label = rect(margin + check + gap, y, width - margin, y + line_height);
         y += line_height;
     }
-    y += gap * 2;
-    const count: i32 = @intCast(spec.buttons.len);
-    var x = width - margin - count * button_width - (count - 1) * gap;
-    for (spec.buttons, 0..) |_, i| {
-        l.buttons[i] = rect(x, y, x + button_width, y + button_height);
-        x += button_width + gap;
-    }
-    y += button_height + margin;
-    l.client = .{ .cx = width, .cy = y };
-    return l;
+    const buttons_top = y + gap * 2;
+    return .{
+        .client = .{ .cx = width, .cy = buttons_top + button_height + margin },
+        .icon = rect(margin, margin, margin + icon, margin + icon),
+        .title = rect(margin + icon + gap, margin, width - margin, margin + icon),
+        .left = margin,
+        .right = width - margin,
+        .lines_top = lines_top,
+        .line_height = line_height,
+        .checkbox = checkbox,
+        .check_label = check_label,
+        .buttons_top = buttons_top,
+        .button_width = button_width,
+        .button_height = button_height,
+        .gap = gap,
+    };
 }
 
 fn colorref(rgb: layout.Rgb) u32 {
@@ -196,34 +212,30 @@ fn colorref(rgb: layout.Rgb) u32 {
 }
 
 fn fill(hdc: win32.HDC, r: win32.RECT, rgb: layout.Rgb) void {
-    const brush = win32.CreateSolidBrush(colorref(rgb)) orelse win32.panicWin32("CreateSolidBrush", win32.GetLastError());
-    defer _ = win32.DeleteObject(brush);
-    _ = win32.FillRect(hdc, &r, brush);
+    const brush = win32.createSolidBrush(colorref(rgb));
+    defer win32.deleteObject(brush);
+    win32.fillRect(hdc, r, brush);
 }
 
 fn text(hdc: win32.HDC, utf8: []const u8, r: win32.RECT, rgb: layout.Rgb, center: bool) void {
     var buf: [layout.max_text_len + 1]u16 = undefined;
-    const wide = layout.toWide(utf8, &buf) catch |err| switch (err) {
-        error.InvalidWtf8 => {
-            std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
-            return;
-        },
-    };
-    _ = win32.SetTextColor(hdc, colorref(rgb));
+    const wide = layout.toWide(utf8, &buf);
+    if (wide.len == 0) return;
+    if (win32.CLR_INVALID == win32.SetTextColor(hdc, colorref(rgb))) win32.panicWin32("SetTextColor", win32.GetLastError());
     var bounds = r;
-    _ = win32.DrawTextW(hdc, wide, @intCast(wide.len), &bounds, .{
+    if (0 == win32.DrawTextW(hdc, wide, @intCast(wide.len), &bounds, .{
         .SINGLELINE = 1,
         .VCENTER = 1,
         .END_ELLIPSIS = 1,
         .NOPREFIX = 1,
         .CENTER = @intFromBool(center),
-    });
+    })) win32.panicWin32("DrawText", win32.GetLastError());
 }
 
 fn font(dpi: u32) win32.HFONT {
     if (global.font) |f| {
         if (global.font_dpi == dpi) return f;
-        _ = win32.DeleteObject(f);
+        win32.deleteObject(f);
         global.font = null;
     }
     const f = win32.CreateFontW(
@@ -256,17 +268,17 @@ fn paint(hwnd: win32.HWND) void {
     const size = win32.getClientSize(hwnd);
 
     fill(hdc, rect(0, 0, size.cx, size.cy), layout.color.window);
-    _ = win32.SetBkMode(hdc, .TRANSPARENT);
-    const old_font = win32.SelectObject(hdc, font(dpi));
-    defer _ = win32.SelectObject(hdc, old_font);
+    if (0 == win32.SetBkMode(hdc, .TRANSPARENT)) win32.panicWin32("SetBkMode", win32.GetLastError());
+    const old_font = win32.SelectObject(hdc, font(dpi)) orelse win32.panicWin32("SelectObject", win32.GetLastError());
+    defer if (win32.SelectObject(hdc, old_font) == null) win32.panicWin32("SelectObject", win32.GetLastError());
 
     const icon_size = l.icon.right - l.icon.left;
-    if (win32.LoadImageW(win32.GetModuleHandleW(null), @ptrFromInt(1), .ICON, icon_size, icon_size, win32.LR_SHARED)) |icon| {
-        _ = win32.DrawIconEx(hdc, l.icon.left, l.icon.top, @ptrCast(icon), icon_size, icon_size, 0, null, win32.DI_NORMAL);
-    }
+    const icon = win32.LoadImageW(win32.GetModuleHandleW(null), @ptrFromInt(1), .ICON, icon_size, icon_size, win32.LR_SHARED) orelse
+        win32.panicWin32("LoadImage(icon)", win32.GetLastError());
+    if (0 == win32.DrawIconEx(hdc, l.icon.left, l.icon.top, @ptrCast(icon), icon_size, icon_size, 0, null, win32.DI_NORMAL)) win32.panicWin32("DrawIconEx", win32.GetLastError());
     text(hdc, spec.title, l.title, layout.color.name, false);
     for (spec.lines, 0..) |line, i| {
-        text(hdc, line.text, l.lines[i], if (line.muted) layout.color.muted else layout.color.text, false);
+        text(hdc, line.text, l.line(i), if (line.muted) layout.color.muted else layout.color.text, false);
     }
     if (spec.checkbox) |label| {
         fill(hdc, l.checkbox, layout.color.button);
@@ -283,14 +295,14 @@ fn paint(hwnd: win32.HWND) void {
             .normal => .{ if (hot) layout.color.button_hover else layout.color.button, layout.color.text },
             .danger => .{ if (hot) layout.color.failed_hover else layout.color.failed, layout.color.bad },
         };
-        fill(hdc, l.buttons[i], back);
-        text(hdc, button.label, l.buttons[i], ink, true);
+        fill(hdc, l.button(spec.buttons.len, i), back);
+        text(hdc, button.label, l.button(spec.buttons.len, i), ink, true);
     }
 }
 
 fn hitButton(hwnd: win32.HWND, x: i32, y: i32) ?usize {
     const l = layoutFor(global.spec, win32.dpiFromHwnd(hwnd));
-    for (global.spec.buttons, 0..) |_, i| if (contains(l.buttons[i], x, y)) return i;
+    for (global.spec.buttons, 0..) |_, i| if (contains(l.button(global.spec.buttons.len, i), x, y)) return i;
     return null;
 }
 

@@ -1,10 +1,4 @@
-pub const panic = std.debug.FullPanic(panicFn);
-fn panicFn(msg: []const u8, ret_addr: ?usize) noreturn {
-    var buf: [1024]u8 = undefined;
-    const msg_z = std.fmt.bufPrintZ(&buf, "{s}", .{msg}) catch "panic message too long";
-    _ = win32.MessageBoxA(null, msg_z, "Mutiny Panic!", .{});
-    std.debug.defaultPanic(msg, ret_addr);
-}
+pub const panic = win32.messageBoxThenPanic(.{ .title = "Mutiny Panic!", .style = .{ .ICONHAND = 1 } });
 
 const global = struct {
     var hwnd: win32.HWND = undefined;
@@ -21,6 +15,7 @@ const global = struct {
     var wm_attached: u32 = undefined;
     var apps_dir_path_buf: [mutiny.appdata.max_path * 3]u8 = undefined;
     var apps_dir_path: []const u8 = undefined;
+    var agent_prompt_path: []const u8 = undefined;
 };
 
 const TextFormats = struct {
@@ -89,12 +84,12 @@ fn reportGame(pid: u32) void {
         return;
     };
     var name_buf: [layout.max_game_name * 3]u8 = undefined;
-    const name_len = std.unicode.calcWtf8Len(name_w);
-    if (name_len > name_buf.len) {
-        std.log.err("pid {} exe name is {} bytes, too long", .{ pid, name_len });
+    const name_need = std.unicode.calcWtf8Len(name_w);
+    if (name_need > name_buf.len) {
+        std.log.err("pid {} exe name is {} bytes, too long", .{ pid, name_need });
         return;
     }
-    std.debug.assert(name_len == std.unicode.wtf16LeToWtf8(&name_buf, name_w));
+    const name_len = std.unicode.wtf16LeToWtf8(&name_buf, name_w);
 
     const process = win32.OpenProcess(.{ .SYNCHRONIZE = 1 }, 0, pid) orelse {
         std.log.err("OpenProcess(SYNCHRONIZE) pid {} failed, error={f}", .{ pid, win32.GetLastError() });
@@ -289,6 +284,10 @@ pub fn main() void {
         error.Reported => std.debug.panic("Mutiny.dll is not beside this exe, see the log", .{}),
         else => |e| std.debug.panic("finding Mutiny.dll failed: {t}", .{e}),
     };
+    {
+        const exe_dir = std.fs.selfExeDirPathAlloc(global.arena.allocator()) catch |err| std.debug.panic("finding my own directory failed: {t}", .{err});
+        global.agent_prompt_path = std.fs.path.join(global.arena.allocator(), &.{ exe_dir, "mutiny-agent.md" }) catch |e| std.debug.panic("{t}", .{e});
+    }
 
     const hinstance = win32.GetModuleHandleW(null);
     {
@@ -423,6 +422,130 @@ pub fn invalidate() void {
 
 pub fn appsDirPath() []const u8 {
     return global.apps_dir_path;
+}
+
+pub const max_title_len = 128;
+
+pub fn setTitle(comptime fmt: []const u8, args: anytype) void {
+    var utf8: [max_title_len * 4]u8 = undefined;
+    const text = std.fmt.bufPrint(&utf8, fmt, args) catch |err| switch (err) {
+        error.NoSpaceLeft => &utf8,
+    };
+    var wide: [max_title_len + 1]u16 = undefined;
+    if (0 == win32.SetWindowTextW(global.hwnd, layout.toWide(text, &wide))) win32.panicWin32("SetWindowText", win32.GetLastError());
+}
+
+pub fn agentPromptPath() []const u8 {
+    return global.agent_prompt_path;
+}
+
+pub fn askSavePath(dir: []const u8, title: []const u8, buf: []u8) ?[]const u8 {
+    var dialog: *win32.IFileSaveDialog = undefined;
+    {
+        const hr = win32.CoCreateInstance(win32.CLSID_FileSaveDialog, null, win32.CLSCTX_INPROC_SERVER, win32.IID_IFileSaveDialog, @ptrCast(&dialog));
+        if (hr < 0) win32.panicHresult("CoCreateInstance(FileSaveDialog)", hr);
+    }
+    defer _ = dialog.IUnknown.Release();
+    {
+        const hr = dialog.IFileDialog.SetOptions(.{ .OVERWRITEPROMPT = 1, .NOCHANGEDIR = 1, .PATHMUSTEXIST = 1 });
+        if (hr < 0) win32.panicHresult("IFileDialog.SetOptions", hr);
+    }
+    {
+        var title_w: [max_title_len + 1]u16 = undefined;
+        const hr = dialog.IFileDialog.SetTitle(layout.toWide(title, &title_w));
+        if (hr < 0) win32.panicHresult("IFileDialog.SetTitle", hr);
+    }
+    {
+        var dir_w: [max_exepath + 2]u16 = undefined;
+        const dir_z = layout.toWide(dir, &dir_w);
+        var folder: *win32.IShellItem = undefined;
+        const hr = win32.SHCreateItemFromParsingName(dir_z, null, win32.IID_IShellItem, @ptrCast(&folder));
+        if (hr < 0) {
+            std.log.err("SHCreateItemFromParsingName '{s}' failed, hresult=0x{x}", .{ dir, @as(u32, @bitCast(hr)) });
+            return null;
+        }
+        defer _ = folder.IUnknown.Release();
+        const set_hr = dialog.IFileDialog.SetFolder(folder);
+        if (set_hr < 0) win32.panicHresult("IFileDialog.SetFolder", set_hr);
+    }
+    {
+        const hr = dialog.IFileDialog.IModalWindow.Show(global.hwnd);
+        if (hr == @as(win32.HRESULT, @bitCast(@as(u32, 0x800704C7)))) return null;
+        if (hr < 0) win32.panicHresult("IFileDialog.Show", hr);
+    }
+    var item: ?*win32.IShellItem = null;
+    {
+        const hr = dialog.IFileDialog.GetResult(&item);
+        if (hr < 0) win32.panicHresult("IFileDialog.GetResult", hr);
+    }
+    defer _ = item.?.IUnknown.Release();
+    var name: ?win32.PWSTR = null;
+    {
+        const hr = item.?.GetDisplayName(win32.SIGDN_FILESYSPATH, &name);
+        if (hr < 0) win32.panicHresult("IShellItem.GetDisplayName", hr);
+    }
+    defer win32.CoTaskMemFree(name);
+    const wide = std.mem.span(name.?);
+    const need = std.unicode.calcWtf8Len(wide);
+    if (need > buf.len) {
+        std.log.err("the chosen path is {} bytes, too long", .{need});
+        return null;
+    }
+    return buf[0..std.unicode.wtf16LeToWtf8(buf, wide)];
+}
+
+pub const ClipboardText = struct {
+    handle: isize,
+    buf: []u16,
+
+    pub fn alloc(units: usize) ?ClipboardText {
+        const handle = win32.GlobalAlloc(win32.GMEM_MOVEABLE, units * 2);
+        if (handle == 0) {
+            std.log.err("GlobalAlloc failed, error={f}", .{win32.GetLastError()});
+            return null;
+        }
+        const ptr: [*]u16 = @ptrCast(@alignCast(win32.GlobalLock(handle) orelse {
+            std.log.err("GlobalLock failed, error={f}", .{win32.GetLastError()});
+            globalFree(handle);
+            return null;
+        }));
+        return .{ .handle = handle, .buf = ptr[0..units] };
+    }
+
+    pub fn discard(text: ClipboardText) void {
+        globalUnlock(text.handle);
+        globalFree(text.handle);
+    }
+
+    pub fn commit(text: ClipboardText) void {
+        globalUnlock(text.handle);
+        if (0 == win32.OpenClipboard(global.hwnd)) {
+            std.log.err("OpenClipboard failed, error={f}", .{win32.GetLastError()});
+            globalFree(text.handle);
+            return;
+        }
+        defer if (0 == win32.CloseClipboard()) win32.panicWin32("CloseClipboard", win32.GetLastError());
+        if (0 == win32.EmptyClipboard()) {
+            std.log.err("EmptyClipboard failed, error={f}", .{win32.GetLastError()});
+            globalFree(text.handle);
+            return;
+        }
+        if (win32.SetClipboardData(@intFromEnum(win32.CF_UNICODETEXT), @ptrFromInt(@as(usize, @bitCast(text.handle)))) == null) {
+            std.log.err("SetClipboardData failed, error={f}", .{win32.GetLastError()});
+            globalFree(text.handle);
+        }
+    }
+};
+
+fn globalUnlock(handle: isize) void {
+    if (0 == win32.GlobalUnlock(handle)) switch (win32.GetLastError()) {
+        .NO_ERROR => {},
+        else => |err| win32.panicWin32("GlobalUnlock", err),
+    };
+}
+
+fn globalFree(handle: isize) void {
+    if (0 != win32.GlobalFree(handle)) win32.panicWin32("GlobalFree", win32.GetLastError());
 }
 
 pub fn openDirectory(path: []const u8) void {
@@ -821,12 +944,7 @@ pub const Painter = struct {
 
     pub fn text(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb, alignment: layout.TextAlign) void {
         var buf: [layout.max_text_len + 1]u16 = undefined;
-        const wide = layout.toWide(utf8, &buf) catch |err| switch (err) {
-            error.InvalidWtf8 => {
-                std.log.err("text is not valid WTF-8: '{s}'", .{utf8});
-                return;
-            },
-        };
+        const wide = layout.toWide(utf8, &buf);
         const format = switch (alignment) {
             .left => p.text_formats.left,
             .center => p.text_formats.center,

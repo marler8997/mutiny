@@ -96,31 +96,44 @@ pub const font_points = 10;
 pub const max_game_name = 255;
 pub const max_text_len = 512;
 
-pub fn toWide(utf8: []const u8, buf: []u16) error{InvalidWtf8}![:0]const u16 {
+pub fn toWide(utf8: []const u8, buf: []u16) [:0]const u16 {
     std.debug.assert(buf.len >= 2);
     const limit = buf.len - 2;
-    var take = utf8;
-    if (utf8.len > limit) {
-        var end = limit;
-        while (end > 0 and (utf8[end] & 0xC0) == 0x80) end -= 1;
-        take = utf8[0..end];
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < utf8.len) {
+        const len = std.unicode.utf8ByteSequenceLength(utf8[i]) catch 1;
+        const cp: u21 = if (i + len <= utf8.len) std.unicode.wtf8Decode(utf8[i..][0..len]) catch 0xFFFD else 0xFFFD;
+        const units: usize = if (cp >= 0x10000) 2 else 1;
+        if (out + units > limit) {
+            buf[out] = 0x2026;
+            out += 1;
+            break;
+        }
+        if (units == 2) {
+            const v = cp - 0x10000;
+            buf[out] = @intCast(0xD800 + (v >> 10));
+            buf[out + 1] = @intCast(0xDC00 + (v & 0x3FF));
+        } else {
+            buf[out] = @intCast(cp);
+        }
+        out += units;
+        i += len;
     }
-    var len = try std.unicode.wtf8ToWtf16Le(buf[0..limit], take);
-    if (take.len != utf8.len) {
-        buf[len] = 0x2026;
-        len += 1;
-    }
-    buf[len] = 0;
-    return buf[0..len :0];
+    buf[out] = 0;
+    return buf[0..out :0];
 }
 
 test toWide {
     var buf: [12]u16 = undefined;
-    try std.testing.expectEqualSlices(u16, &.{ 'h', 'i' }, try toWide("hi", &buf));
-    try std.testing.expectEqualSlices(u16, &.{ 'é', 'é', 'é', 'é', 'é', 0x2026 }, try toWide("é" ** 9, &buf));
-    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j' }, try toWide("abcdefghij", &buf));
-    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 0x2026 }, try toWide("abcdefghijk", &buf));
-    try std.testing.expectError(error.InvalidWtf8, toWide("\xff", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'h', 'i' }, toWide("hi", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é' }, toWide("é" ** 10, &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é', 'é', 0x2026 }, toWide("é" ** 11, &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j' }, toWide("abcdefghij", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 0x2026 }, toWide("abcdefghijk", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 0xD83D, 0xDE00, 'x' }, toWide("😀x", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 0xFFFD, 'b' }, toWide("a\xffb", &buf));
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 0xFFFD }, toWide("a\xe9", &buf));
 }
 
 const points = struct {
@@ -144,7 +157,9 @@ const points = struct {
     const dropdown_item_height = 26;
     const details_back_width = 70;
     const details_label_width = 90;
-    const details_button_width = 120;
+    const details_button_width = 130;
+    const details_row_button_width = 44;
+    const details_row_button_inset = 1;
 };
 
 pub const bar_text = struct {
@@ -206,21 +221,32 @@ pub const Key = enum { up, down, page_up, page_down, home, end, escape };
 pub const details_text = struct {
     pub const back = "← Games";
     pub const labels = [_][]const u8{ "Executable", "Process", "Directory", "Mods", "Log" };
-    pub const open_directory = "Open directory";
-    pub const open_log = "Open log";
+    pub const copy = "Copy";
+    pub const new = "New";
+    pub const copy_prompt = "Copy agent prompt";
+    pub const copied = "Copied";
+};
+
+pub const DetailsButton = enum { status, copy_prompt, copy_exe, copy_directory, new_mod, copy_mods, copy_log };
+pub const details_button_count = @typeInfo(DetailsButton).@"enum".fields.len;
+pub const DetailsRow = enum { executable, process, directory, mods, log };
+pub const details_row_count = @typeInfo(DetailsRow).@"enum".fields.len;
+
+const details_row_buttons = [_]struct { button: DetailsButton, row: DetailsRow }{
+    .{ .button = .copy_exe, .row = .executable },
+    .{ .button = .copy_directory, .row = .directory },
+    .{ .button = .new_mod, .row = .mods },
+    .{ .button = .copy_mods, .row = .mods },
+    .{ .button = .copy_log, .row = .log },
 };
 
 pub const Details = struct {
     back: Rect,
     icon: Rect,
     title: Rect,
-    label_column: i32,
-    value_left: i32,
-    rows_top: i32,
-    line_height: i32,
-    action: Rect,
-    open_directory: Rect,
-    open_log: Rect,
+    labels: [details_row_count]Rect,
+    values: [details_row_count]Rect,
+    buttons: [details_button_count]Rect,
 
     pub fn init(client: XY, s: f32) Details {
         const margin = scale(points.margin, s);
@@ -235,32 +261,70 @@ pub const Details = struct {
         const label_width = scale(points.details_label_width, s);
         const button_height = scale(points.button_height, s);
         const button_width = scale(points.details_button_width, s);
+        const row_button_width = scale(points.details_row_button_width, s);
+        const row_button_inset = scale(points.details_row_button_inset, s);
         const icon = scale(points.icon_size, s);
         const icon_left = margin + back_width + gap;
         const rows_top = head_bottom + gap;
-        const actions_top = rows_top + line_height * @as(i32, @intCast(details_text.labels.len)) + gap * 2;
+        const label_left = margin + pad;
+        const value_left = label_left + label_width;
+
+        var labels: [details_row_count]Rect = undefined;
+        var values: [details_row_count]Rect = undefined;
+        var buttons: [details_button_count]Rect = undefined;
+        for (0..details_row_count) |row| {
+            const top = rows_top + line_height * @as(i32, @intCast(row));
+            labels[row] = .{ .left = label_left, .top = top, .right = value_left, .bottom = top + line_height };
+            var right = margin + width;
+            var i = details_row_buttons.len;
+            while (i > 0) {
+                i -= 1;
+                const rb = details_row_buttons[i];
+                if (@intFromEnum(rb.row) != row) continue;
+                buttons[@intFromEnum(rb.button)] = .{
+                    .left = right - row_button_width,
+                    .top = top + row_button_inset,
+                    .right = right,
+                    .bottom = top + line_height - row_button_inset,
+                };
+                right -= row_button_width + row_button_inset;
+            }
+            values[row] = .{ .left = value_left, .top = top, .right = right - gap, .bottom = top + line_height };
+        }
+        const actions_top = rows_top + line_height * @as(i32, details_row_count) + gap * 2;
+        buttons[@intFromEnum(DetailsButton.status)] = Rect.ltwh(margin, actions_top, button_width, button_height);
+        buttons[@intFromEnum(DetailsButton.copy_prompt)] = Rect.ltwh(margin + button_width + gap, actions_top, button_width, button_height);
+
         return .{
             .back = .{ .left = margin, .top = head_top, .right = margin + back_width, .bottom = head_bottom },
             .icon = Rect.ltwh(icon_left, head_top + @divTrunc(bar_height - icon, 2), icon, icon),
             .title = .{ .left = icon_left + icon + gap, .top = head_top, .right = margin + width, .bottom = head_bottom },
-            .label_column = margin + pad,
-            .value_left = margin + pad + label_width,
-            .rows_top = rows_top,
-            .line_height = line_height,
-            .action = Rect.ltwh(margin, actions_top, button_width, button_height),
-            .open_directory = Rect.ltwh(margin + button_width + gap, actions_top, button_width, button_height),
-            .open_log = Rect.ltwh(margin + (button_width + gap) * 2, actions_top, button_width, button_height),
+            .labels = labels,
+            .values = values,
+            .buttons = buttons,
         };
     }
 
-    pub fn labelRect(d: Details, row: usize) Rect {
-        const top = d.rows_top + d.line_height * @as(i32, @intCast(row));
-        return .{ .left = d.label_column, .top = top, .right = d.value_left, .bottom = top + d.line_height };
+    pub fn button(d: Details, which: DetailsButton) Rect {
+        return d.buttons[@intFromEnum(which)];
     }
 
-    pub fn valueRect(d: Details, row: usize, client: XY) Rect {
-        const top = d.rows_top + d.line_height * @as(i32, @intCast(row));
-        return .{ .left = d.value_left, .top = top, .right = client.x - d.label_column, .bottom = top + d.line_height };
+    pub fn hitButton(d: Details, p: XY) ?DetailsButton {
+        for (d.buttons, 0..) |r, i| if (r.contains(p)) return @enumFromInt(i);
+        return null;
+    }
+
+    pub fn label(d: Details, row: DetailsRow) Rect {
+        return d.labels[@intFromEnum(row)];
+    }
+
+    pub fn value(d: Details, row: DetailsRow) Rect {
+        return d.values[@intFromEnum(row)];
+    }
+
+    pub fn hitValue(d: Details, p: XY) ?DetailsRow {
+        for (d.values, 0..) |r, i| if (r.contains(p)) return @enumFromInt(i);
+        return null;
     }
 };
 
@@ -273,6 +337,7 @@ pub fn scale(value: i32, s: f32) i32 {
 
 pub const Grid = struct {
     viewport: Rect,
+    left: i32,
     tile: XY,
     gap: XY,
     pad: XY,
@@ -305,8 +370,11 @@ pub const Grid = struct {
             content_height = contentHeight(count, columns, tile.y, gap.y);
             scrollbar = Rect.ltwh(client.x - margin - bar_width, top, bar_width, usable_y);
         }
+        const shown_columns: i32 = @intCast(@min(columns, @max(count, 1)));
+        const content_width = shown_columns * tile.x + (shown_columns - 1) * gap.x;
         var grid: Grid = .{
             .viewport = Rect.ltwh(margin, top, usable_x, usable_y),
+            .left = margin + @max(0, @divTrunc(usable_x - content_width, 2)),
             .tile = tile,
             .gap = gap,
             .pad = .{ .x = scale(points.tile_pad, s), .y = scale(points.tile_pad, s) },
@@ -360,7 +428,7 @@ pub const Grid = struct {
         const column: i32 = @intCast(index % grid.columns);
         const row: i32 = @intCast(index / grid.columns);
         return Rect.ltwh(
-            grid.viewport.left + column * (grid.tile.x + grid.gap.x),
+            grid.left + column * (grid.tile.x + grid.gap.x),
             grid.viewport.top + row * grid.rowPitch() - grid.scroll,
             grid.tile.x,
             grid.tile.y,

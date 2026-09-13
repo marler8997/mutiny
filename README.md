@@ -1,24 +1,26 @@
 # Mutiny
 
-A scriptable dll injector for modding Unity games.
+A scriptable mod tool for Unity games. Edit your mods while you play, no restart.
 
 # Install
 
-Download and run [MutinySetup.exe](https://github.com/marler8997/mutiny/releases/latest/download/MutinySetup.exe).
-It installs to `%LOCALAPPDATA%\mutiny`, adds the `mutiny` command to your PATH, and puts
-Mutiny in the Start Menu. Uninstall from Apps & Features; your mods stay unless you say
-otherwise.
+Download and run [MutinySetup.exe](https://github.com/marler8997/mutiny/releases/latest/download/MutinySetup.exe). It installs to `%LOCALAPPDATA%\mutiny`, adds the `mutiny` command to your PATH, and puts Mutiny in the Start Menu.
 
 # How
 
-Launch the game like normal. At any point you can inject `Mutiny.dll`. This can be done via a CLI:
+Play any Unity game like normal. Whenever you like, open Mutiny and attach it to the running game. From then on, Mutiny automatically loads any files saved to the game's `mods` folder. Every edit is automatically reloaded.
+
+The same is available from the command line, for scripts and AI agents:
 
 ```sh
-# scan every process to find a game/PID you want to inject
+# list running Unity games and whether Mutiny is attached
 mutiny scan
 
-# get Mutiny running in the game using the PID
+# attach to a running game by PID
 mutiny <PID> attach
+
+# or start a game with Mutiny already attached
+mutiny start <EXE>
 
 # run a one-off script and print what it logs
 mutiny <PID> run-script <NAME>
@@ -28,14 +30,12 @@ mutiny <PID> disable-mod <NAME>
 mutiny <PID> enable-mod <NAME>
 ```
 
-Once injected, Mutiny will continuously monitor the directory `%LOCALAPPDATA%\mutiny\app\InsertGameNameHere\mods` for script files and reload them when they change.
-
 Everything Mutiny writes lives under one directory per app, named after its exe without the extension:
 
 ```
 %LOCALAPPDATA%\mutiny\app\<Name>\
   exepath          the path to the executable
-  log              what the injected DLL logs, including @Log output from your scripts
+  log              what Mutiny logs from inside the game, including @Log output from your scripts
   mods\<name>      mods, run from the top on every frame
   scripts\<name>   one-off scripts, inert until you ask for them by name
   stdout.txt       captured only when Mutiny starts the game for you
@@ -70,7 +70,7 @@ and logged whenever it changes:
 ```
 info|mod 'stamina' loaded (250 bytes)
 info|stamina: no character
-info|stamina: enabled
+info|stamina: recovered
 ```
 
 To turn a mod off, untick it in the in-game panel, run `mutiny <PID> disable-mod stamina`, or

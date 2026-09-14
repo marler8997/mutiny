@@ -749,14 +749,14 @@ fn copyPrompt(game: *Game) void {
     const text = if (game.running()) |r|
         std.fmt.bufPrint(
             &text_buf,
-            "Read {s}, then help me mod {s}. It is running as pid {} and its mods go in {s}. I want: ",
-            .{ platform.agentPromptPath(), game.name, r.pid, mods },
+            "Read {s}, then help me mod {s}. It is running as pid {}, its mods go in {s}, and `mutiny decomp {s}` updates its code on disk before you read it. I want: ",
+            .{ platform.agentPromptPath(), game.name, r.pid, mods, game.name },
         ) catch return
     else
         std.fmt.bufPrint(
             &text_buf,
-            "Read {s}, then help me mod {s}. Its mods go in {s}. I want: ",
-            .{ platform.agentPromptPath(), game.name, mods },
+            "Read {s}, then help me mod {s}. Its mods go in {s}, and `mutiny decomp {s}` updates its code on disk before you read it. I want: ",
+            .{ platform.agentPromptPath(), game.name, mods, game.name },
         ) catch return;
     copyText(.copy_prompt, text);
 }

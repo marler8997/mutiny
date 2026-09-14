@@ -842,23 +842,14 @@ fn runScripts(dotnet_funcs: *const Funcs) void {
         var pipe_buf: [4096]u8 = undefined;
         var pipe_writer = pipe_file.writerStreaming(&pipe_buf);
         var write_error: ?error{WriteFailed} = null;
-        switch (script.kind) {
-            .builtin => |builtin_script| runBuiltin(
-                dotnet_funcs,
-                builtin_script,
-                &pipe_writer.interface,
-            ) catch |e| {
-                write_error = e;
-            },
-            .file => |*file| runOne(
-                dotnet_funcs,
-                script.name.slice(),
-                file.text,
-                &pipe_writer.interface,
-            ) catch |e| {
-                write_error = e;
-            },
-        }
+        runOne(
+            dotnet_funcs,
+            script.name.slice(),
+            script.text,
+            &pipe_writer.interface,
+        ) catch |e| {
+            write_error = e;
+        };
         // just in case we forgot to flush
         if (write_error == null) pipe_writer.interface.flush() catch |e| {
             write_error = e;
@@ -936,20 +927,6 @@ fn runOne(
     try out.flush();
 }
 
-fn runBuiltin(
-    dotnet_funcs: *const Funcs,
-    builtin_script: Builtin,
-    writer: *std.Io.Writer,
-) error{WriteFailed}!void {
-    switch (builtin_script) {
-        .assemblies => try builtins.writeAssemblies(&dotnet_funcs.builtins, writer, .names),
-        .decomp => try builtins.writeDecomp(&dotnet_funcs.builtins, writer),
-    }
-    try writer.flush();
-}
-
-pub const Builtin = builtins.Builtin;
-
 const ModUpdate = union(enum) {
     open_file_error: std.fs.File.OpenError,
     file_size_error: std.fs.File.GetEndPosError,
@@ -969,7 +946,6 @@ const Funcs = struct {
     get_root_domain: *const dotnet.shared.get_root_domain,
     vm: Vm.Funcs,
     gui: unitygui.Funcs,
-    builtins: builtins.Funcs,
     kind: union(dotnet.Kind) {
         mono: struct {
             hook: mutinymono.Funcs,
@@ -987,7 +963,6 @@ const win32 = @import("win32").everything;
 const mutiny = @import("mutiny");
 
 const alloc = @import("alloc.zig");
-const builtins = @import("builtins.zig");
 const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
 const dotnetload = mutiny.dotnetload;

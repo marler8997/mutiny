@@ -92,81 +92,40 @@ pub fn main() !void {
     );
     const dll = args[0];
 
-    const dotnet_kind: dotnet.Kind = blk: {
-        const basename = std.fs.path.basename(dll);
-        if (std.mem.eql(u8, basename, dotnet.dll_name_mono)) break :blk .mono;
-        if (std.mem.eql(u8, basename, dotnet.dll_name_il2cpp)) break :blk .il2cpp;
-        errExit(
-            "unable to determine dotnet kind, dll is named neither '{s}' nor '{s}'",
-            .{ dotnet.dll_name_mono, dotnet.dll_name_il2cpp },
-        );
+    const dotnet_kind = dotnethost.kindFromDllName(dll) orelse errExit(
+        "unable to determine dotnet kind, dll is named neither '{s}' nor '{s}'",
+        .{ dotnet.dll_name_mono, dotnet.dll_name_il2cpp },
+    );
+    std.log.info("loading the {t} runtime...", .{dotnet_kind});
+    const host = dotnethost.load(Funcs, "dotnet-test", dotnet_kind, dll, .{
+        .assembly_path = opt.assembly_path,
+        .data_dir = opt.data_dir,
+    }) catch |err| switch (err) {
+        error.Reported => std.process.exit(0xff),
     };
-    switch (dotnet_kind) {
+    std.log.info("LoadLibrary: {s}", .{switch (host.loaded) {
+        .directly => "SetDllDirectory not required",
+        .after_set_dll_directory => "after SetDllDirectory",
+    }});
+    const dotnet_funcs = &host.funcs;
+    switch (dotnet_funcs.kind) {
         .mono => {
-            if (opt.data_dir != null) errExit("--data-dir invalid for mono", .{});
+            loadStubAssembly(dotnet_funcs);
+            loadTestAssembly(dotnet_funcs);
         },
         .il2cpp => {
-            if (opt.assembly_path != null) errExit("--assembly-path invalid for il2cpp", .{});
-        },
-    }
-
-    const module = dynlib.load(dll) catch |err| switch (err) {
-        error.NotFound => errExit("'{s}' or one of its dependencies was not found", .{dll}),
-        error.Unexpected => @panic("unexpected error, see log"),
-    };
-
-    const dotnet_funcs: Funcs = blk: {
-        var missing_proc: [:0]const u8 = undefined;
-        break :blk dotnetload.resolve(Funcs, dotnet_kind, module, &missing_proc) catch errExit(
-            "'{s}' is missing proc '{s}'",
-            .{ dll, missing_proc },
-        );
-    };
-
-    const root_domain: *const dotnet.Domain = blk: switch (dotnet_funcs.kind) {
-        .mono => |*mono| {
-            if (opt.assembly_path) |path| {
-                mono.set_assemblies_path(path);
-            }
-
-            std.log.info("mono_jit_init...", .{});
-            const result = mono.jit_init("dotnet-test") orelse errExit(
-                "mono_jit_init failed",
-                .{},
-            );
-            std.log.info("mono_jit_init success", .{});
-            loadStubAssembly(&dotnet_funcs);
-            loadTestAssembly(&dotnet_funcs);
-            break :blk result;
-        },
-        .il2cpp => |*il2cpp| {
-            // il2cpp.register_log_callback((struct {
+            // dotnet_funcs.kind.il2cpp.register_log_callback((struct {
             //     pub fn log(m: [*:0]const u8) callconv(.c) void {
             //         std.log.info("IL2CPP: {s}", .{std.mem.span(m)});
             //     }
             // }).log);
-
-            if (opt.data_dir) |dir| {
-                il2cpp.set_data_dir(dir);
-            }
-
-            std.log.info("il2cpp_init...", .{});
-            il2cpp.init("dotnet-test");
-            const domain = dotnet_funcs.get_root_domain() orelse errExit(
-                "mono_get_root_domain returned NULL",
-                .{},
-            );
-            testDetour(&dotnet_funcs, module, domain);
-            break :blk domain;
+            testDetour(dotnet_funcs, host.module, host.domain);
         },
+    }
+    host.attachThread() catch |err| switch (err) {
+        error.Reported => std.process.exit(0xff),
     };
-
-    const thread = dotnet_funcs.thread_attach(root_domain) orelse errExit("mono_thread_attach failed", .{});
-    std.log.info("thread attach success 0x{x}", .{@intFromPtr(thread)});
-
-    // domain_get is how the Vm accesses the domain, make sure it's
-    // what we expect after attaching our thread to it
-    std.debug.assert(dotnet_funcs.domain_get() == root_domain);
+    std.log.info("thread attach success", .{});
 
     Vm.runTests(&dotnet_funcs.tests, findUnityVersion(arena, dll)) catch |err| {
         std.log.err("tests failed with {s}:", .{@errorName(err)});
@@ -334,7 +293,7 @@ const detour = @import("detour.zig");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
-const dotnetload = @import("dotnetload.zig");
+const dotnethost = @import("dotnethost.zig");
 const vmtest = @import("vmtest.zig");
 
 const UnityVersion = @import("UnityVersion.zig");

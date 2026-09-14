@@ -197,7 +197,7 @@ fn loadScript(name: []const u16, localappdata: []const u16, request: *const Load
     defer _ = global.file_arena.reset(.retain_capacity);
 
     if (readScript(name, localappdata, request, writer)) |text| {
-        dll_main.ioThreadQueueScript(request.pid, request.pipe, request.nameSlice(), .{ .file = text }) catch {
+        dll_main.ioThreadQueueScript(request.pid, request.pipe, request.nameSlice(), text) catch {
             reportError(writer, "out of memory creating script '{s}'", .{request.name.slice()}) catch {};
             win32.closeHandle(request.pipe);
         };

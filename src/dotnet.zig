@@ -71,11 +71,16 @@ pub const shared = struct {
     pub const field_get_value = fn (*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void;
     pub const field_set_value = fn (*const Object, *const ClassField, value: *const anyopaque) callconv(.c) void;
 
-    pub const method_get_flags = fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags;
+    pub const class_get_flags = fn (*const Class) callconv(.c) ClassFlags;
+    pub const class_get_interfaces = fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Class;
+    pub const class_get_nested_types = fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Class;
+
+    pub const method_get_flags = fn (*const Method, iflags: ?*MethodImplFlags) callconv(.c) MethodFlags;
     pub const method_get_name = fn (*const Method) callconv(.c) [*:0]const u8;
     pub const method_get_class = fn (*const Method) callconv(.c) ?*const Class;
 
     pub const type_get_type = fn (*const Type) callconv(.c) TypeKind;
+    pub const type_get_name = fn (*const Type) callconv(.c) ?[*:0]u8;
 
     pub const object_unbox = fn (*const Object) callconv(.c) *anyopaque;
     pub const object_get_class = fn (*const Object) callconv(.c) *const Class;
@@ -131,6 +136,16 @@ pub const mono = struct {
     ) callconv(.c) ?*const Assembly;
     pub const add_internal_call = fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void;
     pub const class_is_enum = fn (*const Class) callconv(.c) c_int;
+    pub const class_is_valuetype = fn (*const Class) callconv(.c) c_int;
+    pub const class_get_nesting_type = fn (*const Class) callconv(.c) ?*const Class;
+    pub const class_get = fn (*const Image, type_token: u32) callconv(.c) ?*const Class;
+    pub const assembly_open = fn (filename: [*:0]const u8, status: *MonoImageOpenStatus) callconv(.c) ?*const Assembly;
+    pub const image_get_name = fn (*const Image) callconv(.c) [*:0]const u8;
+    pub const image_get_table_info = fn (*const Image, table_id: c_int) callconv(.c) ?*const TableInfo;
+    pub const table_info_get_rows = fn (*const TableInfo) callconv(.c) c_int;
+    pub const signature_get_param_count = fn (*const MethodSignature) callconv(.c) u32;
+    pub const method_get_param_names = fn (*const Method, names: [*]?[*:0]const u8) callconv(.c) void;
+    pub const field_get_value_object = fn (*const Domain, *const ClassField, obj: ?*const Object) callconv(.c) ?*const Object;
 };
 
 pub const il2cpp = struct {
@@ -157,6 +172,9 @@ pub const il2cpp = struct {
     pub const object_new = fn (*const Class) callconv(.c) ?*const Object;
     pub const string_new_len = fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String;
     pub const class_is_enum = fn (*const Class) callconv(.c) bool;
+    pub const class_is_valuetype = fn (*const Class) callconv(.c) bool;
+    pub const class_get_declaring_type = fn (*const Class) callconv(.c) ?*const Class;
+    pub const field_get_value_object = fn (*const ClassField, obj: ?*const Object) callconv(.c) ?*const Object;
 };
 
 // V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
@@ -245,6 +263,28 @@ pub fn type_get_object(f: anytype, t: *const Type) ?*const Object {
         .il2cpp => |i| i.type_get_object(t),
     };
 }
+pub fn class_is_valuetype(f: anytype, class: *const Class) bool {
+    return switch (f.kind) {
+        .mono => |m| m.class_is_valuetype(class) != 0,
+        .il2cpp => |i| i.class_is_valuetype(class),
+    };
+}
+pub fn class_get_declaring_type(f: anytype, class: *const Class) ?*const Class {
+    return switch (f.kind) {
+        .mono => |m| m.class_get_nesting_type(class),
+        .il2cpp => |i| i.class_get_declaring_type(class),
+    };
+}
+pub fn field_get_value_object(f: anytype, field: *const ClassField, obj: ?*const Object) ?*const Object {
+    return switch (f.kind) {
+        .mono => |m| m.field_get_value_object(f.domain_get().?, field, obj),
+        .il2cpp => |i| i.field_get_value_object(field, obj),
+    };
+}
+
+pub const TableInfo = opaque {};
+pub const mono_table_typedef: c_int = 2;
+pub const mono_token_type_def: u32 = 0x02000000;
 
 pub const Protection = enum(u3) {
     compiler_controlled = 0x0, // 000
@@ -281,15 +321,57 @@ pub const MethodFlags = packed struct(u32) {
         fam_or_assem = 0x5, // 101 - family OR assembly (protected internal)
         public = 0x6, // 110
     },
-    unused1: bool = false,
+    unmanaged_export: bool = false,
     static: bool = false,
     final: bool = false,
     virtual: bool = false,
     hide_by_sig: bool = false,
-    unused2: u2 = 0,
+    new_slot: bool = false,
+    check_access_on_override: bool = false,
     abstract: bool = false,
     special_name: bool = false,
-    unused3: u20 = 0,
+    rt_special_name: bool = false,
+    pinvoke_impl: bool = false,
+    has_security: bool = false,
+    require_sec_object: bool = false,
+    unused: u16 = 0,
+};
+
+pub const MethodImplFlags = packed struct(u32) {
+    code_type: enum(u2) { il = 0, native = 1, optil = 2, runtime = 3 },
+    unmanaged: bool = false,
+    no_inlining: bool = false,
+    forward_ref: bool = false,
+    synchronized: bool = false,
+    no_optimization: bool = false,
+    preserve_sig: bool = false,
+    unused1: u4 = 0,
+    internal_call: bool = false,
+    unused2: u19 = 0,
+};
+
+pub const ClassFlags = packed struct(u32) {
+    visibility: enum(u3) {
+        not_public = 0,
+        public = 1,
+        nested_public = 2,
+        nested_private = 3,
+        nested_family = 4,
+        nested_assembly = 5,
+        nested_fam_and_assem = 6,
+        nested_fam_or_assem = 7,
+    },
+    layout: u2 = 0,
+    interface: bool = false,
+    unused1: bool = false,
+    abstract: bool = false,
+    sealed: bool = false,
+    unused2: bool = false,
+    special_name: bool = false,
+    unused3: bool = false,
+    import: bool = false,
+    serializable: bool = false,
+    unused4: u18 = 0,
 };
 
 pub const TypeKind = enum(c_int) {

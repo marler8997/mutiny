@@ -1986,50 +1986,6 @@ fn evalBuiltin(
             vm.discardValues(args_addr);
             _ = vm.mem.discardFrom(args_addr);
         },
-        .@"@LogClass" => {
-            const class = switch (vm.pop(args_addr)) {
-                .class => |c| c,
-                else => unreachable,
-            };
-            vm.discardValues(args_addr);
-            _ = vm.mem.discardFrom(args_addr);
-
-            if (vm.out == .pipe) vm.writeClass(class, vm.out.pipe) catch |err| switch (err) {
-                error.WriteFailed => return vm.setError(.{ .vm_out = .{
-                    .pos = builtin_extent.start,
-                } }),
-            };
-
-            {
-                const log_file, const maybe_open_log_error = logfile.global.get();
-                var buffer: [1024]u8 = undefined;
-                var log_writer = log_file.writer(&buffer);
-                const writer = &log_writer.interface;
-                const maybe_err: ?error{WriteFailed} = blk: {
-                    if (maybe_open_log_error) |*open_log_error| {
-                        logfile.writeLogPrefix(writer) catch |e| break :blk e;
-                        writer.print("{f}\n", .{open_log_error}) catch |e| break :blk e;
-                    }
-                    if (vm.out != .pipe) {
-                        vm.writeClass(class, writer) catch |e| break :blk e;
-                    } else {
-                        const class_name = vm.dotnet_funcs.class_get_name(class);
-                        const class_namespace = vm.dotnet_funcs.class_get_namespace(class);
-                        logfile.writeLogPrefix(writer) catch |e| break :blk e;
-                        writer.print(
-                            "@LogClass|name='{s}' namespace='{s}' written to pipe\n",
-                            .{ class_name, class_namespace },
-                        ) catch |e| break :blk e;
-                        writer.flush() catch |e| break :blk e;
-                    }
-                    break :blk null;
-                };
-                if (maybe_err != null) return vm.setError(.{ .log_error = .{
-                    .pos = builtin_extent.start,
-                    .err = log_writer.err.?,
-                } });
-            }
-        },
         .@"@Assembly" => {
             const extent = switch (vm.pop(args_addr)) {
                 .string_literal => |e| e,
@@ -2233,41 +2189,6 @@ fn log(
     try writer.flush();
 }
 
-fn writeClass(
-    vm: *Vm,
-    class: *const dotnet.Class,
-    writer: *std.Io.Writer,
-) error{WriteFailed}!void {
-    const class_name = vm.dotnet_funcs.class_get_name(class);
-    const class_namespace = vm.dotnet_funcs.class_get_namespace(class);
-    try writer.print("@LogClass name='{s}' namespace='{s}':\n", .{ class_name, class_namespace });
-    {
-        var iterator: ?*anyopaque = null;
-        while (vm.dotnet_funcs.class_get_fields(class, &iterator)) |field| {
-            const name = vm.dotnet_funcs.field_get_name(field);
-            const flags = vm.dotnet_funcs.field_get_flags(field);
-            const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            const mutability: []const u8 = if (flags.literal)
-                "const   "
-            else if (flags.init_only)
-                "readonly"
-            else
-                "mutable ";
-            try writer.print(" - {s} {s} field '{s}'\n", .{ stinst, mutability, name });
-        }
-    }
-    {
-        var iterator: ?*anyopaque = null;
-        while (vm.dotnet_funcs.class_get_methods(class, &iterator)) |method| {
-            const name = vm.dotnet_funcs.method_get_name(method);
-            const flags = vm.dotnet_funcs.method_get_flags(method, null);
-            const stinst: []const u8 = if (flags.static) "static  " else "instance";
-            try writer.print(" - {s} method '{s}'\n", .{ stinst, name });
-        }
-    }
-    try writer.flush();
-}
-
 fn logOut(
     vm: *Vm,
     writer: *std.Io.Writer,
@@ -2333,7 +2254,15 @@ fn logValues(
                         try writer.print("<null-class {s}.{s}>", .{ namespace.slice(), name.slice() });
                     }
                 },
-                .class => try writer.print("<class>", .{}),
+                .class => |class| {
+                    const namespace = std.mem.span(vm.dotnet_funcs.class_get_namespace(class));
+                    const name = vm.dotnet_funcs.class_get_name(class);
+                    if (namespace.len == 0) {
+                        try writer.print("<class {s}>", .{name});
+                    } else {
+                        try writer.print("<class {s}.{s}>", .{ namespace, name });
+                    }
+                },
                 .class_method => try writer.print("<class-method>", .{}),
                 .null_object => try writer.print("<null-object>", .{}),
                 .object => |gc_handle| try writeObject(vm.dotnet_funcs, writer, gc_handle, vm.handle_tracker),
@@ -3516,7 +3445,6 @@ const Builtin = enum {
     @"@Exit",
     @"@HasField",
     @"@Log",
-    @"@LogClass",
     @"@Assembly",
     @"@TryAssembly",
     @"@Class",
@@ -3535,7 +3463,6 @@ const Builtin = enum {
             .@"@Exit" => null,
             .@"@HasField" => &.{ .{ .concrete = .object }, .{ .concrete = .string_literal } },
             .@"@Log" => null,
-            .@"@LogClass" => &.{.{ .concrete = .class }},
             .@"@Assembly" => &.{.{ .concrete = .string_literal }},
             .@"@TryAssembly" => &.{.{ .concrete = .string_literal }},
             .@"@Class" => &.{.{ .concrete = .assembly_field }},
@@ -3556,7 +3483,6 @@ pub const builtin_map = std.StaticStringMap(Builtin).initComptime(.{
     .{ "@Exit", .@"@Exit" },
     .{ "@HasField", .@"@HasField" },
     .{ "@Log", .@"@Log" },
-    .{ "@LogClass", .@"@LogClass" },
     .{ "@Assembly", .@"@Assembly" },
     .{ "@TryAssembly", .@"@TryAssembly" },
     .{ "@Class", .@"@Class" },
@@ -4662,14 +4588,14 @@ fn goodCodeTests(dotnet_funcs: *const Funcs) !void {
     try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var Int32 = @Class(mscorlib.System.Int32)
-        \\@LogClass(Int32)
+        \\@Log(Int32)
     );
     try testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
         \\var DateTime = @Class(mscorlib.System.DateTime)
         \\var now = DateTime.get_Now()
         \\@Log("now=", now)
-        \\@LogClass(DateTime)
+        \\@Log(@ClassOf(now))
         \\// can't log _dateData as it doesn't always fit in an i64
         \\//@Log("now._dateData=", now._dateData)
         \\@Log(now.ToString())

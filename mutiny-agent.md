@@ -21,7 +21,7 @@ works.
 
 1. `mutiny scan` - lists every running Unity game with its PID and whether Mutiny is attached.
 2. `mutiny <PID> attach` - gets Mutiny running in the process. Only needed once per unique PID.
-3. `mutiny <PID> run-script @decomp` - prints all information needed to decompile/introspect on the game including the runtime (mono vs il2cpp) and binary files.
+3. `mutiny decomp <Name>` - brings the on-disk copy of the game's code up to date. Always run it before reading the code: it is idempotent, rewrites only what the game changed, and returns at once when nothing did.
 4. Work out which classes and methods you need (see "Finding the right code").
 5. Write a script file, then run it and read the output.
 
@@ -316,20 +316,70 @@ if (pm.get_IsGrounded() == 0) {
 
 ## Finding the right code
 
-`mutiny <PID> run-script @decomp` gives you tab-separated lines:
+`mutiny decomp <Name>` keeps `%LOCALAPPDATA%\mutiny\app\<Name>\decomp\` up to date with the
+game: every assembly as C# stubs, named exactly the way a script names a type. The script
+expression `asm.ScheduleOne.PlayerScripts.Player`, where `asm` is `@Assembly("Assembly-CSharp")`,
+is the file `Assembly-CSharp\ScheduleOne.PlayerScripts.Player.cs`: a directory per assembly, and
+inside it one `.cs` file per type named by its full name. A nested type is inside its outer
+type's file, so `Character.CharacterRefs` is in `Character.cs`. Run it before you read anything
+there, every time; it compares each assembly with the game's files and rewrites only the ones
+that changed, so it costs nothing when the game has not changed and never leaves the copy
+stale. It prints what it did:
 
 ```
-runtime   mono
-exe       C:\...\REPO\REPO.exe
-assembly  Assembly-CSharp   C:\...\REPO_Data\Managed\Assembly-CSharp.dll
+  Assembly-CSharp: 1284 types, updated   <- the game's own code
+  Assembly-CSharp-firstpass: 28 types, updated   <- the game's own code
+  UnityEngine.CoreModule: 1109 types, updated
+  ...
+  223 assemblies, 24566 types
 ```
 
-Game-specific code is almost always in **`Assembly-CSharp`**. `UnityEngine.*` assemblies are the
-engine itself and are rarely what you want.
+Game-specific code is almost always in **`Assembly-CSharp`**. The `UnityEngine.*` assemblies are
+the engine (`Transform`, `GameObject`, `Input`, `Time`, ...), which a mod calls just as often.
 
-There is not yet a tool that lists a class's methods offline, so discovery is currently:
-`@LogClass(@ClassOf(someObject))` in a `scripts\` file prints the fields and methods of an
-object's class. Use that to check a member exists **before** you write a mod that depends on it.
+A file's name is the type's full name, so a directory listing of `Assembly-CSharp` is the list
+of its types, and a search over the tree answers the rest:
+`rg -l "class \w+ : UnityEngine.MonoBehaviour" Assembly-CSharp` lists every
+component the game defines, `rg -il stamina Assembly-CSharp` finds every file that mentions a
+word, and `rg "float health"` finds where a field is declared. Search the game's own assemblies
+first and widen to the whole `decomp\` directory when you need the engine. A type file looks
+like this:
+
+```csharp
+// assembly Assembly-CSharp
+public class Character : Photon.Pun.MonoBehaviourPun
+{
+    public static Character localCharacter;
+    public CharacterData data;
+    public Character.CharacterRefs refs;
+    public const string SKELETON_PREFAB = "Skeleton";
+
+    public bool get_IsLocal();
+    public void set_Ghost(PlayerGhost value);
+    public static bool get_localCharacterExists();
+
+    public class CharacterRefs
+    {
+        ...
+    }
+}
+```
+
+What to know when reading it:
+
+- It is C# syntax, but the names are the runtime's, which are the names a script uses: a C#
+  property `IsLocal` is the method `get_IsLocal()` and `set_IsLocal(value)`, there is no property
+  or event syntax, and constructors are `.ctor`. Primitive types are the C# keywords (`float`,
+  `int`, `bool`, `string`); everything else is a full name.
+- A nested type is written inside its outer type's file, and referred to as `Outer.Inner`.
+- `extern` marks a method whose body is inside the engine, not in managed code.
+- Enums list their members with values, and `const` fields show their value.
+- Only signatures are there today, not method bodies: whether a method clamps its argument or
+  where a field is assigned is not visible yet.
+
+`@Log(@ClassOf(someObject))` in a `scripts\` file prints the full name of an object's *runtime*
+class, which is the tool when you hold an object and don't know its type: it names the file
+under `decomp\` to read next.
 
 Private field names can differ between versions of a game (or of the .NET runtime it ships):
 `@HasField(obj, "name")` returns 1 or 0 at runtime, so a mod can branch on which name exists
@@ -374,8 +424,8 @@ Things that will surprise you:
   inside an `if` block is not caught by that check, but nothing tests it and `break`/`continue`
   across that boundary is unexplored — so write one loop at a time.
 - **No `else` yet.** Write a second `if` with the inverted condition.
-- **A `const` field cannot be assigned**, only read. `@LogClass` marks each field `mutable`,
-  `readonly` or `const`.
+- **A `const` field cannot be assigned**, only read. The decompiled code marks such fields
+  `const`.
 - **A statement whose value is unused is an error.** If you call a method that returns something
   and you don't want it, wrap it: `@Discard(obj.Method())`.
 - **You cannot reach a class straight off an assembly.** Call `@Class` first:
@@ -462,8 +512,7 @@ memory — see the rules below on argument types.
 | `@TryAssembly(s)` | **string literal** | same; returns nothing instead of erroring if absent |
 | `@Class(a.B)` | an **assembly field** | must be written `assembly.ClassName`, nothing else |
 | `@TryClass(a.B)` | an **assembly field** | same; returns nothing instead of erroring if the class is absent |
-| `@ClassOf(o)` | an object | the class of a live object |
-| `@LogClass(c)` | a class | prints its fields and methods |
+| `@ClassOf(o)` | an object | the class of a live object; `@Log` prints its full name |
 | `@Log(...)` | any number of anything | concatenates them; an error in a mod |
 | `@Exit(...)` | any number of anything | ends the run; with arguments, the concatenation is the run's outcome: in a mod this frame's result (logged only when it changes), elsewhere a log line |
 | `@ToString(v)` | anything | |

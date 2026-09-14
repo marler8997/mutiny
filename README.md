@@ -38,16 +38,20 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
   log              what Mutiny logs from inside the game, including @Log output from your scripts
   mods\<name>      mods, run from the top on every frame
   scripts\<name>   one-off scripts, inert until you ask for them by name
+  decomp\          the game's code as C# stubs, one file per type, kept up to date by `mutiny decomp <Name>`
   stdout.txt       captured only when Mutiny starts the game for you
   stderr.txt
 ```
 
-A name starting with `@` is a builtin that needs no file at all:
+`mutiny decomp <Name>` keeps that `decomp` directory up to date with the game: it reads the game's own
+runtime without needing the game to be running and writes every assembly out as C# stubs, laid out the way a
+script names things, i.e. `asm.Some.Namespace.Type` is `Assembly-CSharp\Some.Namespace.Type.cs`,
+with every field and method signature the way a script calls it.
 
-- `mutiny <PID> run-script @assemblies` prints the assemblies the game has loaded, one per line.
-- `mutiny <PID> run-script @decomp` prints where the game's code lives — the runtime kind, the exe, and each loaded assembly with its path on disk (or the `GameAssembly.dll` path, for il2cpp games where the assemblies have no separate files). Tab-separated, meant to be fed to other tools.
+It is idempotent and rewrites only the assemblies the game changed, so run it before reading
+the code in cases where the game may have been updated since the last time it ran.
 
-The difference between the two directories is *when they run*, not what's in them — both hold the same script language. A file in `mods\` runs by itself and re-runs whenever you edit it, which is what you want for a persistent effect like godmode. A file in `scripts\` does nothing until `mutiny run-script` names it, and its output comes back to your terminal instead of only going to the log, which is what you want for a one-off question like "which assemblies are loaded".
+The difference between the two directories is *when they run*, not what's in them — both hold the same script language. A file in `mods\` runs by itself and re-runs whenever you edit it, which is what you want for a persistent effect like godmode. A file in `scripts\` does nothing until `mutiny run-script` names it, and its output comes back to your terminal instead of only going to the log, which is what you want for a one-off question like "what is the player's health right now".
 
 # Example Mod
 

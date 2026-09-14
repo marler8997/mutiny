@@ -7,6 +7,7 @@ pub const Vm = @import("Vm.zig");
 pub const appdata = @import("appdata.zig");
 pub const detour = @import("detour.zig");
 pub const dotnet = @import("dotnet.zig");
+pub const dotnethost = @import("dotnethost.zig");
 pub const dotnetkind = @import("dotnetkind.zig");
 pub const dotnetload = @import("dotnetload.zig");
 pub const dynlib = @import("dynlib.zig");

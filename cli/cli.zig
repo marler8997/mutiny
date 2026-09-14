@@ -2,10 +2,12 @@ const usage =
     \\Usage:
     \\  mutiny scan                  every running Unity game (by its window), and whether Mutiny is attached.
     \\  mutiny start EXE [ARGS...]   launch a game with Mutiny.dll injected before it runs.
+    \\  mutiny decomp NAME           bring app\NAME\decomp\ up to date with the game's code, as C# stubs,
+    \\                               one file per type; NAME is a game Mutiny has attached to. Run it
+    \\                               before reading the code: it rewrites only what the game changed.
     \\
     \\  mutiny PID attach            get Mutiny running inside an already-running game.
     \\  mutiny PID run-script NAME   run scripts\NAME in an injected game and print its output
-    \\                               an @-prefixed NAME is a builtin, e.g. @assemblies.
     \\  mutiny PID enable-mod NAME   turn mods\NAME on or off, the same as its checkbox in
     \\  mutiny PID disable-mod NAME  the in-game panel; a disabled mod runs its .disable section
     \\
@@ -49,7 +51,8 @@ fn run() !u8 {
 
     if (std.mem.eql(u8, command, "scan")) return cmdScan(arena, &args);
     if (std.mem.eql(u8, command, "start")) return cmdStart(arena, &args);
-    errExit("unknown command '{s}' (expected scan, start, or a PID)", .{command});
+    if (std.mem.eql(u8, command, "decomp")) return decomp.go(arena, &args);
+    errExit("unknown command '{s}' (expected scan, start, decomp, or a PID)", .{command});
 }
 
 fn cmdScan(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
@@ -271,4 +274,5 @@ const mutiny = @import("mutiny");
 const mutinyipc = mutiny.mutinyipc;
 
 const cliscan = @import("cliscan.zig");
+const decomp = @import("decomp.zig");
 const injector = mutiny.injector;

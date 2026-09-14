@@ -3,31 +3,20 @@ const global = struct {
     var loaded: std.DoublyLinkedList = .{};
 };
 
-pub const Request = union(enum) {
-    file: []const u8,
-    builtin: Builtin,
-};
-
 pub fn queue(
     pid: u32,
     pipe: PipeHandle,
     script_name: ModNameSlice,
-    request: Request,
+    content: []const u8,
 ) error{OutOfMemory}!void {
-    const kind: Script.Kind = switch (request) {
-        .file => |content| .{ .file = .{ .text = try alloc.general().dupe(u8, content) } },
-        .builtin => |b| .{ .builtin = b },
-    };
-    errdefer switch (kind) {
-        .file => |f| alloc.general().free(f.text),
-        .builtin => {},
-    };
+    const text = try alloc.general().dupe(u8, content);
+    errdefer alloc.general().free(text);
     const script = try alloc.newScript();
     script.* = .{
         .list_node = .{},
         .client = .{ .pid = pid, .pipe = pipe },
         .name = .{ .len = script_name.len, .buffer = undefined },
-        .kind = kind,
+        .text = text,
     };
     @memcpy(script.name.buffer[0..script_name.len], script_name.slice());
     global.mutex.lock();
@@ -50,7 +39,6 @@ const mutiny = @import("mutiny");
 const alloc = @import("alloc.zig");
 
 const BoundedArray = mutiny.BoundedArray;
-const Builtin = @import("builtins.zig").Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");
 const Mutex = mutiny.Mutex;
 const PipeHandle = Script.PipeHandle;

@@ -235,32 +235,6 @@ fn reportError(
     return error.Reported;
 }
 
-fn parseBuiltin(
-    writer: *std.Io.Writer,
-    builtin_name: []const u8,
-    args: *mutinyipc.StringList,
-) error{ Reported, WriteFailed }!Builtin {
-    const builtin_script = std.meta.stringToEnum(
-        Builtin,
-        builtin_name[1..],
-    ) orelse return reportError(writer, "unknown builtin script '{s}'", .{builtin_name});
-
-    var arg_count: usize = 0;
-    while (args.next() catch return reportError(
-        writer,
-        "malformed run-script arguments",
-        .{},
-    )) |_| {
-        arg_count += 1;
-    }
-    if (arg_count != 0) return reportError(
-        writer,
-        "builtin script '{s}' takes no arguments but got {}",
-        .{ builtin_name, arg_count },
-    );
-    return builtin_script;
-}
-
 fn addScript(
     pid: u32,
     pipe: win32.HANDLE,
@@ -292,15 +266,6 @@ fn addScript(
     const name_a = name_buf[0..name_utf8_len];
     const script_name = ModNameSlice.init(name_a) orelse unreachable;
 
-    if (name_w[0] == '@') {
-        const builtin_script = try parseBuiltin(writer, name_a, args);
-        return scripts.queue(pid, pipe, script_name, .{ .builtin = builtin_script }) catch reportError(
-            writer,
-            "out of memory creating script '{f}'",
-            .{fmtW(name_w)},
-        );
-    }
-
     if (args.next() catch return reportError(
         writer,
         "malformed run-script arguments",
@@ -326,8 +291,6 @@ const mutiny = @import("mutiny");
 
 const mutinyipc = mutiny.mutinyipc;
 const mods = @import("mods.zig");
-const scripts = @import("scripts.zig");
 const dll_io = @import("dll_io");
 
-const Builtin = @import("builtins.zig").Builtin;
 const ModNameSlice = @import("ModNameSlice.zig");

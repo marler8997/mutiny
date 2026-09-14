@@ -484,7 +484,7 @@ fn runUninstall(install_dir: []const u8, self_exe: []const u8, temp: []const u8)
             .{ .text = "This removes Mutiny from" },
             .{ .text = install_dir, .muted = true },
         },
-        .checkbox = "Also delete my mods, scripts, logs and the cache",
+        .checkbox = "Also delete my mods, scripts and logs",
         .buttons = &.{
             .{ .label = "Uninstall", .style = .danger },
             .{ .label = "Cancel", .style = .normal },
@@ -513,6 +513,7 @@ fn runUninstall(install_dir: []const u8, self_exe: []const u8, temp: []const u8)
             else => |err| std.log.warn("remove '{s}' failed, error={f}", .{ dir, err }),
         };
     }
+    deleteDecompiledCode(join(&.{ install_dir, "app" }));
     if (delete_data) {
         std.fs.deleteTreeAbsolute(install_dir) catch |err| std.log.warn("delete '{s}' failed ({t})", .{ install_dir, err });
         std.log.info("deleted '{s}'", .{install_dir});
@@ -536,6 +537,36 @@ fn runUninstall(install_dir: []const u8, self_exe: []const u8, temp: []const u8)
         },
         .buttons = &.{.{ .label = "Close", .style = .normal }},
     });
+}
+
+fn deleteDecompiledCode(apps_dir: []const u8) void {
+    var apps = std.fs.openDirAbsolute(apps_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => {
+            std.log.warn("open '{s}' failed ({t})", .{ apps_dir, err });
+            return;
+        },
+    };
+    defer apps.close();
+    var it = apps.iterate();
+    while (it.next() catch |err| {
+        std.log.warn("list '{s}' failed ({t})", .{ apps_dir, err });
+        return;
+    }) |entry| {
+        if (entry.kind != .directory) continue;
+        var path_buf: [std.fs.max_name_bytes + "\\decomp".len]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}\\decomp", .{entry.name}) catch |err| switch (err) {
+            error.NoSpaceLeft => {
+                std.log.warn("'{s}' is longer than a directory name can be", .{entry.name});
+                continue;
+            },
+        };
+        apps.deleteTree(path) catch |err| {
+            std.log.warn("delete '{s}\\{s}' failed ({t})", .{ apps_dir, path, err });
+            continue;
+        };
+        std.log.info("deleted '{s}\\{s}'", .{ apps_dir, path });
+    }
 }
 
 fn deleteFile(path: []const u8) void {

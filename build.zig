@@ -423,27 +423,6 @@ pub fn build(b: *std.Build) void {
             ).dependOn(&start.step);
         }
     }
-
-    {
-        const dumpty_exe = b.addExecutable(.{
-            .name = "dumpty",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/dumpty.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        if (target.result.os.tag == .windows) {
-            dumpty_exe.root_module.addImport("win32", win32_mod);
-        }
-        const install = b.addInstallArtifact(dumpty_exe, .{});
-        b.step("install-dumpty", "").dependOn(&install.step);
-
-        const run = b.addRunArtifact(dumpty_exe);
-        run.step.dependOn(&install.step);
-        if (b.args) |args| run.addArgs(args);
-        b.step("dumpty", "").dependOn(&run.step);
-    }
 }
 
 const steam_common = "C:\\Program Files (x86)\\Steam\\steamapps\\common";

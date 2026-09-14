@@ -121,20 +121,10 @@ fn lineOutFmt(hdc: win32.HDC, row: i32, comptime fmt: []const u8, args: anytype)
     lineOut(hdc, row, std.fmt.bufPrint(&text_buf, fmt, args) catch @panic("string too long"));
 }
 
-const MonoDomain = opaque {};
-const MonoAssembly = opaque {};
-
 const MonoFuncs = struct {
-    jit_init: *const fn ([*:0]const u8) callconv(.c) ?*MonoDomain,
-    set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
-    domain_assembly_open: *const fn (*MonoDomain, [*:0]const u8) callconv(.c) ?*MonoAssembly,
-    pub fn init(mod: win32.HINSTANCE, proc_ref: *[:0]const u8) error{ProcNotFound}!MonoFuncs {
-        return MonoFuncs{
-            .jit_init = try mono_funcs.monoGet(mod, .jit_init, proc_ref),
-            .set_assemblies_path = try mono_funcs.monoGet(mod, .set_assemblies_path, proc_ref),
-            .domain_assembly_open = try mono_funcs.monoGet(mod, .domain_assembly_open, proc_ref),
-        };
-    }
+    jit_init: *const dotnet.mono.jit_init,
+    set_assemblies_path: *const dotnet.mono.set_assemblies_path,
+    domain_assembly_open: *const dotnet.mono.domain_assembly_open,
 };
 
 fn initMono() MonoState {
@@ -170,7 +160,7 @@ fn initMono() MonoState {
     std.log.info("successfully loaded '{f}'", .{fmtW(dll.load_string)});
 
     var missing_proc: [:0]const u8 = undefined;
-    const funcs = MonoFuncs.init(module, &missing_proc) catch return .{ .init_failed = .{
+    const funcs = dotnetload.resolveMono(MonoFuncs, module, &missing_proc) catch return .{ .init_failed = .{
         .dll_string = dll.load_string,
         .module = module,
         .reason = .{ .proc_not_found = missing_proc },
@@ -223,4 +213,5 @@ fn initMono() MonoState {
 const std = @import("std");
 const win32 = @import("win32").everything;
 const fmtW = std.unicode.fmtUtf16Le;
-const mono_funcs = @import("dotnetload.zig").template(MonoFuncs);
+const dotnet = @import("dotnet.zig");
+const dotnetload = @import("dotnetload.zig");

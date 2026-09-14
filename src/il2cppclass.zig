@@ -47,7 +47,7 @@ pub const Layout = struct {
 // Walks the class's fields through the discovered offsets and requires the result to match
 // what the public API reports, name for name. The probe only ever matches entry [0], so this
 // is what confirms the mirrored FieldInfo stride.
-fn validate(funcs: *const dotnet.Funcs, class: *const dotnet.Class, l: Layout) bool {
+fn validate(funcs: *const Funcs, class: *const dotnet.Class, l: Layout) bool {
     const fields = l.fieldsOf(class);
     var iterator: ?*anyopaque = null;
     for (fields) |*field| {
@@ -92,7 +92,7 @@ const layout_verified_from: UnityVersion = .{ .major = 2017, .minor = 1, .build 
 // already reads. Refused until there is a pre-2021.2 game to verify against.
 const supported_invoker_method_offset = 16;
 pub fn discover(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     unity_version: UnityVersion,
 ) DiscoverError!Layouts {
     if (!unity_version.atLeast(layout_verified_from.major, layout_verified_from.minor)) {
@@ -102,7 +102,7 @@ pub fn discover(
         });
         return error.UnsupportedUnityVersion;
     }
-    const il2cpp = &funcs.kind.il2cpp;
+    const il2cpp = &funcs.il2cpp;
     const domain = funcs.domain_get().?;
     var candidates: Candidates = .init();
     var method_candidates: MethodCandidates = .{};
@@ -209,14 +209,14 @@ const hierarchy_probe_classes = [_]struct { ns: [*:0]const u8, name: [*:0]const 
 // Class::Init runs SetupTypeHierarchy; class_get_method_from_name forces it without running the
 // managed static constructor (runtime_class_init does only the cctor, so it leaves typeHierarchy
 // null). The lookup result is discarded -- initializing the class is the whole point.
-fn forceClassInit(funcs: *const dotnet.Funcs, class: *const dotnet.Class) void {
+fn forceClassInit(funcs: *const Funcs, class: *const dotnet.Class) void {
     _ = funcs.class_get_method_from_name(class, "", 0);
 }
 // typeHierarchy/typeHierarchyDepth are filled by Class::Init (SetupTypeHierarchy), which the main
 // sweep never triggers, so probe them over framework classes initialized on purpose: forcing their
 // setup is safe, unlike running arbitrary game static constructors.
 fn discoverHierarchy(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
 ) DiscoverError!HierarchyOffsets {
     var candidates: HierarchyCandidates = .{};
@@ -360,13 +360,13 @@ const MethodCandidates = struct {
     }
 };
 fn probeMethod(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     method: *const dotnet.Method,
     c: *MethodCandidates,
 ) void {
     // MethodInfo is 0x58, so the last one in a metadata block ends before scan_len
     if (!readable(@intFromPtr(method), method_scan_len)) return;
-    const il2cpp = &funcs.kind.il2cpp;
+    const il2cpp = &funcs.il2cpp;
     const name = funcs.method_get_name(method);
     const class = funcs.method_get_class(method) orelse return;
     const return_type = il2cpp.method_get_return_type(method) orelse return;
@@ -599,7 +599,7 @@ fn readU8(class: *const dotnet.Class, slot: usize) u8 {
 // run and no guessed pointer is dereferenced, so this is safe to sweep over every class in a
 // game. Classes with differing field counts are what separate field_count from the
 // method/property/event counts sitting beside it.
-fn probeFields(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candidates) void {
+fn probeFields(funcs: *const Funcs, class: *const dotnet.Class, c: *Candidates) void {
     // Il2CppClass is 0x138 plus 0x10 per vtable entry, so a class with few virtuals is
     // smaller than scan_len and the sweep would read past its allocation.
     if (!readable(@intFromPtr(class), scan_len)) return;
@@ -622,7 +622,7 @@ fn probeFields(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candi
 // holds it with no extra dereference. Read-only: compares a header slot to a known pointer, never
 // dereferences a guessed one. Classes with differing parents are what separate `parent` from the
 // neighbouring castClass/element_class slots, which alias self on an ordinary class.
-fn probeParent(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candidates) void {
+fn probeParent(funcs: *const Funcs, class: *const dotnet.Class, c: *Candidates) void {
     const parent = funcs.class_get_parent(class) orelse return; // null for System.Object and interfaces
     for (&c.parent, 0..) |*alive, slot| {
         if (alive.*) alive.* = readPtr(class, slot) == @intFromPtr(parent);
@@ -630,7 +630,7 @@ fn probeParent(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candi
 }
 // depth including self: 1 for a root like System.Object, 4 for MonoBehaviour. Derived from the
 // public parent walk, so it needs no offset of its own to compute the expected value to probe for.
-fn computeDepth(funcs: *const dotnet.Funcs, class: *const dotnet.Class) u8 {
+fn computeDepth(funcs: *const Funcs, class: *const dotnet.Class) u8 {
     var depth: usize = 1;
     var cur = funcs.class_get_parent(class);
     while (cur) |parent| : (cur = funcs.class_get_parent(parent)) depth += 1;
@@ -640,7 +640,7 @@ fn computeDepth(funcs: *const dotnet.Funcs, class: *const dotnet.Class) u8 {
 // the computed value; the hierarchy pointer against its self-referential signature (the array's
 // last live entry is the class itself), which no other header pointer satisfies. Read-only apart
 // from dereferencing the hierarchy candidate, which is bounds-checked first.
-fn probeHierarchy(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *HierarchyCandidates) void {
+fn probeHierarchy(funcs: *const Funcs, class: *const dotnet.Class, c: *HierarchyCandidates) void {
     const depth = computeDepth(funcs, class);
     for (&c.type_hierarchy_depth, 0..) |*alive, slot| {
         if (alive.*) alive.* = readU8(class, slot) == depth;
@@ -658,7 +658,7 @@ fn probeHierarchy(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Hi
 }
 // klass->methods is `const MethodInfo**`, an array of pointers, so unlike `fields` the slot
 // holds the array rather than the first entry and needs one more dereference.
-fn probeMethodArray(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *Candidates) void {
+fn probeMethodArray(funcs: *const Funcs, class: *const dotnet.Class, c: *Candidates) void {
     var iterator: ?*anyopaque = null;
     const first = funcs.class_get_methods(class, &iterator) orelse return;
     var total: u16 = 1;
@@ -679,23 +679,23 @@ fn probeMethodArray(funcs: *const dotnet.Funcs, class: *const dotnet.Class, c: *
 }
 
 fn findClass(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
     namespace: [*:0]const u8,
     name: [*:0]const u8,
 ) ?*const dotnet.Class {
     for (assemblies) |assembly| {
-        const image = funcs.kind.il2cpp.assembly_get_image(assembly);
+        const image = funcs.il2cpp.assembly_get_image(assembly);
         if (funcs.class_from_name(image, namespace, name)) |class| {
             const got_name = std.mem.span(funcs.class_get_name(class));
             const got_namespace = std.mem.span(funcs.class_get_namespace(class));
             if (!std.mem.eql(u8, got_name, std.mem.span(name)) or !std.mem.eql(u8, got_namespace, std.mem.span(namespace))) {
                 std.debug.panic(
                     "class_from_name({s}, \"{s}\", \"{s}\") returned class 0x{x} named \"{s}.{s}\"",
-                    .{ funcs.kind.il2cpp.image_get_name(image), namespace, name, @intFromPtr(class), got_namespace, got_name },
+                    .{ funcs.il2cpp.image_get_name(image), namespace, name, @intFromPtr(class), got_namespace, got_name },
                 );
             }
-            std.log.info("{s}.{s} is class 0x{x} via {s}", .{ namespace, name, @intFromPtr(class), funcs.kind.il2cpp.image_get_name(image) });
+            std.log.info("{s}.{s} is class 0x{x} via {s}", .{ namespace, name, @intFromPtr(class), funcs.il2cpp.image_get_name(image) });
             return class;
         }
     }
@@ -785,7 +785,7 @@ pub const SelfTestError = error{
 // round-trip below can't see (method lookup and invoke never touch the inline vtable). The first
 // VirtualInvokeData sits at fixed_size, its `method` one pointer in; for System.Object every vtable
 // slot is one of its own virtual methods, so slot 0's method must appear in class_get_methods.
-fn vtableStartsAt(funcs: *const dotnet.Funcs, base: *const dotnet.Class, fixed_size: usize) bool {
+fn vtableStartsAt(funcs: *const Funcs, base: *const dotnet.Class, fixed_size: usize) bool {
     if (!readable(@intFromPtr(base), fixed_size + vtable_entry_size)) return false;
     const bytes: [*]const u8 = @ptrCast(base);
     const slot0_method: *align(1) const usize = @ptrCast(bytes + fixed_size + @sizeOf(usize));
@@ -805,7 +805,7 @@ fn vtableStartsAt(funcs: *const dotnet.Funcs, base: *const dotnet.Class, fixed_s
 // runtime code misbehave here. The value-type return turns a wrong invoker contract into a wrong
 // number rather than something that merely didn't crash.
 pub fn selfTest(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
     layouts: Layouts,
     unity_version: UnityVersion,
@@ -837,7 +837,7 @@ pub fn selfTest(
     // which forces Class::Init transitively, so the copy inherits initialized == 1; otherwise it
     // inherits 0 and a later Class::Init on the synthetic class faults reading metadata that
     // describes the base, not it.
-    funcs.kind.il2cpp.runtime_class_init(base);
+    funcs.il2cpp.runtime_class_init(base);
 
     if (!vtableStartsAt(funcs, base, fixed_size)) {
         std.log.err("il2cpp class header size 0x{x} did not validate against {s}'s vtable", .{
@@ -958,7 +958,7 @@ pub fn typeInfoFromTypeDefinitionIndexHook(index: c_int) callconv(.c) ?*const do
 fn registerInjected(
     id: InjectedClassId,
     class: *const dotnet.Class,
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
 ) void {
     const ref = global.getInjectedRef(id);
     std.debug.assert(ref.* == null);
@@ -974,7 +974,7 @@ const il2cpp_type_size = 16;
 // Derives a subclass of UnityEngine.MonoBehaviour and checks the runtime agrees via the public
 // IsAssignableFrom, exercising the discovered typeHierarchy offsets through real il2cpp code.
 pub fn subclassSelfTest(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
     layouts: Layouts,
     unity_version: UnityVersion,
@@ -1010,7 +1010,7 @@ pub fn subclassSelfTest(
         return error.MissingClass;
     };
     const inherited_name = funcs.method_get_name(inherited);
-    const inherited_params: c_int = @intCast(funcs.kind.il2cpp.method_get_param_count(inherited));
+    const inherited_params: c_int = @intCast(funcs.il2cpp.method_get_param_count(inherited));
 
     global.subclass_methods[0] = global.subclass_method.init(layouts.method, .{
         .name = subclass_update_name,
@@ -1074,7 +1074,7 @@ pub const InstantiateError = error{
 };
 
 fn invoke(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     what: []const u8,
     method: *const dotnet.Method,
     obj: ?*const dotnet.Object,
@@ -1090,7 +1090,7 @@ fn invoke(
 }
 
 pub fn instantiate(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
 ) InstantiateError!void {
     const sub = global.subclass_class orelse return error.NotBootstrapped;
@@ -1102,13 +1102,13 @@ pub fn instantiate(
     const dont_destroy = funcs.class_get_method_from_name(object_class, "DontDestroyOnLoad", 1) orelse return error.MissingMethod;
     const add_component = funcs.class_get_method_from_name(game_object_class, "AddComponent", 1) orelse return error.MissingMethod;
 
-    const game_object = funcs.object_new(game_object_class) orelse return error.ObjectNewFailed;
+    const game_object = funcs.il2cpp.object_new(game_object_class) orelse return error.ObjectNewFailed;
     _ = try invoke(funcs, "GameObject..ctor", ctor, game_object, null);
 
     var dont_destroy_args = [_]*anyopaque{@constCast(game_object)};
     _ = try invoke(funcs, "Object.DontDestroyOnLoad", dont_destroy, null, @ptrCast(&dont_destroy_args));
 
-    const type_object = funcs.type_get_object(funcs.class_get_type(sub_class)) orelse return error.TypeObjectFailed;
+    const type_object = funcs.il2cpp.type_get_object(funcs.class_get_type(sub_class)) orelse return error.TypeObjectFailed;
     var add_component_args = [_]*anyopaque{@constCast(type_object)};
     const component = try invoke(funcs, "GameObject.AddComponent", add_component, game_object, @ptrCast(&add_component_args)) orelse
         return error.AddComponentReturnedNull;
@@ -1130,6 +1130,39 @@ pub fn instantiate(
         std.log.warn("MonoBehaviour.set_useGUILayout is missing, the GUI layout pass stays enabled", .{});
     }
 }
+
+pub const Funcs = struct {
+    domain_get: *const dotnet.shared.domain_get,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_from_type: *const dotnet.shared.class_from_type,
+    class_get_name: *const dotnet.shared.class_get_name,
+    class_get_namespace: *const dotnet.shared.class_get_namespace,
+    class_get_type: *const dotnet.shared.class_get_type,
+    class_get_parent: *const dotnet.shared.class_get_parent,
+    class_get_fields: *const dotnet.shared.class_get_fields,
+    class_get_methods: *const dotnet.shared.class_get_methods,
+    class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
+    class_is_assignable_from: *const dotnet.shared.class_is_assignable_from,
+    field_get_name: *const dotnet.shared.field_get_name,
+    method_get_name: *const dotnet.shared.method_get_name,
+    method_get_flags: *const dotnet.shared.method_get_flags,
+    method_get_class: *const dotnet.shared.method_get_class,
+    object_unbox: *const dotnet.shared.object_unbox,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    il2cpp: struct {
+        domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+        assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+        image_get_name: *const dotnet.il2cpp.image_get_name,
+        image_get_class_count: *const dotnet.il2cpp.image_get_class_count,
+        image_get_class: *const dotnet.il2cpp.image_get_class,
+        method_get_return_type: *const dotnet.il2cpp.method_get_return_type,
+        method_get_param_count: *const dotnet.il2cpp.method_get_param_count,
+        runtime_class_init: *const dotnet.il2cpp.runtime_class_init,
+        object_new: *const dotnet.il2cpp.object_new,
+        type_get_object: *const dotnet.il2cpp.type_get_object,
+    },
+};
 
 const builtin = @import("builtin");
 const std = @import("std");

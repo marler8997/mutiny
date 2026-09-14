@@ -1,16 +1,16 @@
-fn installIl2cppFixture(funcs: *const dotnet.Funcs, unity_version: UnityVersion) !void {
-    const layouts = try il2cppclass.discover(funcs, unity_version);
+fn installIl2cppFixture(funcs: *const Funcs, unity_version: UnityVersion) !void {
     const il2cpp = &funcs.kind.il2cpp;
+    const layouts = try il2cppclass.discover(&il2cpp.class, unity_version);
     var assembly_count: usize = 0;
     const assemblies = il2cpp.domain_get_assemblies(funcs.domain_get().?, &assembly_count);
-    try il2cppclass.selfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
-    try il2cppclass.subclassSelfTest(funcs, assemblies[0..assembly_count], layouts, unity_version);
+    try il2cppclass.selfTest(&il2cpp.class, assemblies[0..assembly_count], layouts, unity_version);
+    try il2cppclass.subclassSelfTest(&il2cpp.class, assemblies[0..assembly_count], layouts, unity_version);
     try testIl2cppUpdate(funcs);
     if (Vm.enable_mutiny_test_class)
-        try il2cpptestfixture.install(funcs, std.heap.page_allocator, layouts, unity_version, assemblies[0..assembly_count]);
+        try il2cpptestfixture.install(&il2cpp.fixture, std.heap.page_allocator, layouts, unity_version, assemblies[0..assembly_count]);
 }
 
-fn testIl2cppUpdate(funcs: *const dotnet.Funcs) !void {
+fn testIl2cppUpdate(funcs: *const Funcs) !void {
     const sub_class = il2cppclass.global.subclassClass() orelse return error.SubclassNotBuilt;
     const update = funcs.class_get_method_from_name(sub_class, "Update", 0) orelse return error.SubclassUpdateNotFound;
     const cursor = @import("root").testMutinyUpdateCursor();
@@ -29,10 +29,11 @@ fn testIl2cppUpdate(funcs: *const dotnet.Funcs) !void {
     std.log.info("il2cpp synthetic subclass: Update and OnGUI reached the invoker and the root hooks", .{});
 }
 
-fn testMonoUpdate(funcs: *const dotnet.Funcs) !void {
-    const ticker = try mutinymono.load(funcs);
+fn testMonoUpdate(funcs: *const Funcs) !void {
+    const mono = &funcs.kind.mono;
+    const ticker = try mutinymono.load(&mono.hook);
     const update = funcs.class_get_method_from_name(ticker, "Update", 0) orelse return error.TickerUpdateNotFound;
-    const ticker_instance = funcs.object_new(ticker) orelse return error.TickerObjectNewFailed;
+    const ticker_instance = mono.object_new(funcs.domain_get().?, ticker) orelse return error.TickerObjectNewFailed;
     const cursor = @import("root").testMutinyUpdateCursor();
     var exception: ?*const dotnet.Object = null;
     _ = funcs.runtime_invoke(update, ticker_instance, null, &exception);
@@ -52,16 +53,37 @@ fn testMonoUpdate(funcs: *const dotnet.Funcs) !void {
     std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, Ticker.Update and OnGUI reached their internal calls", .{});
 }
 
-pub fn run(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {
-    if (dotnet_funcs.kind == .mono) try testMonoUpdate(dotnet_funcs);
-    if (dotnet_funcs.kind == .il2cpp) {
+pub const Funcs = struct {
+    vm: Vm.Funcs,
+    domain_get: *const dotnet.shared.domain_get,
+    class_get_name: *const dotnet.shared.class_get_name,
+    class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            hook: mutinymono.Funcs,
+            object_new: *const dotnet.mono.object_new,
+        },
+        il2cpp: struct {
+            class: il2cppclass.Funcs,
+            fixture: il2cpptestfixture.Funcs,
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+        },
+    },
+};
+
+pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
+    const dotnet_funcs = &funcs.vm;
+    if (funcs.kind == .mono) try testMonoUpdate(funcs);
+    if (funcs.kind == .il2cpp) {
         // il2cpp needs the version to gate the synthetic-class layout; mono never uses it, so a
         // mono game with an unreadable UnityPlayer.dll can still run these tests.
         const version = unity_version orelse {
             std.log.err("cannot run il2cpp tests without the unity version", .{});
             return error.MissingUnityVersion;
         };
-        try installIl2cppFixture(dotnet_funcs, version);
+        try installIl2cppFixture(funcs, version);
     }
     try Vm.testCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")

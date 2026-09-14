@@ -8,6 +8,7 @@ pub const appdata = @import("appdata.zig");
 pub const detour = @import("detour.zig");
 pub const dotnet = @import("dotnet.zig");
 pub const dotnetkind = @import("dotnetkind.zig");
+pub const dotnetload = @import("dotnetload.zig");
 pub const dynlib = @import("dynlib.zig");
 pub const getname = @import("getname.zig");
 pub const il2cppclass = @import("il2cppclass.zig");

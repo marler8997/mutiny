@@ -29,7 +29,7 @@ const global = struct {
     var io_thread: ?win32.HANDLE = null;
     var runtime: RuntimeState = .{ .find_lib = .{} };
     var update_hook: UpdateHookState = .pending;
-    var dotnet_funcs_store: dotnet.Funcs = undefined;
+    var dotnet_funcs_store: Funcs = undefined;
     var vm_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 };
 
@@ -534,14 +534,14 @@ const UpdateHookState = union(enum) {
 const BootstrapResult = enum { retry, installed, failed };
 
 fn updateUpdateHook(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     module: dynlib.Module,
     root_domain: *const dotnet.Domain,
 ) BootstrapResult {
     state: switch (global.update_hook) {
         .pending => switch (dotnet_funcs.kind) {
             .mono => {
-                const ticker = mutinymono.load(dotnet_funcs) catch |err| {
+                const ticker = mutinymono.load(&dotnet_funcs.kind.mono.hook) catch |err| {
                     std.log.err("loading the embedded MutinyMono.dll failed ({t}), mods will not run", .{err});
                     global.update_hook = .{ .failed = .{ .err = .{ .mono = err } } };
                     return .failed;
@@ -560,7 +560,7 @@ fn updateUpdateHook(
             },
         },
         .mono_instantiate => |*hook| {
-            mutinymono.instantiate(dotnet_funcs, hook.ticker) catch |err| switch (err) {
+            mutinymono.instantiate(&dotnet_funcs.kind.mono.hook, hook.ticker) catch |err| switch (err) {
                 error.MissingAssembly => {
                     coalescedLog(
                         ?mutinymono.InstantiateError,
@@ -597,7 +597,7 @@ fn updateUpdateHook(
 fn updateRuntime() union(enum) {
     not_ready,
     unrecoverable_error: RuntimeState.UnrecoverableError,
-    ready: *const dotnet.Funcs,
+    ready: *const Funcs,
 } {
     state: switch (global.runtime) {
         .find_lib => |*runtime| {
@@ -619,10 +619,11 @@ fn updateRuntime() union(enum) {
         },
         .init_funcs => |*runtime| {
             var missing_proc: [:0]const u8 = undefined;
-            global.dotnet_funcs_store = dotnet.Funcs.init(
-                &missing_proc,
+            global.dotnet_funcs_store = dotnetload.resolve(
+                Funcs,
                 runtime.lib.kind,
                 runtime.lib.module,
+                &missing_proc,
             ) catch {
                 // I'm pretty sure a missing function is not recoverable,
                 // the library isn't going to magically spawn a new function
@@ -669,7 +670,7 @@ const BootstrapIl2cppError = error{
 } || il2cppclass.DiscoverError || detour.FindError || detour.InstallError || il2cppclass.SelfTestError || il2cppclass.InstantiateError;
 
 fn bootstrapIl2cpp(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     module: dynlib.Module,
     root_domain: *const dotnet.Domain,
 ) BootstrapIl2cppError!void {
@@ -682,7 +683,8 @@ fn bootstrapIl2cpp(
     std.log.info("unity version: {f}", .{unity_version});
 
     const start = getNow();
-    const layouts = try il2cppclass.discover(dotnet_funcs, unity_version);
+    const class_funcs = &dotnet_funcs.kind.il2cpp.class;
+    const layouts = try il2cppclass.discover(class_funcs, unity_version);
     std.log.info("il2cpp layout verified in {} ms", .{getNow().since(start) / std.time.ns_per_ms});
 
     const target = try detour.findFunction(module, "il2cpp_class_from_il2cpp_type");
@@ -696,9 +698,9 @@ fn bootstrapIl2cpp(
 
     var assembly_count: usize = 0;
     const assemblies = dotnet_funcs.kind.il2cpp.domain_get_assemblies(root_domain, &assembly_count);
-    try il2cppclass.subclassSelfTest(dotnet_funcs, assemblies[0..assembly_count], layouts, unity_version);
+    try il2cppclass.subclassSelfTest(class_funcs, assemblies[0..assembly_count], layouts, unity_version);
     std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
-    try il2cppclass.instantiate(dotnet_funcs, assemblies[0..assembly_count]);
+    try il2cppclass.instantiate(class_funcs, assemblies[0..assembly_count]);
 }
 
 // Note: this is called on EVERY game update, which can happen hundreds of times
@@ -719,10 +721,10 @@ pub fn onGui() callconv(.c) void {
         .ready => |funcs| funcs,
         .unrecoverable_error, .not_ready => return,
     };
-    unitygui.draw(dotnet_funcs);
+    unitygui.draw(&dotnet_funcs.gui);
 }
 
-fn tickMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+fn tickMod(dotnet_funcs: *const Funcs, mod: *Mod) void {
     switch (mod.state) {
         .off => {},
         .stopping => {
@@ -733,7 +735,7 @@ fn tickMod(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
     }
 }
 
-fn applyModUpdates(dotnet_funcs: *const dotnet.Funcs) void {
+fn applyModUpdates(dotnet_funcs: *const Funcs) void {
     var retired: std.DoublyLinkedList = .{};
     mods.applyUpdates(&retired);
     while (retired.popFirst()) |node| {
@@ -743,11 +745,11 @@ fn applyModUpdates(dotnet_funcs: *const dotnet.Funcs) void {
             .stopping => runDisable(dotnet_funcs, mod),
             .on => |outcome| if (outcome != .not_run) runDisable(dotnet_funcs, mod),
         }
-        mod.destroy(dotnet_funcs);
+        mod.destroy(&dotnet_funcs.gui);
     }
 }
 
-fn runDisable(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+fn runDisable(dotnet_funcs: *const Funcs, mod: *Mod) void {
     const section = switch (mod.scan) {
         .err => return,
         .sections => |s| s.get(.disable) orelse return,
@@ -762,7 +764,7 @@ fn runDisable(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
 }
 
 fn runSection(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     file_text: []const u8,
     section: sections.Section,
 ) Mod.Outcome {
@@ -771,7 +773,7 @@ fn runSection(
     const text = section.text(file_text);
     var status: Mod.Status = .{ .len = 0, .buffer = undefined };
     var vm: Vm = .{
-        .dotnet_funcs = dotnet_funcs,
+        .dotnet_funcs = &dotnet_funcs.vm,
         .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
         .out = .{ .result = &status.buffer },
@@ -787,14 +789,14 @@ fn runSection(
         .err => |err| switch (err) {
             .vm_out => unreachable, // no writer
             else => blk: {
-                Mod.formatInto(&status, "{f}", .{err.fmtAtLine(text, section.first_line, dotnet_funcs)});
+                Mod.formatInto(&status, "{f}", .{err.fmtAtLine(text, section.first_line, &dotnet_funcs.vm)});
                 break :blk .{ .err = status };
             },
         },
     };
 }
 
-fn runUpdate(dotnet_funcs: *const dotnet.Funcs, mod: *Mod) void {
+fn runUpdate(dotnet_funcs: *const Funcs, mod: *Mod) void {
     const name = mod.name.slice();
     const outcome: Mod.Outcome = switch (mod.scan) {
         .err => |*err| blk: {
@@ -833,7 +835,7 @@ fn bootstrap() BootstrapResult {
     return result;
 }
 
-fn runScripts(dotnet_funcs: *const dotnet.Funcs) void {
+fn runScripts(dotnet_funcs: *const Funcs) void {
     while (scripts.take()) |script| {
         defer script.deinit();
         const pipe_file: std.fs.File = .{ .handle = script.client.pipe };
@@ -905,7 +907,7 @@ fn getNow() std.time.Instant {
 }
 
 fn runOne(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     name: []const u8,
     text: []const u8,
     out: *std.Io.Writer,
@@ -914,7 +916,7 @@ fn runOne(
     defer _ = global.vm_arena.reset(.retain_capacity);
 
     var vm: Vm = .{
-        .dotnet_funcs = dotnet_funcs,
+        .dotnet_funcs = &dotnet_funcs.vm,
         .text = text,
         .mem = .{ .allocator = global.vm_arena.allocator() },
         .out = .{ .pipe = out },
@@ -926,8 +928,8 @@ fn runOne(
         .err => |err| switch (err) {
             .vm_out => return error.WriteFailed,
             else => {
-                std.log.err("{s}:{f}", .{ name, err.fmt(text, dotnet_funcs) });
-                try out.print("{s}: error:{f}\n", .{ name, err.fmt(text, dotnet_funcs) });
+                std.log.err("{s}:{f}", .{ name, err.fmt(text, &dotnet_funcs.vm) });
+                try out.print("{s}: error:{f}\n", .{ name, err.fmt(text, &dotnet_funcs.vm) });
             },
         },
     };
@@ -935,13 +937,13 @@ fn runOne(
 }
 
 fn runBuiltin(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     builtin_script: Builtin,
     writer: *std.Io.Writer,
 ) error{WriteFailed}!void {
     switch (builtin_script) {
-        .assemblies => try builtins.writeAssemblies(dotnet_funcs, writer, .names),
-        .decomp => try builtins.writeDecomp(dotnet_funcs, writer),
+        .assemblies => try builtins.writeAssemblies(&dotnet_funcs.builtins, writer, .names),
+        .decomp => try builtins.writeDecomp(&dotnet_funcs.builtins, writer),
     }
     try writer.flush();
 }
@@ -963,6 +965,22 @@ pub fn arenaIsClear(arena: *std.heap.ArenaAllocator) bool {
     return first.next == null;
 }
 
+const Funcs = struct {
+    get_root_domain: *const dotnet.shared.get_root_domain,
+    vm: Vm.Funcs,
+    gui: unitygui.Funcs,
+    builtins: builtins.Funcs,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            hook: mutinymono.Funcs,
+        },
+        il2cpp: struct {
+            class: il2cppclass.Funcs,
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+        },
+    },
+};
+
 const builtin = @import("builtin");
 const std = @import("std");
 const win32 = @import("win32").everything;
@@ -972,6 +990,7 @@ const alloc = @import("alloc.zig");
 const builtins = @import("builtins.zig");
 const detour = mutiny.detour;
 const dotnet = mutiny.dotnet;
+const dotnetload = mutiny.dotnetload;
 const dynlib = mutiny.dynlib;
 const il2cppclass = mutiny.il2cppclass;
 const dll_io = @import("dll_io");

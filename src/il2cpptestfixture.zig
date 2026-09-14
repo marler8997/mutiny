@@ -101,13 +101,13 @@ const methods = [_]Method{
 };
 
 fn findClass(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     assemblies: []const *const dotnet.Assembly,
     namespace: [*:0]const u8,
     name: [*:0]const u8,
 ) ?*const dotnet.Class {
     for (assemblies) |assembly| {
-        const image = funcs.kind.il2cpp.assembly_get_image(assembly);
+        const image = funcs.il2cpp.assembly_get_image(assembly);
         if (funcs.class_from_name(image, namespace, name)) |class| return class;
     }
     return null;
@@ -121,7 +121,7 @@ var method_ptrs: [methods.len]*const dotnet.Method = undefined;
 var synthetic: ?il2cppclass.SyntheticClass = null;
 
 pub fn install(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     // performs a single allocation, ok to use std.heap.page_allocator
     allocator: std.mem.Allocator,
     layouts: il2cppclass.Layouts,
@@ -135,7 +135,7 @@ pub fn install(
         return error.MissingClass;
     };
     // Object may only be lazily set up; force its Class::Init so the copy inherits a valid class
-    funcs.kind.il2cpp.runtime_class_init(object);
+    funcs.il2cpp.runtime_class_init(object);
     const fixed_size = try il2cppclass.classFixedSize(unity_version);
 
     for (&methods, 0..) |m, i| {
@@ -176,6 +176,15 @@ pub fn install(
 pub fn testClass() *const dotnet.Class {
     return (synthetic orelse @panic("il2cpp test fixture not installed")).class();
 }
+
+pub const Funcs = struct {
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_get_type: *const dotnet.shared.class_get_type,
+    il2cpp: struct {
+        assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+        runtime_class_init: *const dotnet.il2cpp.runtime_class_init,
+    },
+};
 
 const std = @import("std");
 const dotnet = @import("dotnet.zig");

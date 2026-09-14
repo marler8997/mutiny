@@ -72,7 +72,7 @@ pub const ModLabel = struct {
     status: dotnet.GcHandleV2 = .null,
     status_wyhash: u64 = 0,
 
-    pub fn deinit(label: *ModLabel, dotnet_funcs: *const dotnet.Funcs) void {
+    pub fn deinit(label: *ModLabel, dotnet_funcs: *const Funcs) void {
         if (label.name != .null) dotnet_funcs.gchandle_free(label.name);
         if (label.status != .null) dotnet_funcs.gchandle_free(label.status);
         label.* = undefined;
@@ -93,7 +93,7 @@ const checkbox_inset: f32 = (line_height - checkbox_size) / 2;
 const checkbox_column: f32 = checkbox_size + margin;
 const title = "Mutiny";
 
-pub fn draw(dotnet_funcs: *const dotnet.Funcs) void {
+pub fn draw(dotnet_funcs: *const Funcs) void {
     const gui = state: switch (global.state) {
         .pending => {
             global.state = if (resolve(dotnet_funcs)) |gui| .{ .ready = gui } else |err| unavailable: {
@@ -245,7 +245,7 @@ fn toggleAt(box: Rect, x: f32, y: f32) ?*Mod {
 }
 
 const Context = struct {
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     gui: *const Gui,
     current_color: ?Color = null,
 
@@ -330,7 +330,7 @@ const Context = struct {
     }
 };
 
-fn newString(dotnet_funcs: *const dotnet.Funcs, text: []const u8) ?dotnet.GcHandleV2 {
+fn newString(dotnet_funcs: *const Funcs, text: []const u8) ?dotnet.GcHandleV2 {
     const string = dotnet_funcs.string_new_len(text.ptr, @intCast(text.len)) orelse {
         std.log.err("unity gui disabled: string_new_len failed for {} bytes", .{text.len});
         global.state = .unavailable;
@@ -340,7 +340,7 @@ fn newString(dotnet_funcs: *const dotnet.Funcs, text: []const u8) ?dotnet.GcHand
 }
 
 fn invoke(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     method: *const dotnet.Method,
     obj: ?*const dotnet.Object,
     args: ?**anyopaque,
@@ -374,7 +374,7 @@ const ResolveError = error{
     ManagedException,
 };
 
-fn resolve(dotnet_funcs: *const dotnet.Funcs) ResolveError!Gui {
+fn resolve(dotnet_funcs: *const Funcs) ResolveError!Gui {
     const imgui = findImage(dotnet_funcs, "UnityEngine.IMGUIModule") orelse return error.NoImguiModule;
     const core = findImage(dotnet_funcs, "UnityEngine.CoreModule") orelse return error.NoCoreModule;
     const gui_class = dotnet_funcs.class_from_name(imgui, "UnityEngine", "GUI") orelse return error.NoGuiClass;
@@ -438,12 +438,12 @@ fn resolve(dotnet_funcs: *const dotnet.Funcs) ResolveError!Gui {
     };
 }
 
-fn resolveString(dotnet_funcs: *const dotnet.Funcs, text: []const u8) error{StringNewFailed}!dotnet.GcHandleV2 {
+fn resolveString(dotnet_funcs: *const Funcs, text: []const u8) error{StringNewFailed}!dotnet.GcHandleV2 {
     const string = dotnet_funcs.string_new_len(text.ptr, @intCast(text.len)) orelse return error.StringNewFailed;
     return dotnet_funcs.gchandle_new(@ptrCast(string), false);
 }
 
-fn findLabelMethod(dotnet_funcs: *const dotnet.Funcs, class: *const dotnet.Class, param_count: usize) ?*const dotnet.Method {
+fn findLabelMethod(dotnet_funcs: *const Funcs, class: *const dotnet.Class, param_count: usize) ?*const dotnet.Method {
     var iterator: ?*anyopaque = null;
     while (dotnet_funcs.class_get_methods(class, &iterator)) |method| {
         if (!std.mem.eql(u8, std.mem.span(dotnet_funcs.method_get_name(method)), "Label")) continue;
@@ -457,7 +457,7 @@ fn findLabelMethod(dotnet_funcs: *const dotnet.Funcs, class: *const dotnet.Class
     return null;
 }
 
-fn paramIsClass(dotnet_funcs: *const dotnet.Funcs, param: *const dotnet.Type, kind: dotnet.TypeKind, name: []const u8) bool {
+fn paramIsClass(dotnet_funcs: *const Funcs, param: *const dotnet.Type, kind: dotnet.TypeKind, name: []const u8) bool {
     if (dotnet_funcs.type_get_type(param) != kind) return false;
     const class = dotnet_funcs.class_from_type(param) orelse return false;
     return std.mem.eql(u8, std.mem.span(dotnet_funcs.class_get_name(class)), name);
@@ -468,7 +468,7 @@ const ParamTypes = struct {
     len: usize,
 };
 
-fn paramTypes(dotnet_funcs: *const dotnet.Funcs, method: *const dotnet.Method) ParamTypes {
+fn paramTypes(dotnet_funcs: *const Funcs, method: *const dotnet.Method) ParamTypes {
     var result: ParamTypes = .{ .types = undefined, .len = 0 };
     switch (dotnet_funcs.kind) {
         .mono => |*mono| {
@@ -496,7 +496,7 @@ fn paramTypes(dotnet_funcs: *const dotnet.Funcs, method: *const dotnet.Method) P
     return result;
 }
 
-fn findImage(dotnet_funcs: *const dotnet.Funcs, name: []const u8) ?*const dotnet.Image {
+fn findImage(dotnet_funcs: *const Funcs, name: []const u8) ?*const dotnet.Image {
     switch (dotnet_funcs.kind) {
         .mono => |*mono| {
             var ctx: FindImageMono = .{ .dotnet_funcs = dotnet_funcs, .needle = name };
@@ -519,7 +519,7 @@ fn findImage(dotnet_funcs: *const dotnet.Funcs, name: []const u8) ?*const dotnet
 }
 
 const FindImageMono = struct {
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     needle: []const u8,
     match: ?*const dotnet.Image = null,
 };
@@ -534,6 +534,51 @@ fn findImageMonoCallback(assembly_opaque: *anyopaque, user_data: ?*anyopaque) ca
     if (!std.mem.eql(u8, std.mem.span(str), ctx.needle)) return;
     ctx.match = ctx.dotnet_funcs.assembly_get_image(assembly);
 }
+
+pub const Funcs = struct {
+    domain_get: *const dotnet.shared.domain_get,
+    assembly_get_image: *const dotnet.shared.assembly_get_image,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_from_type: *const dotnet.shared.class_from_type,
+    class_get_name: *const dotnet.shared.class_get_name,
+    class_get_methods: *const dotnet.shared.class_get_methods,
+    class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
+    method_get_name: *const dotnet.shared.method_get_name,
+    type_get_type: *const dotnet.shared.type_get_type,
+    object_unbox: *const dotnet.shared.object_unbox,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            assembly_foreach: *const dotnet.mono.assembly_foreach,
+            assembly_get_name: *const dotnet.mono.assembly_get_name,
+            assembly_name_get_name: *const dotnet.mono.assembly_name_get_name,
+            method_signature: *const dotnet.mono.method_signature,
+            signature_get_params: *const dotnet.mono.signature_get_params,
+            gchandle: dotnet.MonoGcHandle,
+            string_new_len: *const dotnet.mono.string_new_len,
+            object_new: *const dotnet.mono.object_new,
+        },
+        il2cpp: struct {
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+            assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+            image_get_name: *const dotnet.il2cpp.image_get_name,
+            method_get_param_count: *const dotnet.il2cpp.method_get_param_count,
+            method_get_param: *const dotnet.il2cpp.method_get_param,
+            gchandle_new: *const dotnet.il2cpp.gchandle_new,
+            gchandle_free: *const dotnet.il2cpp.gchandle_free,
+            gchandle_get_target: *const dotnet.il2cpp.gchandle_get_target,
+            string_new_len: *const dotnet.il2cpp.string_new_len,
+            object_new: *const dotnet.il2cpp.object_new,
+        },
+    },
+
+    pub const object_new = dotnet.object_new;
+    pub const string_new_len = dotnet.string_new_len;
+    pub const gchandle_new = dotnet.gchandle_new;
+    pub const gchandle_free = dotnet.gchandle_free;
+    pub const gchandle_get_target = dotnet.gchandle_get_target;
+};
 
 const std = @import("std");
 const mutiny = @import("mutiny");

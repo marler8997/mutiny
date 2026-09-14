@@ -1,6 +1,6 @@
 const Vm = @This();
 
-dotnet_funcs: *const dotnet.Funcs,
+dotnet_funcs: *const Funcs,
 error_result: ErrorResult = undefined,
 text: []const u8,
 mem: Memory,
@@ -142,7 +142,6 @@ const Type = enum {
 };
 
 const TypeContext = enum { @"return", param };
-
 
 pub fn deinit(vm: *Vm) void {
     vm.reset();
@@ -2347,7 +2346,7 @@ fn logValues(
 }
 
 fn writeObject(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     writer: *std.Io.Writer,
     gc_handle: dotnet.GcHandleV2,
     maybe_tracker: ?*HandleTracker,
@@ -2614,7 +2613,7 @@ const Value = union(enum) {
         gc_handle: dotnet.GcHandleV2,
         id_start: usize,
     },
-    pub fn discard(value: *Value, dotnet_funcs: *const dotnet.Funcs, maybe_tracker: ?*HandleTracker) void {
+    pub fn discard(value: *Value, dotnet_funcs: *const Funcs, maybe_tracker: ?*HandleTracker) void {
         switch (value.*) {
             .integer => {},
             .float => {},
@@ -3077,7 +3076,7 @@ const Fit = enum {
     exact,
     convertible,
     no,
-    fn of(funcs: *const dotnet.Funcs, arg: ArgKind, param_type: *const dotnet.Type) Fit {
+    fn of(funcs: *const Funcs, arg: ArgKind, param_type: *const dotnet.Type) Fit {
         const is_enum = paramEnum(funcs, param_type) != null;
         if (is_enum) return if (arg == .enum_literal) .exact else .no;
         const param = funcs.type_get_type(param_type);
@@ -3098,7 +3097,7 @@ const Fit = enum {
     }
 };
 
-fn methodFit(funcs: *const dotnet.Funcs, method: *const dotnet.Method, arg_kinds: []const ArgKind) Fit {
+fn methodFit(funcs: *const Funcs, method: *const dotnet.Method, arg_kinds: []const ArgKind) Fit {
     var fit: Fit = .exact;
     for (arg_kinds, 0..) |kind, i| {
         switch (Fit.of(funcs, kind, paramType(funcs, method, i).?)) {
@@ -3188,7 +3187,7 @@ fn resolveMethod(
     } });
 }
 
-fn paramCount(funcs: *const dotnet.Funcs, method: *const dotnet.Method) usize {
+fn paramCount(funcs: *const Funcs, method: *const dotnet.Method) usize {
     switch (funcs.kind) {
         .mono => |*mono| {
             const sig = mono.method_signature(method) orelse return 0;
@@ -3201,7 +3200,7 @@ fn paramCount(funcs: *const dotnet.Funcs, method: *const dotnet.Method) usize {
     }
 }
 
-fn paramType(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) ?*const dotnet.Type {
+fn paramType(funcs: *const Funcs, method: *const dotnet.Method, index: usize) ?*const dotnet.Type {
     switch (funcs.kind) {
         .mono => |*mono| {
             const sig = mono.method_signature(method) orelse return null;
@@ -3219,13 +3218,13 @@ fn paramType(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: us
     }
 }
 
-fn paramEnum(funcs: *const dotnet.Funcs, param_type: *const dotnet.Type) ?*const dotnet.Class {
+fn paramEnum(funcs: *const Funcs, param_type: *const dotnet.Type) ?*const dotnet.Class {
     if (funcs.type_get_type(param_type) != .valuetype) return null;
     const class = funcs.class_from_type(param_type) orelse return null;
     return if (funcs.class_is_enum(class)) class else null;
 }
 
-fn paramTypeKind(funcs: *const dotnet.Funcs, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
+fn paramTypeKind(funcs: *const Funcs, method: *const dotnet.Method, index: usize) dotnet.TypeKind {
     const param_type = paramType(funcs, method, index) orelse return .end;
     if (paramEnum(funcs, param_type)) |enum_class| return funcs.type_get_type(funcs.class_enum_basetype(enum_class));
     return funcs.type_get_type(param_type);
@@ -3449,7 +3448,7 @@ fn findAssemblyMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callcon
 }
 
 fn gchandleNew(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     object: *const dotnet.Object,
     maybe_tracker: ?*HandleTracker,
 ) dotnet.GcHandleV2 {
@@ -3471,7 +3470,7 @@ fn gchandleNew(
     return handle;
 }
 fn gchandleFree(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     handle: dotnet.GcHandleV2,
     maybe_tracker: ?*HandleTracker,
 ) void {
@@ -3486,7 +3485,7 @@ fn gchandleFree(
     dotnet_funcs.gchandle_free(handle);
 }
 fn gchandleTarget(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     handle: dotnet.GcHandleV2,
     maybe_tracker: ?*HandleTracker,
 ) *const dotnet.Object {
@@ -3826,10 +3825,10 @@ pub const Error = union(enum) {
         err.* = .oom;
         return error.Vm;
     }
-    pub fn fmt(err: *const Error, text: []const u8, dotnet_funcs: *const dotnet.Funcs) ErrorFmt {
+    pub fn fmt(err: *const Error, text: []const u8, dotnet_funcs: *const Funcs) ErrorFmt {
         return err.fmtAtLine(text, 1, dotnet_funcs);
     }
-    pub fn fmtAtLine(err: *const Error, text: []const u8, first_line: u32, dotnet_funcs: *const dotnet.Funcs) ErrorFmt {
+    pub fn fmtAtLine(err: *const Error, text: []const u8, first_line: u32, dotnet_funcs: *const Funcs) ErrorFmt {
         return .{ .err = err, .text = text, .first_line = first_line, .dotnet_funcs = dotnet_funcs };
     }
 };
@@ -3837,7 +3836,7 @@ const ErrorFmt = struct {
     err: *const Error,
     text: []const u8,
     first_line: u32,
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     fn lineNum(f: *const ErrorFmt, offset: usize) u32 {
         return f.first_line - 1 + lex.lineNum(f.text, offset);
     }
@@ -4182,17 +4181,17 @@ const ErrorFmt = struct {
     }
 };
 
-pub fn runTests(dotnet_funcs: *const dotnet.Funcs, unity_version: ?UnityVersion) !void {
-    try vmtest.run(dotnet_funcs, unity_version);
-    try badCodeTests(dotnet_funcs);
-    try goodCodeTests(dotnet_funcs);
+pub fn runTests(funcs: *const vmtest.Funcs, unity_version: ?UnityVersion) !void {
+    try vmtest.run(funcs, unity_version);
+    try badCodeTests(&funcs.vm);
+    try goodCodeTests(&funcs.vm);
 }
 
-pub fn testBadCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expected_error: []const u8) !void {
+pub fn testBadCode(dotnet_funcs: *const Funcs, text: []const u8, expected_error: []const u8) !void {
     return testBadCodeAtLine(dotnet_funcs, text, 1, expected_error);
 }
 
-pub fn testBadCodeAtLine(dotnet_funcs: *const dotnet.Funcs, text: []const u8, first_line: u32, expected_error: []const u8) !void {
+pub fn testBadCodeAtLine(dotnet_funcs: *const Funcs, text: []const u8, first_line: u32, expected_error: []const u8) !void {
     std.debug.print("testing bad code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4235,7 +4234,7 @@ pub fn testBadCodeAtLine(dotnet_funcs: *const dotnet.Funcs, text: []const u8, fi
     }
 }
 
-fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
+fn badCodeTests(dotnet_funcs: *const Funcs) !void {
     try testBadCode(dotnet_funcs, "var example_id = @Nothing()", "1: identifier 'example_id' was defined to nothing");
     try testBadCode(dotnet_funcs, "@Nothing", "1: syntax error: expected a '(' to start the builtin args but got EOF");
     try testBadCode(dotnet_funcs, "fn", "1: syntax error: expected an identifier after 'fn' but got EOF");
@@ -4398,7 +4397,7 @@ fn badCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
 
 const TestDomain = struct {
     thread: *const dotnet.Thread,
-    pub fn init(self: *TestDomain, dotnet_funcs: *const dotnet.Funcs) void {
+    pub fn init(self: *TestDomain, dotnet_funcs: *const Funcs) void {
         const root_domain = dotnet_funcs.get_root_domain() orelse @panic(
             "mono_get_root_domain returned null",
         );
@@ -4415,7 +4414,7 @@ const TestDomain = struct {
     }
 };
 
-pub fn testCode(dotnet_funcs: *const dotnet.Funcs, text: []const u8) !void {
+pub fn testCode(dotnet_funcs: *const Funcs, text: []const u8) !void {
     std.debug.print("testing code:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4461,7 +4460,7 @@ pub const ModExpect = union(enum) {
     err: []const u8,
 };
 
-pub fn testMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect: ModExpect) !void {
+pub fn testMod(dotnet_funcs: *const Funcs, text: []const u8, expect: ModExpect) !void {
     std.debug.print("testing mod:\n---\n{s}\n---\n", .{text});
 
     var test_domain: TestDomain = undefined;
@@ -4508,11 +4507,11 @@ pub fn testMod(dotnet_funcs: *const dotnet.Funcs, text: []const u8, expect: ModE
     vm.verifyStack();
 }
 
-fn haveMutinyTestDll(dotnet_funcs: *const dotnet.Funcs) bool {
+fn haveMutinyTestDll(dotnet_funcs: *const Funcs) bool {
     return dotnet_funcs.kind == .mono;
 }
 
-fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
+fn goodCodeTests(dotnet_funcs: *const Funcs) !void {
     const have_mutiny_test_dll = haveMutinyTestDll(dotnet_funcs);
 
     try testCode(dotnet_funcs, "fn foo(){}");
@@ -5012,6 +5011,74 @@ fn goodCodeTests(dotnet_funcs: *const dotnet.Funcs) !void {
         \\@Assert(decimal.hi == 1)
     );
 }
+
+pub const Funcs = struct {
+    domain_get: *const dotnet.shared.domain_get,
+    get_root_domain: *const dotnet.shared.get_root_domain,
+    thread_attach: *const dotnet.shared.thread_attach,
+    assembly_get_image: *const dotnet.shared.assembly_get_image,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_from_type: *const dotnet.shared.class_from_type,
+    class_get_name: *const dotnet.shared.class_get_name,
+    class_get_parent: *const dotnet.shared.class_get_parent,
+    class_enum_basetype: *const dotnet.shared.class_enum_basetype,
+    class_get_namespace: *const dotnet.shared.class_get_namespace,
+    class_get_fields: *const dotnet.shared.class_get_fields,
+    class_get_methods: *const dotnet.shared.class_get_methods,
+    class_get_field_from_name: *const dotnet.shared.class_get_field_from_name,
+    field_get_flags: *const dotnet.shared.field_get_flags,
+    field_get_name: *const dotnet.shared.field_get_name,
+    field_get_type: *const dotnet.shared.field_get_type,
+    field_get_value: *const dotnet.shared.field_get_value,
+    field_set_value: *const dotnet.shared.field_set_value,
+    method_get_flags: *const dotnet.shared.method_get_flags,
+    method_get_name: *const dotnet.shared.method_get_name,
+    type_get_type: *const dotnet.shared.type_get_type,
+    object_unbox: *const dotnet.shared.object_unbox,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    string_chars: *const dotnet.shared.string_chars,
+    string_length: *const dotnet.shared.string_length,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            runtime_class_init: *const dotnet.mono.runtime_class_init,
+            assembly_foreach: *const dotnet.mono.assembly_foreach,
+            assembly_get_name: *const dotnet.mono.assembly_get_name,
+            assembly_name_get_name: *const dotnet.mono.assembly_name_get_name,
+            class_vtable: *const dotnet.mono.class_vtable,
+            field_static_get_value: *const dotnet.mono.field_static_get_value,
+            field_static_set_value: *const dotnet.mono.field_static_set_value,
+            method_signature: *const dotnet.mono.method_signature,
+            signature_get_return_type: *const dotnet.mono.signature_get_return_type,
+            signature_get_params: *const dotnet.mono.signature_get_params,
+            gchandle: dotnet.MonoGcHandle,
+            string_new_len: *const dotnet.mono.string_new_len,
+            class_is_enum: *const dotnet.mono.class_is_enum,
+        },
+        il2cpp: struct {
+            runtime_class_init: *const dotnet.il2cpp.runtime_class_init,
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+            assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+            image_get_name: *const dotnet.il2cpp.image_get_name,
+            field_static_get_value: *const dotnet.il2cpp.field_static_get_value,
+            field_static_set_value: *const dotnet.il2cpp.field_static_set_value,
+            method_get_return_type: *const dotnet.il2cpp.method_get_return_type,
+            method_get_param_count: *const dotnet.il2cpp.method_get_param_count,
+            method_get_param: *const dotnet.il2cpp.method_get_param,
+            gchandle_new: *const dotnet.il2cpp.gchandle_new,
+            gchandle_free: *const dotnet.il2cpp.gchandle_free,
+            gchandle_get_target: *const dotnet.il2cpp.gchandle_get_target,
+            string_new_len: *const dotnet.il2cpp.string_new_len,
+            class_is_enum: *const dotnet.il2cpp.class_is_enum,
+        },
+    },
+
+    pub const string_new_len = dotnet.string_new_len;
+    pub const class_is_enum = dotnet.class_is_enum;
+    pub const gchandle_new = dotnet.gchandle_new;
+    pub const gchandle_free = dotnet.gchandle_free;
+    pub const gchandle_get_target = dotnet.gchandle_get_target;
+};
 
 const monolog = std.log.scoped(.mono);
 const gchandlelog = std.log.scoped(.mono_gchandle);

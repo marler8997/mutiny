@@ -6,8 +6,8 @@ pub const LoadError = error{
     MissingClass,
 };
 
-pub fn load(dotnet_funcs: *const dotnet.Funcs) LoadError!*const dotnet.Class {
-    const mono = &dotnet_funcs.kind.mono;
+pub fn load(dotnet_funcs: *const Funcs) LoadError!*const dotnet.Class {
+    const mono = &dotnet_funcs.mono;
 
     var status: dotnet.MonoImageOpenStatus = .ok;
     const image = mono.image_open_from_data(
@@ -53,7 +53,7 @@ pub const InstantiateError = error{
     AddComponentWrongClass,
 };
 
-pub fn instantiate(funcs: *const dotnet.Funcs, ticker: *const dotnet.Class) InstantiateError!void {
+pub fn instantiate(funcs: *const Funcs, ticker: *const dotnet.Class) InstantiateError!void {
     const core = findImage(funcs, "UnityEngine.CoreModule") orelse return error.MissingAssembly;
     const game_object_class = findClass(funcs, core, "UnityEngine", "GameObject") orelse return error.MissingClass;
     const object_class = findClass(funcs, core, "UnityEngine", "Object") orelse return error.MissingClass;
@@ -61,13 +61,13 @@ pub fn instantiate(funcs: *const dotnet.Funcs, ticker: *const dotnet.Class) Inst
     const dont_destroy = findMethod(funcs, object_class, "DontDestroyOnLoad", 1) orelse return error.MissingMethod;
     const add_component = findMethod(funcs, game_object_class, "AddComponent", 1) orelse return error.MissingMethod;
 
-    const game_object = funcs.object_new(game_object_class) orelse return error.ObjectNewFailed;
+    const game_object = funcs.mono.object_new(funcs.domain_get().?, game_object_class) orelse return error.ObjectNewFailed;
     _ = try invoke(funcs, "GameObject..ctor", ctor, game_object, null);
 
     var dont_destroy_args = [_]*anyopaque{@constCast(game_object)};
     _ = try invoke(funcs, "Object.DontDestroyOnLoad", dont_destroy, null, @ptrCast(&dont_destroy_args));
 
-    const type_object = funcs.type_get_object(funcs.class_get_type(ticker)) orelse return error.TypeObjectFailed;
+    const type_object = funcs.mono.type_get_object(funcs.domain_get().?, funcs.class_get_type(ticker)) orelse return error.TypeObjectFailed;
     var add_component_args = [_]*anyopaque{@constCast(type_object)};
     const component = try invoke(funcs, "GameObject.AddComponent", add_component, game_object, @ptrCast(&add_component_args)) orelse
         return error.AddComponentReturnedNull;
@@ -90,14 +90,14 @@ pub fn instantiate(funcs: *const dotnet.Funcs, ticker: *const dotnet.Class) Inst
     }
 }
 
-fn findClass(funcs: *const dotnet.Funcs, image: *const dotnet.Image, namespace: [*:0]const u8, name: [*:0]const u8) ?*const dotnet.Class {
+fn findClass(funcs: *const Funcs, image: *const dotnet.Image, namespace: [*:0]const u8, name: [*:0]const u8) ?*const dotnet.Class {
     return funcs.class_from_name(image, namespace, name) orelse {
-        std.log.err("class {s}.{s} not found in {s}", .{ namespace, name, funcs.kind.mono.image_get_filename(image) orelse "?" });
+        std.log.err("class {s}.{s} not found in {s}", .{ namespace, name, funcs.mono.image_get_filename(image) orelse "?" });
         return null;
     };
 }
 
-fn findMethod(funcs: *const dotnet.Funcs, class: *const dotnet.Class, name: [*:0]const u8, param_count: c_int) ?*const dotnet.Method {
+fn findMethod(funcs: *const Funcs, class: *const dotnet.Class, name: [*:0]const u8, param_count: c_int) ?*const dotnet.Method {
     return funcs.class_get_method_from_name(class, name, param_count) orelse {
         std.log.err("method {s}.{s}/{} not found", .{ funcs.class_get_name(class), name, param_count });
         return null;
@@ -105,7 +105,7 @@ fn findMethod(funcs: *const dotnet.Funcs, class: *const dotnet.Class, name: [*:0
 }
 
 fn invoke(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     what: []const u8,
     method: *const dotnet.Method,
     obj: ?*const dotnet.Object,
@@ -121,14 +121,14 @@ fn invoke(
 }
 
 const FindImage = struct {
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     needle: []const u8,
     match: ?*const dotnet.Image = null,
 };
 
-fn findImage(funcs: *const dotnet.Funcs, needle: []const u8) ?*const dotnet.Image {
+fn findImage(funcs: *const Funcs, needle: []const u8) ?*const dotnet.Image {
     var ctx: FindImage = .{ .funcs = funcs, .needle = needle };
-    funcs.kind.mono.assembly_foreach(&findImageCallback, &ctx);
+    funcs.mono.assembly_foreach(&findImageCallback, &ctx);
     return ctx.match;
 }
 
@@ -136,12 +136,34 @@ fn findImageCallback(assembly_opaque: *anyopaque, user_data: ?*anyopaque) callco
     const assembly: *const dotnet.Assembly = @ptrCast(assembly_opaque);
     const ctx: *FindImage = @ptrCast(@alignCast(user_data));
     if (ctx.match != null) return;
-    const mono = &ctx.funcs.kind.mono;
+    const mono = &ctx.funcs.mono;
     const name = mono.assembly_get_name(assembly) orelse return;
     const str = mono.assembly_name_get_name(name) orelse return;
     if (!std.mem.eql(u8, std.mem.span(str), ctx.needle)) return;
     ctx.match = ctx.funcs.assembly_get_image(assembly);
 }
+
+pub const Funcs = struct {
+    domain_get: *const dotnet.shared.domain_get,
+    assembly_get_image: *const dotnet.shared.assembly_get_image,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_get_name: *const dotnet.shared.class_get_name,
+    class_get_type: *const dotnet.shared.class_get_type,
+    class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    mono: struct {
+        image_open_from_data: *const dotnet.mono.image_open_from_data,
+        assembly_load_from: *const dotnet.mono.assembly_load_from,
+        add_internal_call: *const dotnet.mono.add_internal_call,
+        image_get_filename: *const dotnet.mono.image_get_filename,
+        assembly_foreach: *const dotnet.mono.assembly_foreach,
+        assembly_get_name: *const dotnet.mono.assembly_get_name,
+        assembly_name_get_name: *const dotnet.mono.assembly_name_get_name,
+        object_new: *const dotnet.mono.object_new,
+        type_get_object: *const dotnet.mono.type_get_object,
+    },
+};
 
 const mutiny_mono_dll = @embedFile("mutiny_mono_dll");
 

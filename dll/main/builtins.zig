@@ -6,7 +6,7 @@ pub const Builtin = enum {
 const AssemblyFormat = enum { names, decomp };
 
 pub fn writeDecomp(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     writer: *std.Io.Writer,
 ) error{WriteFailed}!void {
     try writer.print("runtime\t{s}\n", .{@tagName(dotnet_funcs.kind)});
@@ -35,7 +35,7 @@ pub fn writeDecomp(
 }
 
 const WriteAssemblies = struct {
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     writer: *std.Io.Writer,
     format: AssemblyFormat,
     index: usize = 0,
@@ -79,7 +79,7 @@ fn writeAssembliesMono(assembly_opaque: *anyopaque, user_data: ?*anyopaque) call
 }
 
 pub fn writeAssemblies(
-    dotnet_funcs: *const dotnet.Funcs,
+    dotnet_funcs: *const Funcs,
     writer: *std.Io.Writer,
     format: AssemblyFormat,
 ) error{WriteFailed}!void {
@@ -116,6 +116,24 @@ pub fn writeAssemblies(
         },
     }
 }
+
+pub const Funcs = struct {
+    domain_get: *const dotnet.shared.domain_get,
+    assembly_get_image: *const dotnet.shared.assembly_get_image,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            assembly_foreach: *const dotnet.mono.assembly_foreach,
+            assembly_get_name: *const dotnet.mono.assembly_get_name,
+            assembly_name_get_name: *const dotnet.mono.assembly_name_get_name,
+            image_get_filename: *const dotnet.mono.image_get_filename,
+        },
+        il2cpp: struct {
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+            assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+            image_get_name: *const dotnet.il2cpp.image_get_name,
+        },
+    },
+};
 
 const fmtW = std.unicode.fmtUtf16Le;
 

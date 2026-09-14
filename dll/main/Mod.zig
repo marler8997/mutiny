@@ -88,8 +88,8 @@ pub fn formatInto(status: *Status, comptime fmt: []const u8, args: anytype) void
     status.len = @intCast(text.len);
 }
 
-pub fn destroy(mod: *Mod, dotnet_funcs: *const dotnet.Funcs) void {
-    mod.label.deinit(dotnet_funcs);
+pub fn destroy(mod: *Mod, gui_funcs: *const unitygui.Funcs) void {
+    mod.label.deinit(gui_funcs);
     alloc.general().free(mod.text);
     mod.* = undefined;
     alloc.freeMod(mod);
@@ -97,7 +97,6 @@ pub fn destroy(mod: *Mod, dotnet_funcs: *const dotnet.Funcs) void {
 
 const std = @import("std");
 const mutiny = @import("mutiny");
-const dotnet = mutiny.dotnet;
 const sections = mutiny.sections;
 
 const alloc = @import("alloc.zig");

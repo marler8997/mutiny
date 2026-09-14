@@ -115,58 +115,42 @@ pub fn main() !void {
         error.Unexpected => @panic("unexpected error, see log"),
     };
 
-    const dotnet_funcs: dotnet.Funcs = blk: {
+    const dotnet_funcs: Funcs = blk: {
         var missing_proc: [:0]const u8 = undefined;
-        break :blk dotnet.Funcs.init(&missing_proc, dotnet_kind, module) catch errExit(
+        break :blk dotnetload.resolve(Funcs, dotnet_kind, module, &missing_proc) catch errExit(
             "'{s}' is missing proc '{s}'",
             .{ dll, missing_proc },
         );
     };
 
-    const root_domain: *const dotnet.Domain = blk: switch (dotnet_kind) {
-        .mono => {
-            const init_funcs: MonoInitFuncs = funcs: {
-                var missing_proc: [:0]const u8 = undefined;
-                break :funcs MonoInitFuncs.init(&missing_proc, module) catch errExit(
-                    "'{s}' is missing proc '{s}'",
-                    .{ dll, missing_proc },
-                );
-            };
-
+    const root_domain: *const dotnet.Domain = blk: switch (dotnet_funcs.kind) {
+        .mono => |*mono| {
             if (opt.assembly_path) |path| {
-                init_funcs.set_assemblies_path(path);
+                mono.set_assemblies_path(path);
             }
 
             std.log.info("mono_jit_init...", .{});
-            const result = init_funcs.jit_init("dotnet-test") orelse errExit(
+            const result = mono.jit_init("dotnet-test") orelse errExit(
                 "mono_jit_init failed",
                 .{},
             );
             std.log.info("mono_jit_init success", .{});
-            loadTestAssembly(&dotnet_funcs.kind.mono);
+            loadTestAssembly(&dotnet_funcs);
             break :blk result;
         },
-        .il2cpp => {
-            const init_funcs: Il2cppInitFuncs = funcs: {
-                var missing_proc: [:0]const u8 = undefined;
-                break :funcs Il2cppInitFuncs.getFuncs(&missing_proc, module) catch errExit(
-                    "'{s}' is missing proc '{s}'",
-                    .{ dll, missing_proc },
-                );
-            };
-
-            // init_funcs.register_log_callback((struct {
+        .il2cpp => |*il2cpp| {
+            // il2cpp.register_log_callback((struct {
             //     pub fn log(m: [*:0]const u8) callconv(.c) void {
             //         std.log.info("IL2CPP: {s}", .{std.mem.span(m)});
             //     }
             // }).log);
 
             if (opt.data_dir) |dir| {
-                init_funcs.set_data_dir(dir);
+                il2cpp.set_data_dir(dir);
             }
 
             std.log.info("il2cpp_init...", .{});
-            init_funcs.init("dotnet-test");
+            il2cpp.init("dotnet-test");
             const domain = dotnet_funcs.get_root_domain() orelse errExit(
                 "mono_get_root_domain returned NULL",
                 .{},
@@ -183,7 +167,7 @@ pub fn main() !void {
     // what we expect after attaching our thread to it
     std.debug.assert(dotnet_funcs.domain_get() == root_domain);
 
-    Vm.runTests(&dotnet_funcs, findUnityVersion(arena, dll)) catch |err| {
+    Vm.runTests(&dotnet_funcs.tests, findUnityVersion(arena, dll)) catch |err| {
         std.log.err("tests failed with {s}:", .{@errorName(err)});
         if (@errorReturnTrace()) |trace| {
             std.debug.dumpStackTrace(trace.*);
@@ -198,7 +182,7 @@ pub fn main() !void {
 // Locate the internal Class::FromIl2CppType, install a pass-through detour on it, and confirm the
 // hooked export still resolves the same class through the trampoline -- proving the trampoline+patch
 // are byte-correct before any real hook logic rides on them.
-fn testDetour(funcs: *const dotnet.Funcs, module: dynlib.Module, domain: *const dotnet.Domain) void {
+fn testDetour(funcs: *const Funcs, module: dynlib.Module, domain: *const dotnet.Domain) void {
     const target = detour.findFunction(module, "il2cpp_class_from_il2cpp_type") catch |e|
         errExit("locate Class::FromIl2CppType: {s}", .{@errorName(e)});
     std.log.info("detour: Class::FromIl2CppType at 0x{x}", .{target});
@@ -239,7 +223,7 @@ fn testDetour(funcs: *const dotnet.Funcs, module: dynlib.Module, domain: *const 
 }
 
 fn findClassByName(
-    funcs: *const dotnet.Funcs,
+    funcs: *const Funcs,
     domain: *const dotnet.Domain,
     namespace: [*:0]const u8,
     name: [*:0]const u8,
@@ -253,35 +237,37 @@ fn findClassByName(
     return null;
 }
 
-const Il2cppInitFuncs = struct {
-    register_log_callback: *const fn (*const fn ([*:0]const u8) callconv(.c) void) void,
-    set_data_dir: *const fn (path: [*:0]const u8) callconv(.c) void,
-    init: *const fn (name: [*:0]const u8) callconv(.c) void,
-    pub fn getFuncs(proc_ref: *[:0]const u8, mod: dynlib.Module) error{ProcNotFound}!Il2cppInitFuncs {
-        return .{
-            .register_log_callback = try il2cpp_funcs.il2cppGet(mod, .register_log_callback, proc_ref),
-            .set_data_dir = try il2cpp_funcs.il2cppGet(mod, .set_data_dir, proc_ref),
-            .init = try il2cpp_funcs.il2cppGet(mod, .init, proc_ref),
-        };
-    }
-};
-
-// functions that aren't needed by the injected Mutiny.dll but are needed to initialize
-// mono for this test executable.
-const MonoInitFuncs = struct {
-    jit_init: *const fn (name: [*:0]const u8) callconv(.c) ?*const dotnet.Domain,
-    set_assemblies_path: *const fn ([*:0]const u8) callconv(.c) void,
-    pub fn init(proc_ref: *[:0]const u8, mod: dynlib.Module) error{ProcNotFound}!MonoInitFuncs {
-        return .{
-            .jit_init = try mono_funcs.monoGet(mod, .jit_init, proc_ref),
-            .set_assemblies_path = try mono_funcs.monoGet(mod, .set_assemblies_path, proc_ref),
-        };
-    }
+const Funcs = struct {
+    tests: vmtest.Funcs,
+    get_root_domain: *const dotnet.shared.get_root_domain,
+    domain_get: *const dotnet.shared.domain_get,
+    thread_attach: *const dotnet.shared.thread_attach,
+    assembly_get_image: *const dotnet.shared.assembly_get_image,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_get_type: *const dotnet.shared.class_get_type,
+    class_get_name: *const dotnet.shared.class_get_name,
+    kind: union(dotnet.Kind) {
+        mono: struct {
+            jit_init: *const dotnet.mono.jit_init,
+            set_assemblies_path: *const dotnet.mono.set_assemblies_path,
+            image_open_from_data: *const dotnet.mono.image_open_from_data,
+            assembly_load_from: *const dotnet.mono.assembly_load_from,
+        },
+        il2cpp: struct {
+            register_log_callback: *const dotnet.il2cpp.register_log_callback,
+            set_data_dir: *const dotnet.il2cpp.set_data_dir,
+            init: *const dotnet.il2cpp.init,
+            domain_get_assemblies: *const dotnet.il2cpp.domain_get_assemblies,
+            assembly_get_image: *const dotnet.il2cpp.assembly_get_image,
+            image_get_class: *const dotnet.il2cpp.image_get_class,
+        },
+    },
 };
 
 const mutiny_test_dll = @embedFile("mutiny_test_dll");
 
-fn loadTestAssembly(mono: *const dotnet.MonoFuncs) void {
+fn loadTestAssembly(funcs: *const Funcs) void {
+    const mono = &funcs.kind.mono;
     var status: dotnet.MonoImageOpenStatus = .ok;
     const image = mono.image_open_from_data(
         mutiny_test_dll,
@@ -327,8 +313,8 @@ const detour = @import("detour.zig");
 const dynlib = @import("dynlib.zig");
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
-const mono_funcs = @import("dotnetload.zig").template(MonoInitFuncs);
-const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppInitFuncs);
+const dotnetload = @import("dotnetload.zig");
+const vmtest = @import("vmtest.zig");
 
 const UnityVersion = @import("UnityVersion.zig");
 const Vm = @import("Vm.zig");

@@ -39,288 +39,212 @@ pub const MonoImageOpenStatus = enum(c_int) {
     _,
 };
 
-pub const MonoFuncs = struct {
-    runtime_class_init: *const fn (*const VTable) callconv(.c) void,
-    assembly_foreach: *const fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void,
-    assembly_get_name: *const fn (*const Assembly) callconv(.c) ?*const AssemblyName,
-    assembly_name_get_name: *const fn (*const AssemblyName) callconv(.c) ?[*:0]const u8,
-    image_get_filename: *const fn (*const Image) callconv(.c) ?[*:0]const u8,
-    class_vtable: *const fn (*const Domain, *const Class) callconv(.c) *const VTable,
-    field_static_get_value: *const fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void,
-    field_static_set_value: *const fn (*const VTable, *const ClassField, value: *const anyopaque) callconv(.c) void,
-    method_signature: *const fn (*const Method) callconv(.c) ?*const MethodSignature,
-    signature_get_return_type: *const fn (*const MethodSignature) callconv(.c) ?*const Type,
-    signature_get_params: *const fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type,
-    gchandle: MonoGcHandle,
-    string_new_len: *const fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
-    object_new: *const fn (*const Domain, *const Class) callconv(.c) ?*const Object,
-    type_get_object: *const fn (*const Domain, *const Type) callconv(.c) ?*const Object,
-    image_open_from_data: *const fn (
+pub const ExportNames = struct {
+    mono: ?[:0]const u8 = null,
+    il2cpp: ?[:0]const u8 = null,
+};
+
+pub const shared = struct {
+    pub const domain_get = fn () callconv(.c) ?*const Domain;
+    pub const get_root_domain = fn () callconv(.c) ?*const Domain;
+    pub const thread_attach = fn (*const Domain) callconv(.c) ?*const Thread;
+    pub const thread_detach = fn (*const Thread) callconv(.c) void;
+
+    pub const assembly_get_image = fn (*const Assembly) callconv(.c) ?*const Image;
+
+    pub const class_from_name = fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class;
+    pub const class_from_type = fn (*const Type) callconv(.c) ?*const Class;
+    pub const class_get_name = fn (*const Class) callconv(.c) [*:0]const u8;
+    pub const class_get_parent = fn (*const Class) callconv(.c) ?*const Class;
+    pub const class_enum_basetype = fn (*const Class) callconv(.c) *const Type;
+    pub const class_get_type = fn (*const Class) callconv(.c) *const Type;
+    pub const class_get_namespace = fn (*const Class) callconv(.c) [*:0]const u8;
+    pub const class_get_fields = fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const ClassField;
+    pub const class_get_methods = fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Method;
+    pub const class_get_method_from_name = fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method;
+    pub const class_get_field_from_name = fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField;
+    pub const class_is_assignable_from = fn (klass: *const Class, oklass: *const Class) callconv(.c) bool;
+
+    pub const field_get_flags = fn (*const ClassField) callconv(.c) ClassFieldFlags;
+    pub const field_get_name = fn (*const ClassField) callconv(.c) [*:0]const u8;
+    pub const field_get_type = fn (*const ClassField) callconv(.c) *const Type;
+    pub const field_get_value = fn (*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void;
+    pub const field_set_value = fn (*const Object, *const ClassField, value: *const anyopaque) callconv(.c) void;
+
+    pub const method_get_flags = fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags;
+    pub const method_get_name = fn (*const Method) callconv(.c) [*:0]const u8;
+    pub const method_get_class = fn (*const Method) callconv(.c) ?*const Class;
+
+    pub const type_get_type = fn (*const Type) callconv(.c) TypeKind;
+
+    pub const object_unbox = fn (*const Object) callconv(.c) *anyopaque;
+    pub const object_get_class = fn (*const Object) callconv(.c) *const Class;
+
+    pub const runtime_invoke = fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object;
+
+    pub const string_chars = fn (*const String) callconv(.c) [*]const u16;
+    pub const string_length = fn (*const String) callconv(.c) c_int;
+
+    pub const free = fn (*anyopaque) callconv(.c) void;
+
+    pub const export_names = struct {
+        pub const get_root_domain: ExportNames = .{ .il2cpp = "mono_get_root_domain" };
+        pub const class_from_type: ExportNames = .{ .mono = "mono_class_from_mono_type" };
+    };
+};
+
+pub const mono = struct {
+    pub const jit_init = fn (name: [*:0]const u8) callconv(.c) ?*const Domain;
+    pub const set_assemblies_path = fn ([*:0]const u8) callconv(.c) void;
+    pub const domain_assembly_open = fn (*const Domain, [*:0]const u8) callconv(.c) ?*const Assembly;
+
+    pub const runtime_class_init = fn (*const VTable) callconv(.c) void;
+    pub const assembly_foreach = fn (func: *const Callback, user_data: ?*anyopaque) callconv(.c) void;
+    pub const assembly_get_name = fn (*const Assembly) callconv(.c) ?*const AssemblyName;
+    pub const assembly_name_get_name = fn (*const AssemblyName) callconv(.c) ?[*:0]const u8;
+    pub const image_get_filename = fn (*const Image) callconv(.c) ?[*:0]const u8;
+    pub const class_vtable = fn (*const Domain, *const Class) callconv(.c) *const VTable;
+    pub const field_static_get_value = fn (*const VTable, *const ClassField, out_value: *anyopaque) callconv(.c) void;
+    pub const field_static_set_value = fn (*const VTable, *const ClassField, value: *const anyopaque) callconv(.c) void;
+    pub const method_signature = fn (*const Method) callconv(.c) ?*const MethodSignature;
+    pub const signature_get_return_type = fn (*const MethodSignature) callconv(.c) ?*const Type;
+    pub const signature_get_params = fn (*const MethodSignature, iter: *?*anyopaque) callconv(.c) ?*const Type;
+    pub const gchandle_new = fn (*const Object, pinned: i32) callconv(.c) GcHandleV1;
+    pub const gchandle_free = fn (handle: GcHandleV1) callconv(.c) void;
+    pub const gchandle_get_target = fn (handle: GcHandleV1) callconv(.c) *const Object;
+    pub const gchandle_new_v2 = fn (*const Object, pinned: i32) callconv(.c) GcHandleV2;
+    pub const gchandle_free_v2 = fn (handle: GcHandleV2) callconv(.c) void;
+    pub const gchandle_get_target_v2 = fn (handle: GcHandleV2) callconv(.c) *const Object;
+    pub const string_new_len = fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String;
+    pub const object_new = fn (*const Domain, *const Class) callconv(.c) ?*const Object;
+    pub const type_get_object = fn (*const Domain, *const Type) callconv(.c) ?*const Object;
+    pub const image_open_from_data = fn (
         data: [*]const u8,
         data_len: u32,
         need_copy: i32,
         status: *MonoImageOpenStatus,
-    ) callconv(.c) ?*const Image,
-    assembly_load_from: *const fn (
+    ) callconv(.c) ?*const Image;
+    pub const assembly_load_from = fn (
         image: *const Image,
         name: [*:0]const u8,
         status: *MonoImageOpenStatus,
-    ) callconv(.c) ?*const Assembly,
-    add_internal_call: *const fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void,
-    class_is_enum: *const fn (*const Class) callconv(.c) c_int,
+    ) callconv(.c) ?*const Assembly;
+    pub const add_internal_call = fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void;
+    pub const class_is_enum = fn (*const Class) callconv(.c) c_int;
+};
 
-    pub fn gchandle_new(mono: *const MonoFuncs, object: *const Object, pinned: i32) GcHandleV2 {
-        return switch (mono.gchandle) {
+pub const il2cpp = struct {
+    pub const init = fn (name: [*:0]const u8) callconv(.c) void;
+    pub const set_data_dir = fn (path: [*:0]const u8) callconv(.c) void;
+    pub const register_log_callback = fn (*const fn ([*:0]const u8) callconv(.c) void) callconv(.c) void;
+
+    pub const runtime_class_init = fn (*const Class) callconv(.c) void;
+    pub const domain_get_assemblies = fn (*const Domain, size: *usize) callconv(.c) [*]const *const Assembly;
+    pub const image_get_name = fn (*const Image) callconv(.c) [*:0]const u8;
+    pub const image_get_class_count = fn (*const Image) callconv(.c) usize;
+    pub const image_get_class = fn (*const Image, index: usize) callconv(.c) *const Class;
+    pub const assembly_get_image = fn (*const Assembly) callconv(.c) *const Image;
+    pub const field_static_get_value = fn (*const ClassField, out_value: *anyopaque) callconv(.c) void;
+    pub const field_static_set_value = fn (*const ClassField, value: *const anyopaque) callconv(.c) void;
+    pub const method_get_return_type = fn (*const Method) callconv(.c) ?*const Type;
+    pub const method_get_param_count = fn (*const Method) callconv(.c) u32;
+    pub const method_get_param = fn (*const Method, index: u32) callconv(.c) *const Type;
+    pub const method_get_param_name = fn (*const Method, index: u32) callconv(.c) [*:0]const u8;
+    pub const type_get_object = fn (*const Type) callconv(.c) ?*const Object;
+    pub const gchandle_new = fn (*const Object, pinned: i32) callconv(.c) GcHandleV1;
+    pub const gchandle_free = fn (handle: GcHandleV1) callconv(.c) void;
+    pub const gchandle_get_target = fn (handle: GcHandleV1) callconv(.c) *const Object;
+    pub const object_new = fn (*const Class) callconv(.c) ?*const Object;
+    pub const string_new_len = fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String;
+    pub const class_is_enum = fn (*const Class) callconv(.c) bool;
+};
+
+// V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
+// which ships a newer mono where V2 exists. Older runtimes (Unity 2019, e.g. Outer Wilds) only
+// have V1, so resolve V2 when present and fall back to V1.
+pub const MonoGcHandle = union(enum) {
+    v1: V1,
+    v2: V2,
+
+    pub const V1 = struct {
+        gchandle_new: *const mono.gchandle_new,
+        gchandle_free: *const mono.gchandle_free,
+        gchandle_get_target: *const mono.gchandle_get_target,
+    };
+    pub const V2 = struct {
+        gchandle_new_v2: *const mono.gchandle_new_v2,
+        gchandle_free_v2: *const mono.gchandle_free_v2,
+        gchandle_get_target_v2: *const mono.gchandle_get_target_v2,
+    };
+
+    pub fn resolve(module: dynlib.Module, proc_ref: *[:0]const u8) error{ProcNotFound}!MonoGcHandle {
+        if (dotnetload.resolveMono(V2, module, proc_ref)) |v2| return .{ .v2 = v2 } else |err| switch (err) {
+            error.ProcNotFound => return .{ .v1 = try dotnetload.resolveMono(V1, module, proc_ref) },
+        }
+    }
+
+    pub fn new(h: MonoGcHandle, object: *const Object, pinned: i32) GcHandleV2 {
+        return switch (h) {
             .v1 => |v1| v1.gchandle_new(object, pinned).toV2(),
             .v2 => |v2| v2.gchandle_new_v2(object, pinned),
         };
     }
-    pub fn gchandle_free(mono: *const MonoFuncs, handle: GcHandleV2) void {
-        switch (mono.gchandle) {
+    pub fn free(h: MonoGcHandle, handle: GcHandleV2) void {
+        switch (h) {
             .v1 => |v1| v1.gchandle_free(.fromV2(handle)),
             .v2 => |v2| v2.gchandle_free_v2(handle),
         }
     }
-    pub fn gchandle_get_target(mono: *const MonoFuncs, handle: GcHandleV2) *const Object {
-        return switch (mono.gchandle) {
+    pub fn get_target(h: MonoGcHandle, handle: GcHandleV2) *const Object {
+        return switch (h) {
             .v1 => |v1| v1.gchandle_get_target(.fromV2(handle)),
             .v2 => |v2| v2.gchandle_get_target_v2(handle),
         };
     }
 };
 
-const MonoGcHandleV1 = struct {
-    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV1,
-    gchandle_free: *const fn (handle: GcHandleV1) callconv(.c) void,
-    gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
-};
-const MonoGcHandleV2 = struct {
-    gchandle_new_v2: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV2,
-    gchandle_free_v2: *const fn (handle: GcHandleV2) callconv(.c) void,
-    gchandle_get_target_v2: *const fn (handle: GcHandleV2) callconv(.c) *const Object,
-};
-
-// V1 of the GC handle API will will crash if you call get_target on a new handle on the game PEAK
-// which ships a newer mono where V2 exists. Older runtimes (Unity 2019, e.g. Outer Wilds) only
-// have V1, so resolve V2 when present and fall back to V1.
-const MonoGcHandle = union(enum) {
-    v1: MonoGcHandleV1,
-    v2: MonoGcHandleV2,
-};
-
-const Il2cppFuncs = struct {
-    runtime_class_init: *const fn (*const Class) callconv(.c) void,
-    domain_get_assemblies: *const fn (*const Domain, size: *usize) callconv(.c) [*]const *const Assembly,
-    image_get_name: *const fn (*const Image) callconv(.c) [*:0]const u8,
-    image_get_class_count: *const fn (*const Image) callconv(.c) usize,
-    image_get_class: *const fn (*const Image, index: usize) callconv(.c) *const Class,
-    assembly_get_image: *const fn (*const Assembly) callconv(.c) *const Image,
-    field_static_get_value: *const fn (*const ClassField, out_value: *anyopaque) callconv(.c) void,
-    field_static_set_value: *const fn (*const ClassField, value: *const anyopaque) callconv(.c) void,
-    method_get_return_type: *const fn (*const Method) callconv(.c) ?*const Type,
-    method_get_param_count: *const fn (*const Method) callconv(.c) u32,
-    method_get_param: *const fn (*const Method, index: u32) callconv(.c) *const Type,
-    method_get_param_name: *const fn (*const Method, index: u32) callconv(.c) [*:0]const u8,
-    type_get_object: *const fn (*const Type) callconv(.c) ?*const Object,
-    gchandle_new: *const fn (*const Object, pinned: i32) callconv(.c) GcHandleV1,
-    gchandle_free: *const fn (handle: GcHandleV1) callconv(.c) void,
-    gchandle_get_target: *const fn (handle: GcHandleV1) callconv(.c) *const Object,
-    object_new: *const fn (*const Class) callconv(.c) ?*const Object,
-    string_new_len: *const fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String,
-    class_is_enum: *const fn (*const Class) callconv(.c) bool,
-};
-
-pub const Funcs = struct {
-    get_root_domain: *const fn () callconv(.c) ?*const Domain,
-    domain_get: *const fn () callconv(.c) ?*const Domain,
-    thread_attach: *const fn (*const Domain) callconv(.c) ?*const Thread,
-    thread_detach: *const fn (*const Thread) callconv(.c) void,
-
-    kind: union(Kind) {
-        mono: MonoFuncs,
-        il2cpp: Il2cppFuncs,
-    },
-
-    assembly_get_image: *const fn (*const Assembly) callconv(.c) ?*const Image,
-
-    class_from_name: *const fn (*const Image, namespace: [*:0]const u8, name: [*:0]const u8) callconv(.c) ?*const Class,
-    class_get_name: *const fn (*const Class) callconv(.c) [*:0]const u8,
-    class_get_parent: *const fn (*const Class) callconv(.c) ?*const Class,
-    class_get_type: *const fn (*const Class) callconv(.c) *const Type,
-    class_get_namespace: *const fn (*const Class) callconv(.c) [*:0]const u8,
-    class_get_fields: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const ClassField,
-    class_get_methods: *const fn (*const Class, iterator: *?*anyopaque) callconv(.c) ?*const Method,
-    class_get_method_from_name: *const fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method,
-    class_get_field_from_name: *const fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField,
-    class_is_assignable_from: *const fn (klass: *const Class, oklass: *const Class) callconv(.c) bool,
-
-    field_get_flags: *const fn (*const ClassField) callconv(.c) ClassFieldFlags,
-    field_get_name: *const fn (*const ClassField) callconv(.c) [*:0]const u8,
-    field_get_type: *const fn (*const ClassField) callconv(.c) *const Type,
-    field_get_value: *const fn (*const Object, *const ClassField, out_value: *anyopaque) callconv(.c) void,
-    field_set_value: *const fn (*const Object, *const ClassField, value: *const anyopaque) callconv(.c) void,
-
-    method_get_flags: *const fn (*const Method, iflags: ?*MethodFlags) callconv(.c) MethodFlags,
-    method_get_name: *const fn (*const Method) callconv(.c) [*:0]const u8,
-    method_get_class: *const fn (*const Method) callconv(.c) ?*const Class,
-
-    type_get_type: *const fn (*const Type) callconv(.c) TypeKind,
-
-    object_unbox: *const fn (*const Object) callconv(.c) *anyopaque,
-    object_get_class: *const fn (*const Object) callconv(.c) *const Class,
-
-    runtime_invoke: *const fn (*const Method, obj: ?*const Object, params: ?**anyopaque, exception: ?*?*const Object) callconv(.c) ?*const Object,
-
-    string_chars: *const fn (*const String) callconv(.c) [*]const u16,
-    string_length: *const fn (*const String) callconv(.c) c_int,
-
-    free: *const fn (*anyopaque) callconv(.c) void,
-
-    class_from_type: *const fn (*const Type) callconv(.c) ?*const Class,
-    class_enum_basetype: *const fn (*const Class) callconv(.c) *const Type,
-
-    pub fn object_new(f: *const Funcs, class: *const Class) ?*const Object {
-        return switch (f.kind) {
-            .mono => |mono| mono.object_new(f.domain_get().?, class),
-            .il2cpp => |il2cpp| il2cpp.object_new(class),
-        };
+pub fn object_new(f: anytype, class: *const Class) ?*const Object {
+    return switch (f.kind) {
+        .mono => |m| m.object_new(f.domain_get().?, class),
+        .il2cpp => |i| i.object_new(class),
+    };
+}
+pub fn string_new_len(f: anytype, text: [*]const u8, len: c_uint) ?*const String {
+    return switch (f.kind) {
+        .mono => |m| m.string_new_len(f.domain_get().?, text, len),
+        .il2cpp => |i| i.string_new_len(text, len),
+    };
+}
+pub fn class_is_enum(f: anytype, class: *const Class) bool {
+    return switch (f.kind) {
+        .mono => |m| m.class_is_enum(class) != 0,
+        .il2cpp => |i| i.class_is_enum(class),
+    };
+}
+pub fn gchandle_new(f: anytype, object: *const Object, pinned: bool) GcHandleV2 {
+    return switch (f.kind) {
+        .mono => |m| m.gchandle.new(object, @intFromBool(pinned)),
+        .il2cpp => |i| i.gchandle_new(object, @intFromBool(pinned)).toV2(),
+    };
+}
+pub fn gchandle_free(f: anytype, handle: GcHandleV2) void {
+    switch (f.kind) {
+        .mono => |m| m.gchandle.free(handle),
+        .il2cpp => |i| i.gchandle_free(.fromV2(handle)),
     }
-    pub fn string_new_len(f: *const Funcs, text: [*]const u8, len: c_uint) ?*const String {
-        return switch (f.kind) {
-            .mono => |mono| mono.string_new_len(f.domain_get().?, text, len),
-            .il2cpp => |il2cpp| il2cpp.string_new_len(text, len),
-        };
-    }
-    pub fn class_is_enum(f: *const Funcs, class: *const Class) bool {
-        return switch (f.kind) {
-            .mono => |mono| mono.class_is_enum(class) != 0,
-            .il2cpp => |il2cpp| il2cpp.class_is_enum(class),
-        };
-    }
-    pub fn gchandle_new(f: *const Funcs, object: *const Object, pinned: bool) GcHandleV2 {
-        return switch (f.kind) {
-            .mono => |*mono| mono.gchandle_new(object, @intFromBool(pinned)),
-            .il2cpp => |il2cpp| il2cpp.gchandle_new(object, @intFromBool(pinned)).toV2(),
-        };
-    }
-    pub fn gchandle_free(f: *const Funcs, handle: GcHandleV2) void {
-        switch (f.kind) {
-            .mono => |*mono| mono.gchandle_free(handle),
-            .il2cpp => |il2cpp| il2cpp.gchandle_free(.fromV2(handle)),
-        }
-    }
-    pub fn gchandle_get_target(f: *const Funcs, handle: GcHandleV2) ?*const Object {
-        return switch (f.kind) {
-            .mono => |*mono| mono.gchandle_get_target(handle),
-            .il2cpp => |il2cpp| il2cpp.gchandle_get_target(.fromV2(handle)),
-        };
-    }
-    pub fn type_get_object(f: *const Funcs, t: *const Type) ?*const Object {
-        return switch (f.kind) {
-            .mono => |mono| mono.type_get_object(f.domain_get().?, t),
-            .il2cpp => |il2cpp| il2cpp.type_get_object(t),
-        };
-    }
-
-    pub fn init(proc_ref: *[:0]const u8, kind: Kind, mod: dynlib.Module) error{ProcNotFound}!Funcs {
-        return .{
-            .get_root_domain = try funcs.monoGet(mod, .get_root_domain, proc_ref),
-            .domain_get = try funcs.sharedGet(kind, mod, .domain_get, proc_ref),
-            .thread_attach = try funcs.sharedGet(kind, mod, .thread_attach, proc_ref),
-            .thread_detach = try funcs.sharedGet(kind, mod, .thread_detach, proc_ref),
-            .assembly_get_image = try funcs.sharedGet(kind, mod, .assembly_get_image, proc_ref),
-            .class_from_name = try funcs.sharedGet(kind, mod, .class_from_name, proc_ref),
-            .class_from_type = try funcs.get(mod, .class_from_type, switch (kind) {
-                .mono => "mono_class_from_mono_type",
-                .il2cpp => "il2cpp_class_from_type",
-            }, proc_ref),
-            .class_get_name = try funcs.sharedGet(kind, mod, .class_get_name, proc_ref),
-            .class_get_parent = try funcs.sharedGet(kind, mod, .class_get_parent, proc_ref),
-            .class_enum_basetype = try funcs.sharedGet(kind, mod, .class_enum_basetype, proc_ref),
-            .class_get_type = try funcs.sharedGet(kind, mod, .class_get_type, proc_ref),
-            .class_get_namespace = try funcs.sharedGet(kind, mod, .class_get_namespace, proc_ref),
-            .class_get_fields = try funcs.sharedGet(kind, mod, .class_get_fields, proc_ref),
-            .class_get_methods = try funcs.sharedGet(kind, mod, .class_get_methods, proc_ref),
-            .class_get_method_from_name = try funcs.sharedGet(kind, mod, .class_get_method_from_name, proc_ref),
-            .class_get_field_from_name = try funcs.sharedGet(kind, mod, .class_get_field_from_name, proc_ref),
-            .class_is_assignable_from = try funcs.sharedGet(kind, mod, .class_is_assignable_from, proc_ref),
-            .field_get_flags = try funcs.sharedGet(kind, mod, .field_get_flags, proc_ref),
-            .field_get_name = try funcs.sharedGet(kind, mod, .field_get_name, proc_ref),
-            .field_get_type = try funcs.sharedGet(kind, mod, .field_get_type, proc_ref),
-            .field_get_value = try funcs.sharedGet(kind, mod, .field_get_value, proc_ref),
-            .field_set_value = try funcs.sharedGet(kind, mod, .field_set_value, proc_ref),
-            .method_get_name = try funcs.sharedGet(kind, mod, .method_get_name, proc_ref),
-            .method_get_flags = try funcs.sharedGet(kind, mod, .method_get_flags, proc_ref),
-            .method_get_class = try funcs.sharedGet(kind, mod, .method_get_class, proc_ref),
-            .type_get_type = try funcs.sharedGet(kind, mod, .type_get_type, proc_ref),
-            .object_unbox = try funcs.sharedGet(kind, mod, .object_unbox, proc_ref),
-            .object_get_class = try funcs.sharedGet(kind, mod, .object_get_class, proc_ref),
-            // .gchandle_new = try funcs.monoGet(mod, .gchandle_new, proc_ref),
-            // .gchandle_free = try funcs.monoGet(mod, .gchandle_free, proc_ref),
-            // .gchandle_get_target = try funcs.monoGet(mod, .gchandle_get_target, proc_ref),
-            .runtime_invoke = try funcs.sharedGet(kind, mod, .runtime_invoke, proc_ref),
-            .string_chars = try funcs.sharedGet(kind, mod, .string_chars, proc_ref),
-            .string_length = try funcs.sharedGet(kind, mod, .string_length, proc_ref),
-            .free = try funcs.sharedGet(kind, mod, .free, proc_ref),
-            .kind = switch (kind) {
-                .mono => .{ .mono = .{
-                    .runtime_class_init = try mono_funcs.monoGet(mod, .runtime_class_init, proc_ref),
-                    .assembly_foreach = try mono_funcs.monoGet(mod, .assembly_foreach, proc_ref),
-                    .assembly_get_name = try mono_funcs.monoGet(mod, .assembly_get_name, proc_ref),
-                    .assembly_name_get_name = try mono_funcs.monoGet(mod, .assembly_name_get_name, proc_ref),
-                    .image_get_filename = try mono_funcs.monoGet(mod, .image_get_filename, proc_ref),
-                    .class_vtable = try mono_funcs.monoGet(mod, .class_vtable, proc_ref),
-                    .field_static_get_value = try mono_funcs.monoGet(mod, .field_static_get_value, proc_ref),
-                    .field_static_set_value = try mono_funcs.monoGet(mod, .field_static_set_value, proc_ref),
-                    .method_signature = try mono_funcs.monoGet(mod, .method_signature, proc_ref),
-                    .signature_get_return_type = try mono_funcs.monoGet(mod, .signature_get_return_type, proc_ref),
-                    .signature_get_params = try mono_funcs.monoGet(mod, .signature_get_params, proc_ref),
-                    .gchandle = if (mono_gchandle_v2.monoGet(mod, .gchandle_new_v2, proc_ref)) |gchandle_new_v2| .{ .v2 = .{
-                        .gchandle_new_v2 = gchandle_new_v2,
-                        .gchandle_free_v2 = try mono_gchandle_v2.monoGet(mod, .gchandle_free_v2, proc_ref),
-                        .gchandle_get_target_v2 = try mono_gchandle_v2.monoGet(mod, .gchandle_get_target_v2, proc_ref),
-                    } } else |err| switch (err) {
-                        error.ProcNotFound => .{ .v1 = .{
-                            .gchandle_new = try mono_gchandle_v1.monoGet(mod, .gchandle_new, proc_ref),
-                            .gchandle_free = try mono_gchandle_v1.monoGet(mod, .gchandle_free, proc_ref),
-                            .gchandle_get_target = try mono_gchandle_v1.monoGet(mod, .gchandle_get_target, proc_ref),
-                        } },
-                    },
-                    .string_new_len = try mono_funcs.monoGet(mod, .string_new_len, proc_ref),
-                    .object_new = try mono_funcs.monoGet(mod, .object_new, proc_ref),
-                    .type_get_object = try mono_funcs.monoGet(mod, .type_get_object, proc_ref),
-                    .image_open_from_data = try mono_funcs.monoGet(mod, .image_open_from_data, proc_ref),
-                    .assembly_load_from = try mono_funcs.monoGet(mod, .assembly_load_from, proc_ref),
-                    .add_internal_call = try mono_funcs.monoGet(mod, .add_internal_call, proc_ref),
-                    .class_is_enum = try mono_funcs.monoGet(mod, .class_is_enum, proc_ref),
-                } },
-                .il2cpp => .{
-                    .il2cpp = .{
-                        .runtime_class_init = try il2cpp_funcs.il2cppGet(mod, .runtime_class_init, proc_ref),
-                        .domain_get_assemblies = try il2cpp_funcs.il2cppGet(mod, .domain_get_assemblies, proc_ref),
-                        .image_get_name = try il2cpp_funcs.il2cppGet(mod, .image_get_name, proc_ref),
-                        .image_get_class_count = try il2cpp_funcs.il2cppGet(mod, .image_get_class_count, proc_ref),
-                        .image_get_class = try il2cpp_funcs.il2cppGet(mod, .image_get_class, proc_ref),
-                        .assembly_get_image = try il2cpp_funcs.il2cppGet(mod, .assembly_get_image, proc_ref),
-                        .field_static_get_value = try il2cpp_funcs.il2cppGet(mod, .field_static_get_value, proc_ref),
-                        .field_static_set_value = try il2cpp_funcs.il2cppGet(mod, .field_static_set_value, proc_ref),
-                        .method_get_return_type = try il2cpp_funcs.il2cppGet(mod, .method_get_return_type, proc_ref),
-                        .method_get_param_count = try il2cpp_funcs.il2cppGet(mod, .method_get_param_count, proc_ref),
-                        .method_get_param = try il2cpp_funcs.il2cppGet(mod, .method_get_param, proc_ref),
-                        .method_get_param_name = try il2cpp_funcs.il2cppGet(mod, .method_get_param_name, proc_ref),
-                        .type_get_object = try il2cpp_funcs.il2cppGet(mod, .type_get_object, proc_ref),
-                        .gchandle_new = try il2cpp_funcs.il2cppGet(mod, .gchandle_new, proc_ref),
-                        .gchandle_free = try il2cpp_funcs.il2cppGet(mod, .gchandle_free, proc_ref),
-                        .gchandle_get_target = try il2cpp_funcs.il2cppGet(mod, .gchandle_get_target, proc_ref),
-                        .object_new = try il2cpp_funcs.il2cppGet(mod, .object_new, proc_ref),
-                        .string_new_len = try il2cpp_funcs.il2cppGet(mod, .string_new_len, proc_ref),
-                        .class_is_enum = try il2cpp_funcs.il2cppGet(mod, .class_is_enum, proc_ref),
-                    },
-                },
-            },
-        };
-    }
-};
+}
+pub fn gchandle_get_target(f: anytype, handle: GcHandleV2) ?*const Object {
+    return switch (f.kind) {
+        .mono => |m| m.gchandle.get_target(handle),
+        .il2cpp => |i| i.gchandle_get_target(.fromV2(handle)),
+    };
+}
+pub fn type_get_object(f: anytype, t: *const Type) ?*const Object {
+    return switch (f.kind) {
+        .mono => |m| m.type_get_object(f.domain_get().?, t),
+        .il2cpp => |i| i.type_get_object(t),
+    };
+}
 
 pub const Protection = enum(u3) {
     compiler_controlled = 0x0, // 000
@@ -412,9 +336,4 @@ pub const TypeKind = enum(c_int) {
 
 const dynlib = @import("dynlib.zig");
 const dotnetkind = @import("dotnetkind.zig");
-
-const funcs = @import("dotnetload.zig").template(Funcs);
-const mono_funcs = @import("dotnetload.zig").template(MonoFuncs);
-const mono_gchandle_v1 = @import("dotnetload.zig").template(MonoGcHandleV1);
-const mono_gchandle_v2 = @import("dotnetload.zig").template(MonoGcHandleV2);
-const il2cpp_funcs = @import("dotnetload.zig").template(Il2cppFuncs);
+const dotnetload = @import("dotnetload.zig");

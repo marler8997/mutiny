@@ -2,8 +2,8 @@ const usage =
     \\Usage:
     \\  mutiny scan                  every running Unity game (by its window), and whether Mutiny is attached.
     \\  mutiny start EXE [ARGS...]   launch a game with Mutiny.dll injected before it runs.
-    \\  mutiny decomp NAME           bring app\NAME\decomp\ up to date with the game's code, as C# stubs,
-    \\                               one file per type; NAME is a game Mutiny has attached to. Run it
+    \\  mutiny decomp NAME           bring app\NAME\decomp\ up to date with the game's code, one file
+    \\                               per type; NAME is a game Mutiny has attached to. Run it
     \\                               before reading the code: it rewrites only what the game changed.
     \\
     \\  mutiny PID attach            get Mutiny running inside an already-running game.

@@ -63,7 +63,7 @@ fn errExit(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(0xff);
 }
 
-pub const hash_version: u32 = 1;
+pub const hash_version: u32 = 2;
 
 const input_hash_name = "input_hash";
 
@@ -95,6 +95,7 @@ pub const Funcs = struct {
     field_get_type: *const dotnet.shared.field_get_type,
     method_get_flags: *const dotnet.shared.method_get_flags,
     method_get_name: *const dotnet.shared.method_get_name,
+    method_get_class: *const dotnet.shared.method_get_class,
     type_get_type: *const dotnet.shared.type_get_type,
     type_get_name: *const dotnet.shared.type_get_name,
     object_unbox: *const dotnet.shared.object_unbox,
@@ -119,6 +120,17 @@ pub const Funcs = struct {
             signature_get_param_count: *const dotnet.mono.signature_get_param_count,
             method_get_param_names: *const dotnet.mono.method_get_param_names,
             field_get_value_object: *const dotnet.mono.field_get_value_object,
+            method_get_header: *const dotnet.mono.method_get_header,
+            method_header_get_code: *const dotnet.mono.method_header_get_code,
+            method_header_get_locals: *const dotnet.mono.method_header_get_locals,
+            method_header_get_clauses: *const dotnet.mono.method_header_get_clauses,
+            metadata_free_mh: *const dotnet.mono.metadata_free_mh,
+            get_method: *const dotnet.mono.get_method,
+            field_from_token: *const dotnet.mono.field_from_token,
+            field_get_parent: *const dotnet.mono.field_get_parent,
+            ldtoken: *const dotnet.mono.ldtoken,
+            metadata_user_string: *const dotnet.mono.metadata_user_string,
+            metadata_decode_blob_size: *const dotnet.mono.metadata_decode_blob_size,
         },
         il2cpp: struct {
             init: *const dotnet.il2cpp.init,
@@ -408,6 +420,7 @@ const Ctx = struct {
     arena: std.mem.Allocator,
     funcs: *const Funcs,
     out: std.fs.Dir,
+    image: *const dotnet.Image,
     assembly_name: []const u8,
     dir_name: []const u8,
     count: usize = 0,
@@ -450,6 +463,7 @@ fn processAssembly(
         .arena = arena,
         .funcs = funcs,
         .out = out,
+        .image = image,
         .assembly_name = assembly_name,
         .dir_name = dir_name,
     };
@@ -688,17 +702,17 @@ fn writeTypeDecl(
         wrote_section = true;
     }
     var wrote_method = false;
+    var previous_had_body = false;
     var methods: ?*anyopaque = null;
     while (funcs.class_get_methods(class, &methods)) |method| {
-        if (wrote_section and !wrote_method) try w.writeByte('\n');
-        try writeMethod(ctx, w, method, level + 1);
+        if ((wrote_section and !wrote_method) or previous_had_body) try w.writeByte('\n');
+        previous_had_body = try writeMethod(ctx, w, method, level + 1);
         wrote_method = true;
         wrote_section = true;
     }
     var nested: ?*anyopaque = null;
     while (funcs.class_get_nested_types(class, &nested)) |nested_class| {
         const nested_name = std.mem.span(funcs.class_get_name(nested_class));
-        if (generated(nested_name)) continue;
         if (wrote_section) try w.writeByte('\n');
         try writeTypeDecl(ctx, w, nested_class, nested_name, level + 1);
         wrote_section = true;
@@ -744,7 +758,7 @@ fn writeField(ctx: *Ctx, w: *std.Io.Writer, field: *const dotnet.ClassField, lev
     try w.writeAll(";\n");
 }
 
-fn writeMethod(ctx: *Ctx, w: *std.Io.Writer, method: *const dotnet.Method, level: usize) error{WriteFailed}!void {
+fn writeMethod(ctx: *Ctx, w: *std.Io.Writer, method: *const dotnet.Method, level: usize) error{WriteFailed}!bool {
     const funcs = ctx.funcs;
     var impl: dotnet.MethodImplFlags = undefined;
     const flags = funcs.method_get_flags(method, &impl);
@@ -765,7 +779,242 @@ fn writeMethod(ctx: *Ctx, w: *std.Io.Writer, method: *const dotnet.Method, level
     }
     try w.print(" {s}(", .{name});
     try writeParams(ctx, w, method);
-    try w.writeAll(");\n");
+    try w.writeByte(')');
+    if (try writeBody(ctx, w, method, level)) return true;
+    try w.writeAll(";\n");
+    return false;
+}
+
+fn writeBody(ctx: *Ctx, w: *std.Io.Writer, method: *const dotnet.Method, level: usize) error{WriteFailed}!bool {
+    const mono = switch (ctx.funcs.kind) {
+        .mono => |*mono| mono,
+        .il2cpp => return false,
+    };
+    const header = mono.method_get_header(method) orelse return false;
+    defer mono.metadata_free_mh(header);
+    var code_size: u32 = 0;
+    var max_stack: u32 = 0;
+    const code_ptr = mono.method_header_get_code(header, &code_size, &max_stack) orelse {
+        std.log.warn("{s}: {s} has a method header but mono_method_header_get_code returned null", .{
+            ctx.assembly_name,
+            ctx.funcs.method_get_name(method),
+        });
+        return false;
+    };
+    const code = code_ptr[0..code_size];
+
+    var labels = std.DynamicBitSetUnmanaged.initEmpty(ctx.arena, code.len) catch |e| oom(e);
+    defer labels.deinit(ctx.arena);
+    markLabels(mono, header, method, code, &labels);
+
+    try w.writeByte('\n');
+    try writeIndent(w, level);
+    try w.writeAll("{\n");
+    try writeLocals(ctx, w, mono, header, level + 1);
+    try writeClauses(ctx, w, mono, header, method, level + 1);
+    var decoder: il.Decoder = .init(code);
+    while (true) {
+        const instruction = (decoder.next() catch |err| {
+            std.log.warn("{s}: {s} cannot be decoded at IL_{x:0>4}: {t}", .{
+                ctx.assembly_name,
+                ctx.funcs.method_get_name(method),
+                decoder.offset,
+                err,
+            });
+            try writeIndent(w, level + 1);
+            try w.print("// IL_{x:0>4}: {t}, the rest of this body cannot be decoded\n", .{ decoder.offset, err });
+            break;
+        }) orelse break;
+        if (labels.isSet(instruction.offset)) {
+            try writeIndent(w, level);
+            try w.print("IL_{x:0>4}:\n", .{instruction.offset});
+        }
+        try writeIndent(w, level + 1);
+        try w.writeAll(instruction.opcode.name());
+        try writeOperand(ctx, w, mono, instruction.operand);
+        try w.writeByte('\n');
+    }
+    try writeIndent(w, level);
+    try w.writeAll("}\n");
+    return true;
+}
+
+const Mono = @FieldType(@FieldType(Funcs, "kind"), "mono");
+
+fn markLabels(
+    mono: *const Mono,
+    header: *const dotnet.MethodHeader,
+    method: *const dotnet.Method,
+    code: []const u8,
+    labels: *std.DynamicBitSetUnmanaged,
+) void {
+    var decoder: il.Decoder = .init(code);
+    while (decoder.next() catch null) |instruction| switch (instruction.operand) {
+        .branch => |target| labels.set(target),
+        .@"switch" => |s| for (0..s.count()) |i| labels.set(s.target(i)),
+        else => {},
+    };
+    var iter: ?*anyopaque = null;
+    var clause: dotnet.ExceptionClause = undefined;
+    while (mono.method_header_get_clauses(header, method, &iter, &clause) != 0) {
+        for ([_]u64{
+            clause.try_offset,
+            @as(u64, clause.try_offset) + clause.try_len,
+            clause.handler_offset,
+            @as(u64, clause.handler_offset) + clause.handler_len,
+            if (clause.kind == .filter) clause.data.filter_offset else clause.try_offset,
+        }) |offset| {
+            if (offset < code.len) labels.set(@intCast(offset));
+        }
+    }
+}
+
+fn writeLocals(ctx: *Ctx, w: *std.Io.Writer, mono: *const Mono, header: *const dotnet.MethodHeader, level: usize) error{WriteFailed}!void {
+    var count: u32 = 0;
+    var init: i32 = 0;
+    const locals = mono.method_header_get_locals(header, &count, &init) orelse return;
+    if (count == 0) return;
+    try writeIndent(w, level);
+    try w.writeAll(if (init != 0) ".locals init (" else ".locals (");
+    for (locals[0..count], 0..) |local, i| {
+        if (i != 0) try w.writeAll(", ");
+        try writeTypeName(ctx.funcs, w, local);
+        try w.print(" V_{d}", .{i});
+    }
+    try w.writeAll(")\n");
+}
+
+fn writeClauses(
+    ctx: *Ctx,
+    w: *std.Io.Writer,
+    mono: *const Mono,
+    header: *const dotnet.MethodHeader,
+    method: *const dotnet.Method,
+    level: usize,
+) error{WriteFailed}!void {
+    var iter: ?*anyopaque = null;
+    var clause: dotnet.ExceptionClause = undefined;
+    while (mono.method_header_get_clauses(header, method, &iter, &clause) != 0) {
+        try writeIndent(w, level);
+        try w.print(".try IL_{x:0>4} to IL_{x:0>4}", .{ clause.try_offset, @as(u64, clause.try_offset) + clause.try_len });
+        switch (clause.kind) {
+            .@"catch" => {
+                try w.writeAll(" catch ");
+                if (clause.data.catch_class) |class| try writeClassName(ctx.funcs, w, class) else try w.writeByte('?');
+            },
+            .filter => try w.print(" filter IL_{x:0>4}", .{clause.data.filter_offset}),
+            .finally => try w.writeAll(" finally"),
+            .fault => try w.writeAll(" fault"),
+            _ => try w.print(" clause kind {d}", .{@intFromEnum(clause.kind)}),
+        }
+        try w.print(" handler IL_{x:0>4} to IL_{x:0>4}\n", .{ clause.handler_offset, @as(u64, clause.handler_offset) + clause.handler_len });
+    }
+}
+
+fn writeOperand(ctx: *Ctx, w: *std.Io.Writer, mono: *const Mono, operand: il.Operand) error{WriteFailed}!void {
+    switch (operand) {
+        .none => {},
+        .int => |value| try w.print(" {d}", .{value}),
+        .float32 => |value| try w.print(" {d}", .{value}),
+        .float64 => |value| try w.print(" {d}", .{value}),
+        .arg, .local => |index| try w.print(" {d}", .{index}),
+        .uint8 => |value| try w.print(" {d}", .{value}),
+        .branch => |target| try w.print(" IL_{x:0>4}", .{target}),
+        .@"switch" => |s| {
+            try w.writeAll(" (");
+            for (0..s.count()) |i| {
+                if (i != 0) try w.writeAll(", ");
+                try w.print("IL_{x:0>4}", .{s.target(i)});
+            }
+            try w.writeByte(')');
+        },
+        .method => |token| {
+            const method = mono.get_method(ctx.image, token, null) orelse return writeUnresolved(w, token);
+            try w.writeByte(' ');
+            try writeMethodRef(ctx, w, mono, method);
+        },
+        .field => |token| {
+            var class: ?*const dotnet.Class = null;
+            const field = mono.field_from_token(ctx.image, token, &class, null) orelse return writeUnresolved(w, token);
+            try w.writeByte(' ');
+            try writeFieldRef(ctx, w, field, class);
+        },
+        .type, .token => |token| {
+            var handle_class: ?*const dotnet.Class = null;
+            const handle = mono.ldtoken(ctx.image, token, &handle_class, null) orelse return writeUnresolved(w, token);
+            const kind: HandleKind = if (handle_class) |c| handle_kinds.get(std.mem.span(ctx.funcs.class_get_name(c))) orelse .unknown else .unknown;
+            switch (kind) {
+                .type => {
+                    try w.writeByte(' ');
+                    try writeTypeName(ctx.funcs, w, @ptrCast(handle));
+                },
+                .field => {
+                    const field: *const dotnet.ClassField = @ptrCast(handle);
+                    try w.writeByte(' ');
+                    try writeFieldRef(ctx, w, field, mono.field_get_parent(field));
+                },
+                .method => {
+                    try w.writeByte(' ');
+                    try writeMethodRef(ctx, w, mono, @ptrCast(handle));
+                },
+                .unknown => try writeUnresolved(w, token),
+            }
+        },
+        .string => |token| {
+            const blob = mono.metadata_user_string(ctx.image, token & 0x00FFFFFF);
+            var chars: [*]const u8 = undefined;
+            const size = mono.metadata_decode_blob_size(blob, &chars);
+            try w.writeByte(' ');
+            try writeUtf16LeLiteral(w, chars[0 .. size / 2 * 2]);
+        },
+        .signature => |token| try writeUnresolved(w, token),
+    }
+}
+
+const HandleKind = enum { type, field, method, unknown };
+
+const handle_kinds = std.StaticStringMap(HandleKind).initComptime(.{
+    .{ "RuntimeTypeHandle", .type },
+    .{ "RuntimeFieldHandle", .field },
+    .{ "RuntimeMethodHandle", .method },
+});
+
+fn writeUnresolved(w: *std.Io.Writer, token: u32) error{WriteFailed}!void {
+    try w.print(" 0x{x:0>8}", .{token});
+}
+
+fn writeMethodRef(ctx: *Ctx, w: *std.Io.Writer, mono: *const Mono, method: *const dotnet.Method) error{WriteFailed}!void {
+    const funcs = ctx.funcs;
+    const sig = mono.method_signature(method);
+    if (sig) |s| {
+        if (mono.signature_get_return_type(s)) |t| try writeTypeName(funcs, w, t) else try w.writeByte('?');
+        try w.writeByte(' ');
+    }
+    if (funcs.method_get_class(method)) |class| {
+        try writeClassName(funcs, w, class);
+        try w.writeAll("::");
+    }
+    try w.print("{s}(", .{funcs.method_get_name(method)});
+    if (sig) |s| {
+        var iter: ?*anyopaque = null;
+        var first = true;
+        while (mono.signature_get_params(s, &iter)) |param_type| : (first = false) {
+            if (!first) try w.writeAll(", ");
+            try writeTypeName(funcs, w, param_type);
+        }
+    } else try w.writeByte('?');
+    try w.writeByte(')');
+}
+
+fn writeFieldRef(ctx: *Ctx, w: *std.Io.Writer, field: *const dotnet.ClassField, class: ?*const dotnet.Class) error{WriteFailed}!void {
+    const funcs = ctx.funcs;
+    try writeTypeName(funcs, w, funcs.field_get_type(field));
+    try w.writeByte(' ');
+    if (class) |c| {
+        try writeClassName(funcs, w, c);
+        try w.writeAll("::");
+    }
+    try w.writeAll(std.mem.span(funcs.field_get_name(field)));
 }
 
 fn writeReturnType(ctx: *Ctx, w: *std.Io.Writer, method: *const dotnet.Method) error{WriteFailed}!void {
@@ -917,24 +1166,37 @@ fn writeCharLiteral(w: *std.Io.Writer, c: u16) error{WriteFailed}!void {
 fn writeStringLiteral(ctx: *Ctx, w: *std.Io.Writer, string: *const dotnet.String) error{WriteFailed}!void {
     const len: usize = @intCast(ctx.funcs.string_length(string));
     const chars = ctx.funcs.string_chars(string)[0..len];
+    try writeUtf16LeLiteral(w, std.mem.sliceAsBytes(chars));
+}
+
+fn writeUtf16LeLiteral(w: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!void {
     try w.writeByte('"');
-    var it = std.unicode.Wtf16LeIterator.init(chars);
-    while (it.nextCodepoint()) |codepoint| switch (codepoint) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (codepoint < 0x20) {
-            try w.print("\\u{X:0>4}", .{codepoint});
-        } else {
-            var utf8: [4]u8 = undefined;
-            const utf8_len = std.unicode.wtf8Encode(codepoint, &utf8) catch |err| switch (err) {
-                error.CodepointTooLarge => return w.print("\\U{X:0>8}", .{codepoint}),
-            };
-            try w.writeAll(utf8[0..utf8_len]);
-        },
-    };
+    var i: usize = 0;
+    while (i + 2 <= bytes.len) : (i += 2) {
+        const unit = std.mem.readInt(u16, bytes[i..][0..2], .little);
+        const codepoint: u21 = if (std.unicode.utf16IsHighSurrogate(unit) and i + 4 <= bytes.len) blk: {
+            const low = std.mem.readInt(u16, bytes[i + 2 ..][0..2], .little);
+            if (!std.unicode.utf16IsLowSurrogate(low)) break :blk unit;
+            i += 2;
+            break :blk 0x10000 + ((@as(u21, unit) - 0xD800) << 10) + (low - 0xDC00);
+        } else unit;
+        switch (codepoint) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => if (codepoint < 0x20 or (codepoint >= 0xD800 and codepoint <= 0xDFFF)) {
+                try w.print("\\u{X:0>4}", .{codepoint});
+            } else {
+                var utf8: [4]u8 = undefined;
+                const utf8_len = std.unicode.wtf8Encode(codepoint, &utf8) catch |err| switch (err) {
+                    error.CodepointTooLarge => return w.print("\\U{X:0>8}", .{codepoint}),
+                };
+                try w.writeAll(utf8[0..utf8_len]);
+            },
+        }
+    }
     try w.writeByte('"');
 }
 
@@ -976,7 +1238,9 @@ fn oom(e: error{OutOfMemory}) noreturn {
 }
 
 const std = @import("std");
+const il = @import("il");
 const mutiny = @import("mutiny");
+
 const appdata = mutiny.appdata;
 const dotnet = mutiny.dotnet;
 const dotnethost = mutiny.dotnethost;

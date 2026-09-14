@@ -317,7 +317,8 @@ if (pm.get_IsGrounded() == 0) {
 ## Finding the right code
 
 `mutiny decomp <Name>` keeps `%LOCALAPPDATA%\mutiny\app\<Name>\decomp\` up to date with the
-game: every assembly as C# stubs, named exactly the way a script names a type. The script
+game: every assembly as C#-shaped files with each method's body as IL, named exactly the way a
+script names a type. The script
 expression `asm.ScheduleOne.PlayerScripts.Player`, where `asm` is `@Assembly("Assembly-CSharp")`,
 is the file `Assembly-CSharp\ScheduleOne.PlayerScripts.Player.cs`: a directory per assembly, and
 inside it one `.cs` file per type named by its full name. A nested type is inside its outer
@@ -341,9 +342,11 @@ A file's name is the type's full name, so a directory listing of `Assembly-CShar
 of its types, and a search over the tree answers the rest:
 `rg -l "class \w+ : UnityEngine.MonoBehaviour" Assembly-CSharp` lists every
 component the game defines, `rg -il stamina Assembly-CSharp` finds every file that mentions a
-word, and `rg "float health"` finds where a field is declared. Search the game's own assemblies
-first and widen to the whole `decomp\` directory when you need the engine. A type file looks
-like this:
+word, and `rg "float health"` finds where a field is declared. Because bodies name every field
+and method they touch, the tree also answers who does what: `rg "stfld .*::currentStamina"`
+finds every write to a field, `rg "call.* Character::AddStamina\("` every caller of a method.
+Search the game's own assemblies first and widen to the whole `decomp\` directory when you need
+the engine. A type file looks like this:
 
 ```csharp
 // assembly Assembly-CSharp
@@ -354,9 +357,26 @@ public class Character : Photon.Pun.MonoBehaviourPun
     public Character.CharacterRefs refs;
     public const string SKELETON_PREFAB = "Skeleton";
 
-    public bool get_IsLocal();
-    public void set_Ghost(PlayerGhost value);
     public static bool get_localCharacterExists();
+    public void AddStamina(float add)
+    {
+        ldarg.0
+        ldfld Photon.Pun.PhotonView Character::view
+        callvirt bool Photon.Pun.PhotonView::get_IsMine()
+        brtrue.s IL_000e
+        ret
+    IL_000e:
+        ldarg.0
+        ldfld CharacterData Character::data
+        dup
+        callvirt float CharacterData::get_currentStamina()
+        ldarg.1
+        add
+        callvirt void CharacterData::set_currentStamina(float)
+        ldarg.0
+        call void Character::ClampStamina()
+        ret
+    }
 
     public class CharacterRefs
     {
@@ -372,10 +392,20 @@ What to know when reading it:
   or event syntax, and constructors are `.ctor`. Primitive types are the C# keywords (`float`,
   `int`, `bool`, `string`); everything else is a full name.
 - A nested type is written inside its outer type's file, and referred to as `Outer.Inner`.
-- `extern` marks a method whose body is inside the engine, not in managed code.
+- `extern` marks a method whose body is inside the engine, not in managed code; it ends in `;`,
+  as abstract methods do.
 - Enums list their members with values, and `const` fields show their value.
-- Only signatures are there today, not method bodies: whether a method clamps its argument or
-  where a field is assigned is not visible yet.
+- A body is CIL, the stack-machine code C# compiles to, one instruction per line. Operands are
+  resolved to names: `ldfld <type> <Class>::<field>` loads a field, `stfld` stores one,
+  `call`/`callvirt <return> <Class>::<method>(<params>)` calls, and `ldstr` loads a string
+  literal. `ldarg.0` is `this` in an instance method. A label such as `IL_000e:` marks a branch
+  target, `.locals` lists the local variables as `V_0`, `V_1`, ..., and a `.try ... handler`
+  line gives a try block's instruction range.
+- Coroutines, `async` methods and lambdas keep their real code in compiler-generated nested
+  classes: a method returning `IEnumerator` often just does `newobj` on a class named like
+  `<Start>d__12`, and the logic is that class's `MoveNext()` further down the same file.
+- On il2cpp games (a `GameAssembly.dll` beside the exe) there is no IL, so methods have
+  signatures only.
 
 `@Log(@ClassOf(someObject))` in a `scripts\` file prints the full name of an object's *runtime*
 class, which is the tool when you hold an object and don't know its type: it names the file

@@ -189,6 +189,8 @@ pub fn build(b: *std.Build) void {
         ).dependOn(&start.step);
     }
 
+    const il_mod = b.createModule(.{ .root_source_file = b.path("il/il.zig") });
+
     const cli = b.addExecutable(.{
         .name = "mutiny",
         .root_module = b.createModule(.{
@@ -197,6 +199,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "mutiny", .module = mutiny_mod.sanitized },
+                .{ .name = "il", .module = il_mod },
             },
         }),
     });
@@ -231,7 +234,6 @@ pub fn build(b: *std.Build) void {
     };
 
     const layout_mod = b.createModule(.{ .root_source_file = b.path("layout/layout.zig") });
-    const il_mod = b.createModule(.{ .root_source_file = b.path("il/il.zig") });
 
     const gui = b.addExecutable(.{
         .name = "Mutiny",

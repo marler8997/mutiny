@@ -38,15 +38,16 @@ Everything Mutiny writes lives under one directory per app, named after its exe 
   log              what Mutiny logs from inside the game, including @Log output from your scripts
   mods\<name>      mods, run from the top on every frame
   scripts\<name>   one-off scripts, inert until you ask for them by name
-  decomp\          the game's code as C# stubs, one file per type, kept up to date by `mutiny decomp <Name>`
+  decomp\          the game's code, one file per type, kept up to date by `mutiny decomp <Name>`
   stdout.txt       captured only when Mutiny starts the game for you
   stderr.txt
 ```
 
 `mutiny decomp <Name>` keeps that `decomp` directory up to date with the game: it reads the game's own
-runtime without needing the game to be running and writes every assembly out as C# stubs, laid out the way a
+runtime without needing the game to be running and writes every assembly out, laid out the way a
 script names things, i.e. `asm.Some.Namespace.Type` is `Assembly-CSharp\Some.Namespace.Type.cs`,
-with every field and method signature the way a script calls it.
+with every field and method signature the way a script calls it and, on mono games, every
+method's body as IL.
 
 It is idempotent and rewrites only the assemblies the game changed, so run it before reading
 the code in cases where the game may have been updated since the last time it ran.

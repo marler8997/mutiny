@@ -153,6 +153,26 @@ pub const mono = struct {
     pub const metadata_free_mh = fn (*const MethodHeader) callconv(.c) void;
     pub const opcode_value = fn (ip: *[*]const u8, end: [*]const u8) callconv(.c) c_int;
     pub const opcode_name = fn (opcode: c_int) callconv(.c) [*:0]const u8;
+    pub const method_header_get_locals = fn (*const MethodHeader, num_locals: *u32, init_locals: *i32) callconv(.c) ?[*]const *const Type;
+    pub const method_header_get_clauses = fn (*const MethodHeader, *const Method, iter: *?*anyopaque, clause: *ExceptionClause) callconv(.c) c_int;
+    pub const get_method = fn (*const Image, token: u32, class: ?*const Class) callconv(.c) ?*const Method;
+    pub const field_from_token = fn (*const Image, token: u32, class: *?*const Class, context: ?*anyopaque) callconv(.c) ?*const ClassField;
+    pub const field_get_parent = fn (*const ClassField) callconv(.c) ?*const Class;
+    pub const ldtoken = fn (*const Image, token: u32, handle_class: *?*const Class, context: ?*anyopaque) callconv(.c) ?*anyopaque;
+    pub const metadata_user_string = fn (*const Image, index: u32) callconv(.c) [*]const u8;
+    pub const metadata_decode_blob_size = fn (ptr: [*]const u8, rptr: *[*]const u8) callconv(.c) u32;
+};
+
+pub const ExceptionClause = extern struct {
+    kind: enum(u32) { @"catch" = 0, filter = 1, finally = 2, fault = 4, _ },
+    try_offset: u32,
+    try_len: u32,
+    handler_offset: u32,
+    handler_len: u32,
+    data: extern union {
+        filter_offset: u32,
+        catch_class: ?*const Class,
+    },
 };
 
 pub const il2cpp = struct {

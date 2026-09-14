@@ -2109,8 +2109,10 @@ fn evalBuiltin(
                 else => unreachable,
             };
             const object = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
+            const class = vm.dotnet_funcs.object_get_class(object);
+            gchandleFree(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
             (try vm.push(Type)).* = .class;
-            (try vm.push(*const dotnet.Class)).* = vm.dotnet_funcs.object_get_class(object);
+            (try vm.push(*const dotnet.Class)).* = class;
         },
         .@"@Discard" => {
             var value = vm.pop(args_addr);
@@ -4671,6 +4673,13 @@ fn goodCodeTests(dotnet_funcs: *const Funcs) !void {
         \\// can't log _dateData as it doesn't always fit in an i64
         \\//@Log("now._dateData=", now._dateData)
         \\@Log(now.ToString())
+    );
+    try testCode(dotnet_funcs,
+        \\var mscorlib = @Assembly("mscorlib")
+        \\var DateTime = @Class(mscorlib.System.DateTime)
+        \\var now = DateTime.get_Now()
+        \\@Assert(@NotNull(@ClassOf(now)))
+        \\@Assert(@NotNull(@ClassOf(DateTime.get_Now())))
     );
     try testCode(dotnet_funcs,
         \\var counter = 0

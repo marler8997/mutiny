@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
         mutiny_mod.unsanitized.addImport("zydis", zydis.unsanitized);
     }
     const mutiny_mono_dll_mod = b.createModule(.{ .root_source_file = mutiny_mono_dll.path() });
+    const unity_core_stub_mod = b.createModule(.{ .root_source_file = unity_stub_dll.path() });
     mutiny_mod.sanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
     mutiny_mod.unsanitized.addImport("mutiny_mono_dll", mutiny_mono_dll_mod);
 
@@ -162,6 +163,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "win32", .module = win32_mod },
+                .{ .name = "unity_core_stub_dll", .module = unity_core_stub_mod },
             },
         }),
     });
@@ -171,7 +173,20 @@ pub fn build(b: *std.Build) void {
     {
         const run = b.addRunArtifact(test_game_mono);
         run.step.dependOn(&install_test_game_mono.step);
-        b.step("testgamemono-raw", "").dependOn(&run.step);
+        b.step("testgamemono-raw", "run TestGameMono with nothing injected").dependOn(&run.step);
+    }
+    if (b.graph.env_map.get("LOCALAPPDATA")) |localappdata| {
+        const start = b.addSystemCommand(&.{
+            b.fmt("{s}\\mutiny\\bin\\mutiny.exe", .{localappdata}),
+            "start",
+            b.getInstallPath(.bin, "TestGameMono.exe"),
+        });
+        start.step.dependOn(&install_appdata.step);
+        start.step.dependOn(&install_test_game_mono.step);
+        b.step(
+            "start-testgamemono",
+            "install-appdata, then start TestGameMono with Mutiny.dll injected",
+        ).dependOn(&start.step);
     }
 
     const cli = b.addExecutable(.{
@@ -368,6 +383,7 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = test_dll.path(),
                 }) },
                 .{ .name = "mutiny_mono_dll", .module = mutiny_mono_dll_mod },
+                .{ .name = "unity_core_stub_dll", .module = unity_core_stub_mod },
             },
         }),
     });

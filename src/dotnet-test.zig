@@ -135,6 +135,7 @@ pub fn main() !void {
                 .{},
             );
             std.log.info("mono_jit_init success", .{});
+            loadStubAssembly(&dotnet_funcs);
             loadTestAssembly(&dotnet_funcs);
             break :blk result;
         },
@@ -263,6 +264,26 @@ const Funcs = struct {
         },
     },
 };
+
+const unity_core_stub_dll = @embedFile("unity_core_stub_dll");
+
+fn loadStubAssembly(funcs: *const Funcs) void {
+    const mono = &funcs.kind.mono;
+    var status: dotnet.MonoImageOpenStatus = .ok;
+    const image = mono.image_open_from_data(
+        unity_core_stub_dll,
+        @intCast(unity_core_stub_dll.len),
+        1,
+        &status,
+    ) orelse errExit("mono_image_open_from_data(UnityEngine.CoreModule stub) failed with {t}", .{status});
+    if (status != .ok) errExit("mono_image_open_from_data(UnityEngine.CoreModule stub) gave status {t}", .{status});
+    _ = mono.assembly_load_from(image, "UnityEngine.CoreModule", &status) orelse errExit(
+        "mono_assembly_load_from(UnityEngine.CoreModule stub) failed with {t}",
+        .{status},
+    );
+    if (status != .ok) errExit("mono_assembly_load_from(UnityEngine.CoreModule stub) gave status {t}", .{status});
+    std.log.info("loaded the embedded UnityEngine.CoreModule stub ({} bytes)", .{unity_core_stub_dll.len});
+}
 
 const mutiny_test_dll = @embedFile("mutiny_test_dll");
 

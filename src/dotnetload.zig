@@ -2,6 +2,10 @@ pub fn resolve(comptime T: type, kind: Kind, module: dynlib.Module, proc_ref: *[
     return resolveSet(T, kind, null, module, proc_ref);
 }
 
+pub fn resolveOnly(comptime T: type, comptime kind: Kind, module: dynlib.Module, proc_ref: *[:0]const u8) error{ProcNotFound}!T {
+    return resolveSet(T, kind, kind, module, proc_ref);
+}
+
 pub fn resolveMono(comptime T: type, module: dynlib.Module, proc_ref: *[:0]const u8) error{ProcNotFound}!T {
     return resolveGroup(T, .mono, module, proc_ref);
 }

@@ -30,32 +30,35 @@ fn testIl2cppUpdate(funcs: *const Funcs) !void {
 }
 
 fn testMonoUpdate(funcs: *const Funcs) !void {
-    const mono = &funcs.kind.mono;
-    const ticker = try mutinymono.load(&mono.hook);
-    const update = funcs.class_get_method_from_name(ticker, "Update", 0) orelse return error.TickerUpdateNotFound;
-    const ticker_instance = mono.object_new(funcs.domain_get().?, ticker) orelse return error.TickerObjectNewFailed;
+    const hook = &funcs.kind.mono.hook;
+    const ticker = try mutinymono.load(hook);
+    try mutinymono.instantiate(hook, ticker);
+    const core = mutinymono.findImage(hook, "UnityEngine.CoreModule") orelse return error.NoCoreModuleStub;
+    const loop = funcs.class_from_name(core, "UnityEngine", "TestPlayerLoop") orelse return error.NoTestPlayerLoop;
+    const update = funcs.class_get_method_from_name(loop, "Update", 0) orelse return error.TestPlayerLoopUpdateNotFound;
     const cursor = @import("root").testMutinyUpdateCursor();
     var exception: ?*const dotnet.Object = null;
-    _ = funcs.runtime_invoke(update, ticker_instance, null, &exception);
+    _ = funcs.runtime_invoke(update, null, null, &exception);
     if (exception) |e| {
-        std.log.err("Ticker.Update threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
-        return error.TickerUpdateThrew;
+        std.log.err("TestPlayerLoop.Update threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
+        return error.TestPlayerLoopUpdateThrew;
     }
     if (!@import("root").testMutinyUpdateCalled(cursor)) return error.TickerUpdateNotInvoked;
-    const gui = funcs.class_get_method_from_name(ticker, "OnGUI", 0) orelse return error.TickerGuiNotFound;
+    const gui = funcs.class_get_method_from_name(loop, "OnGUI", 0) orelse return error.TestPlayerLoopGuiNotFound;
     const gui_cursor = @import("root").testMutinyGuiCursor();
-    _ = funcs.runtime_invoke(gui, ticker_instance, null, &exception);
+    _ = funcs.runtime_invoke(gui, null, null, &exception);
     if (exception) |e| {
-        std.log.err("Ticker.OnGUI threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
-        return error.TickerGuiThrew;
+        std.log.err("TestPlayerLoop.OnGUI threw {s}", .{funcs.class_get_name(funcs.object_get_class(e))});
+        return error.TestPlayerLoopGuiThrew;
     }
     if (!@import("root").testMutinyGuiCalled(gui_cursor)) return error.TickerGuiNotInvoked;
-    std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, Ticker.Update and OnGUI reached their internal calls", .{});
+    std.log.info("mono MonoBehaviour: MutinyMono.dll loaded, AddComponent built the Ticker, and TestPlayerLoop reached Update and OnGUI", .{});
 }
 
 pub const Funcs = struct {
     vm: Vm.Funcs,
     domain_get: *const dotnet.shared.domain_get,
+    class_from_name: *const dotnet.shared.class_from_name,
     class_get_name: *const dotnet.shared.class_get_name,
     class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
     object_get_class: *const dotnet.shared.object_get_class,
@@ -63,7 +66,6 @@ pub const Funcs = struct {
     kind: union(dotnet.Kind) {
         mono: struct {
             hook: mutinymono.Funcs,
-            object_new: *const dotnet.mono.object_new,
         },
         il2cpp: struct {
             class: il2cppclass.Funcs,

@@ -126,7 +126,7 @@ const FindImage = struct {
     match: ?*const dotnet.Image = null,
 };
 
-fn findImage(funcs: *const Funcs, needle: []const u8) ?*const dotnet.Image {
+pub fn findImage(funcs: *const Funcs, needle: []const u8) ?*const dotnet.Image {
     var ctx: FindImage = .{ .funcs = funcs, .needle = needle };
     funcs.mono.assembly_foreach(&findImageCallback, &ctx);
     return ctx.match;

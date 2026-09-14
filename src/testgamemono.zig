@@ -11,13 +11,30 @@ const MonoState = union(enum) {
         reason: union(enum) {
             proc_not_found: [:0]const u8,
             mono_jit_init,
+            stub_image: dotnet.MonoImageOpenStatus,
+            stub_assembly: dotnet.MonoImageOpenStatus,
+            stub_class,
+            stub_method: [:0]const u8,
         },
     },
     loaded: struct {
         dll_string: [:0]const u16,
         module: win32.HINSTANCE,
+        loop: PlayerLoop,
     },
 };
+
+const PlayerLoop = struct {
+    funcs: MonoFuncs,
+    update: *const dotnet.Method,
+    on_gui: *const dotnet.Method,
+    ticks: u64 = 0,
+    stopped: ?struct { method: []const u8, exception: [*:0]const u8 } = null,
+};
+
+const tick_timer_id = 1;
+const tick_ms = 16;
+const ticks_per_repaint = 60;
 
 pub export fn wWinMain(
     hInstance: win32.HINSTANCE,
@@ -60,6 +77,9 @@ pub export fn wWinMain(
         hInstance, // Instance handle
         null, // Additional application data
     ) orelse win32.panicWin32("CreateWindow", win32.GetLastError());
+    if (global.mono_state == .loaded) {
+        if (0 == win32.SetTimer(hwnd, tick_timer_id, tick_ms, null)) win32.panicWin32("SetTimer", win32.GetLastError());
+    }
     _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
     var msg: win32.MSG = undefined;
     while (win32.GetMessageW(&msg, null, 0, 0) != 0) {
@@ -73,6 +93,10 @@ fn WindowProc(hwnd: win32.HWND, msg: u32, wParam: win32.WPARAM, lParam: win32.LP
     switch (msg) {
         win32.WM_DESTROY => {
             win32.PostQuitMessage(0);
+            return 0;
+        },
+        win32.WM_TIMER => {
+            if (wParam == tick_timer_id) tick(hwnd);
             return 0;
         },
         win32.WM_PAINT => {
@@ -95,12 +119,21 @@ fn WindowProc(hwnd: win32.HWND, msg: u32, wParam: win32.WPARAM, lParam: win32.LP
                     switch (f.reason) {
                         .proc_not_found => |name| lineOutFmt(hdc, row, "mono missing function '{s}'", .{name}),
                         .mono_jit_init => lineOut(hdc, row, "mono_jit_init failed"),
+                        .stub_image => |status| lineOutFmt(hdc, row, "opening the UnityEngine.CoreModule stub image failed: {t}", .{status}),
+                        .stub_assembly => |status| lineOutFmt(hdc, row, "loading the UnityEngine.CoreModule stub assembly failed: {t}", .{status}),
+                        .stub_class => lineOut(hdc, row, "the UnityEngine.CoreModule stub has no TestPlayerLoop class"),
+                        .stub_method => |name| lineOutFmt(hdc, row, "TestPlayerLoop has no {s} method", .{name}),
                     }
                     lineOutFmt(hdc, row + 1, "DLL '{f}'", .{fmtW(f.dll_string)});
                 },
                 .loaded => |loaded| {
                     lineOut(hdc, row, "Mono Loaded.");
                     lineOutFmt(hdc, row + 1, "DLL '{f}'", .{fmtW(loaded.dll_string)});
+                    if (loaded.loop.stopped) |stopped| {
+                        lineOutFmt(hdc, row + 2, "player loop stopped after {} ticks: {s} threw {s}", .{ loaded.loop.ticks, stopped.method, stopped.exception });
+                    } else {
+                        lineOutFmt(hdc, row + 2, "player loop: {} ticks", .{loaded.loop.ticks});
+                    }
                 },
             }
             return 0;
@@ -108,6 +141,36 @@ fn WindowProc(hwnd: win32.HWND, msg: u32, wParam: win32.WPARAM, lParam: win32.LP
         else => {},
     }
     return win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn tick(hwnd: win32.HWND) void {
+    const loop = switch (global.mono_state) {
+        .loaded => |*loaded| &loaded.loop,
+        else => return,
+    };
+    if (loop.stopped != null) return;
+    const calls = [_]struct { name: []const u8, method: *const dotnet.Method }{
+        .{ .name = "Update", .method = loop.update },
+        .{ .name = "OnGUI", .method = loop.on_gui },
+    };
+    for (calls) |call| {
+        var exception: ?*const dotnet.Object = null;
+        _ = loop.funcs.runtime_invoke(call.method, null, null, &exception);
+        if (exception) |e| {
+            const class_name = loop.funcs.class_get_name(loop.funcs.object_get_class(e));
+            std.log.err("TestPlayerLoop.{s} threw {s}, the player loop is stopped", .{ call.name, class_name });
+            loop.stopped = .{ .method = call.name, .exception = class_name };
+            if (0 == win32.KillTimer(hwnd, tick_timer_id)) win32.panicWin32("KillTimer", win32.GetLastError());
+            invalidate(hwnd);
+            return;
+        }
+    }
+    loop.ticks += 1;
+    if (loop.ticks % ticks_per_repaint == 0) invalidate(hwnd);
+}
+
+fn invalidate(hwnd: win32.HWND) void {
+    if (0 == win32.InvalidateRect(hwnd, null, 1)) win32.panicWin32("InvalidateRect", win32.GetLastError());
 }
 
 const margin = 5;
@@ -122,10 +185,20 @@ fn lineOutFmt(hdc: win32.HDC, row: i32, comptime fmt: []const u8, args: anytype)
 }
 
 const MonoFuncs = struct {
-    jit_init: *const dotnet.mono.jit_init,
-    set_assemblies_path: *const dotnet.mono.set_assemblies_path,
-    domain_assembly_open: *const dotnet.mono.domain_assembly_open,
+    class_from_name: *const dotnet.shared.class_from_name,
+    class_get_method_from_name: *const dotnet.shared.class_get_method_from_name,
+    class_get_name: *const dotnet.shared.class_get_name,
+    object_get_class: *const dotnet.shared.object_get_class,
+    runtime_invoke: *const dotnet.shared.runtime_invoke,
+    mono: struct {
+        jit_init: *const dotnet.mono.jit_init,
+        set_assemblies_path: *const dotnet.mono.set_assemblies_path,
+        image_open_from_data: *const dotnet.mono.image_open_from_data,
+        assembly_load_from: *const dotnet.mono.assembly_load_from,
+    },
 };
+
+const unity_core_stub_dll = @embedFile("unity_core_stub_dll");
 
 fn initMono() MonoState {
     const MonoDll = struct {
@@ -160,7 +233,7 @@ fn initMono() MonoState {
     std.log.info("successfully loaded '{f}'", .{fmtW(dll.load_string)});
 
     var missing_proc: [:0]const u8 = undefined;
-    const funcs = dotnetload.resolveMono(MonoFuncs, module, &missing_proc) catch return .{ .init_failed = .{
+    const funcs = dotnetload.resolveOnly(MonoFuncs, .mono, module, &missing_proc) catch return .{ .init_failed = .{
         .dll_string = dll.load_string,
         .module = module,
         .reason = .{ .proc_not_found = missing_proc },
@@ -170,44 +243,42 @@ fn initMono() MonoState {
     switch (dll.kind) {
         .name => {},
         .repo_game => {
-            funcs.set_assemblies_path(repo_managed);
+            funcs.mono.set_assemblies_path(repo_managed);
         },
     }
 
     std.log.info("mono_jit_init...", .{});
-    const domain = funcs.jit_init("TestGameDomain") orelse {
+    const domain = funcs.mono.jit_init("TestGameDomain") orelse {
         std.log.err("mono_jit_init failed", .{});
         return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .mono_jit_init } };
     };
     std.log.info("Mono domain created: 0x{x}", .{@intFromPtr(domain)});
 
-    if (funcs.domain_assembly_open(domain, "System.dll")) |assembly| {
-        _ = assembly;
-        std.log.info("System.dll: loaded", .{});
-    } else {
-        std.log.info("System.dll: not loaded", .{});
-    }
+    var status: dotnet.MonoImageOpenStatus = .ok;
+    const image = funcs.mono.image_open_from_data(
+        unity_core_stub_dll.ptr,
+        @intCast(unity_core_stub_dll.len),
+        1,
+        &status,
+    ) orelse return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_image = status } } };
+    if (status != .ok) return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_image = status } } };
+    _ = funcs.mono.assembly_load_from(image, "UnityEngine.CoreModule", &status) orelse
+        return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_assembly = status } } };
+    if (status != .ok) return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_assembly = status } } };
+    std.log.info("loaded the embedded UnityEngine.CoreModule stub ({} bytes)", .{unity_core_stub_dll.len});
 
-    switch (dll.kind) {
-        .name => {},
-        .repo_game => {
-            const repo_extra_dlls = [_][]const u8{
-                "Assembly-CSharp.dll",
-                "Facepunch.Steamworks.Win64.dll",
-            };
-            inline for (repo_extra_dlls) |sub_path| {
-                const filename = repo_managed ++ "\\" ++ sub_path;
-                if (funcs.domain_assembly_open(domain, filename)) |assembly| {
-                    _ = assembly;
-                    std.log.info("{s}: loaded", .{sub_path});
-                } else {
-                    std.log.info("{s}: not loaded", .{sub_path});
-                }
-            }
-        },
-    }
+    const loop_class = funcs.class_from_name(image, "UnityEngine", "TestPlayerLoop") orelse
+        return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .stub_class } };
+    const update = funcs.class_get_method_from_name(loop_class, "Update", 0) orelse
+        return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_method = "Update" } } };
+    const on_gui = funcs.class_get_method_from_name(loop_class, "OnGUI", 0) orelse
+        return .{ .init_failed = .{ .dll_string = dll.load_string, .module = module, .reason = .{ .stub_method = "OnGUI" } } };
 
-    return .{ .loaded = .{ .dll_string = dll.load_string, .module = module } };
+    return .{ .loaded = .{
+        .dll_string = dll.load_string,
+        .module = module,
+        .loop = .{ .funcs = funcs, .update = update, .on_gui = on_gui },
+    } };
 }
 
 const std = @import("std");

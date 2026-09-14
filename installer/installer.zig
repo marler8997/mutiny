@@ -197,13 +197,14 @@ fn runInstall(install_dir: []const u8, self_exe: []const u8) void {
     std.log.info("install done: {t}", .{outcome});
     const answer = dialog.show(.{
         .title = switch (outcome) {
-            .installed => "Mutiny is installed",
-            .updated => "Mutiny is updated",
-            .already_installed => "Mutiny was already installed",
+            .installed => "Mutiny has been installed",
+            .updated => "Mutiny has been updated",
+            .already_installed => "Mutiny is already installed",
         },
         .lines = &.{
             .{ .text = install_dir, .muted = true },
-            .{ .text = "It is in the Start Menu, and 'mutiny' works in new consoles." },
+            .{ .text = "It is in the Start Menu." },
+            .{ .text = "'mutiny' is available on the command line in new consoles." },
         },
         .buttons = &.{
             .{ .label = "Launch Mutiny", .style = .primary },

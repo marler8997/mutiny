@@ -31,3 +31,10 @@ pub const options: Options = if (@hasDecl(root, "mutiny_options"))
     root.mutiny_options
 else
     @compileError("the root module must declare 'pub const mutiny_options: mutiny.Options'");
+
+test {
+    _ = @import("lex.zig");
+    _ = @import("Memory.zig");
+    _ = @import("sections.zig");
+    _ = @import("steam.zig");
+}

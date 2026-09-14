@@ -231,6 +231,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const layout_mod = b.createModule(.{ .root_source_file = b.path("layout/layout.zig") });
+    const il_mod = b.createModule(.{ .root_source_file = b.path("il/il.zig") });
 
     const gui = b.addExecutable(.{
         .name = "Mutiny",
@@ -350,21 +351,22 @@ pub fn build(b: *std.Build) void {
 
     const unittest_step = b.step("unittest", "");
 
-    {
+    const unit_tests = [_]struct { name: []const u8, root: []const u8 }{
+        .{ .name = "mutiny", .root = "src/mutiny.zig" },
+        .{ .name = "layout", .root = "layout/layout.zig" },
+        .{ .name = "il", .root = "il/il.zig" },
+    };
+    for (unit_tests) |unit| {
         const t = b.addTest(.{
+            .name = b.fmt("unittest-{s}", .{unit.name}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/testroot.zig"),
+                .root_source_file = b.path(unit.root),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "layout", .module = layout_mod },
-                },
             }),
         });
-        if (target.result.os.tag == .windows) {
-            t.root_module.addImport("win32", win32_mod);
-        }
         const run = b.addRunArtifact(t);
+        b.step(t.name, "").dependOn(&run.step);
         unittest_step.dependOn(&run.step);
     }
 
@@ -384,6 +386,7 @@ pub fn build(b: *std.Build) void {
                 }) },
                 .{ .name = "mutiny_mono_dll", .module = mutiny_mono_dll_mod },
                 .{ .name = "unity_core_stub_dll", .module = unity_core_stub_mod },
+                .{ .name = "il", .module = il_mod },
             },
         }),
     });

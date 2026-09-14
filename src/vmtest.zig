@@ -66,6 +66,7 @@ pub const Funcs = struct {
     kind: union(dotnet.Kind) {
         mono: struct {
             hook: mutinymono.Funcs,
+            il: iltest.Funcs,
         },
         il2cpp: struct {
             class: il2cppclass.Funcs,
@@ -77,7 +78,10 @@ pub const Funcs = struct {
 
 pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
     const dotnet_funcs = &funcs.vm;
-    if (funcs.kind == .mono) try testMonoUpdate(funcs);
+    if (funcs.kind == .mono) {
+        try testMonoUpdate(funcs);
+        try iltest.run(&funcs.kind.mono.il);
+    }
     if (funcs.kind == .il2cpp) {
         // il2cpp needs the version to gate the synthetic-class layout; mono never uses it, so a
         // mono game with an unreadable UnityPlayer.dll can still run these tests.
@@ -356,6 +360,7 @@ const std = @import("std");
 
 const dotnet = @import("dotnet.zig");
 const il2cppclass = @import("il2cppclass.zig");
+const iltest = @import("iltest.zig");
 const mutinymono = @import("mutinymono.zig");
 const il2cpptestfixture = @import("il2cpptestfixture.zig");
 const sections = @import("sections.zig");

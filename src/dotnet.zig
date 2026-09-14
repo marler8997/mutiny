@@ -9,6 +9,7 @@ pub const AssemblyName = opaque {};
 pub const Image = opaque {};
 pub const Class = opaque {};
 pub const Method = opaque {};
+pub const MethodHeader = opaque {};
 pub const MethodSignature = opaque {};
 pub const VTable = opaque {};
 pub const ClassField = opaque {};
@@ -146,6 +147,12 @@ pub const mono = struct {
     pub const signature_get_param_count = fn (*const MethodSignature) callconv(.c) u32;
     pub const method_get_param_names = fn (*const Method, names: [*]?[*:0]const u8) callconv(.c) void;
     pub const field_get_value_object = fn (*const Domain, *const ClassField, obj: ?*const Object) callconv(.c) ?*const Object;
+    pub const get_corlib = fn () callconv(.c) ?*const Image;
+    pub const method_get_header = fn (*const Method) callconv(.c) ?*const MethodHeader;
+    pub const method_header_get_code = fn (*const MethodHeader, code_size: *u32, max_stack: *u32) callconv(.c) ?[*]const u8;
+    pub const metadata_free_mh = fn (*const MethodHeader) callconv(.c) void;
+    pub const opcode_value = fn (ip: *[*]const u8, end: [*]const u8) callconv(.c) c_int;
+    pub const opcode_name = fn (opcode: c_int) callconv(.c) [*:0]const u8;
 };
 
 pub const il2cpp = struct {

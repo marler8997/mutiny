@@ -102,8 +102,10 @@ pub fn toWide(utf8: []const u8, buf: []u16) [:0]const u16 {
     var out: usize = 0;
     var i: usize = 0;
     while (i < utf8.len) {
-        const len = std.unicode.utf8ByteSequenceLength(utf8[i]) catch 1;
-        const cp: u21 = if (i + len <= utf8.len) std.unicode.wtf8Decode(utf8[i..][0..len]) catch 0xFFFD else 0xFFFD;
+        const len: usize, const cp: u21 = if (std.unicode.utf8ByteSequenceLength(utf8[i])) |n| .{
+            n,
+            if (i + n <= utf8.len) std.unicode.wtf8Decode(utf8[i..][0..n]) catch 0xFFFD else 0xFFFD,
+        } else |_| .{ 1, 0xFFFD };
         const units: usize = if (cp >= 0x10000) 2 else 1;
         if (out + units > limit) {
             buf[out] = 0x2026;

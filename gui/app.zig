@@ -128,9 +128,36 @@ const global = struct {
     var scale: f32 = 1;
     var details: ?Details = null;
     var copied: ?layout.DetailsButton = null;
+    var notice: ?[]u8 = null;
+    var notice_copied = false;
 };
 
 const running_allocator = std.heap.smp_allocator;
+
+pub const failure_allocator = std.heap.smp_allocator;
+
+fn setNotice(comptime fmt: []const u8, args: anytype) void {
+    const text = std.fmt.allocPrint(running_allocator, fmt, args) catch |e| {
+        std.log.err("out of memory showing a failure: {t}", .{e});
+        return;
+    };
+    clearNotice();
+    global.notice = text;
+    global.notice_copied = false;
+    platform.invalidate();
+}
+
+fn clearNotice() void {
+    const text = global.notice orelse return;
+    running_allocator.free(text);
+    global.notice = null;
+    platform.invalidate();
+}
+
+fn noticeLayout() ?layout.Notice {
+    if (global.notice == null) return null;
+    return .init(global.client, global.scale);
+}
 
 const Details = struct {
     name_buf: [layout.max_game_name]u8,
@@ -271,11 +298,20 @@ pub fn onGameAttached(pid: u32) void {
     platform.invalidate();
 }
 
-pub fn onAttachDone(pid: u32, success: bool) void {
-    const r = findRunning(pid) orelse return;
-    r.attach = if (success) .idle else .failed;
-    if (success) r.status = .attached;
-    platform.invalidate();
+pub fn onAttachDone(pid: u32, failure: ?[:0]u8) void {
+    defer if (failure) |text| failure_allocator.free(text);
+    defer platform.invalidate();
+    const maybe_running = findRunning(pid);
+    if (maybe_running) |r| {
+        r.attach = if (failure == null) .idle else .failed;
+        if (failure == null) r.status = .attached;
+    }
+    const text = failure orelse return;
+    if (maybe_running) |r| {
+        setNotice("{s} (pid {}): attach failed: {s}", .{ r.name, pid, text });
+    } else {
+        setNotice("pid {}: attach failed: {s}", .{ pid, text });
+    }
 }
 
 fn findRunning(pid: u32) ?*Running {
@@ -319,7 +355,8 @@ pub fn onMouse(position: ?layout.XY) void {
 }
 
 fn grid() layout.Grid {
-    return .init(global.client, global.scale, global.games.slice().len, global.scroll);
+    const client = if (noticeLayout()) |n| n.clientAbove(global.client, global.scale) else global.client;
+    return .init(client, global.scale, global.games.slice().len, global.scroll);
 }
 
 fn bar() layout.Bar {
@@ -378,6 +415,13 @@ pub fn onMouseButton(button: layout.MouseButton, state: layout.ButtonState, posi
                 platform.captureMouse(false);
                 return;
             }
+            if (noticeLayout()) |n| if (n.rect.contains(position)) {
+                if (n.close.contains(position)) return clearNotice();
+                if (n.copy.contains(position)) {
+                    if (copyToClipboard(global.notice.?)) global.notice_copied = true;
+                }
+                return;
+            };
             if (global.details) |*d| {
                 const dl: layout.Details = .init(global.client, global.scale);
                 if (dl.back.contains(position)) return closeDetails();
@@ -462,21 +506,24 @@ fn clickLaunch(game: *Game) void {
     l.id = global.next_launch_id;
     global.next_launch_id += 1;
     l.state = .launching;
+    clearNotice();
     std.log.info("launch '{s}': {s}", .{ game.name, exe });
     platform.launch(l.id, exe);
     platform.invalidate();
 }
 
-pub fn onLaunchDone(id: u32, success: bool) void {
+pub fn onLaunchDone(id: u32, failure: ?[:0]u8) void {
+    defer if (failure) |text| failure_allocator.free(text);
     for (global.launches.items, 0..) |*l, index| {
         if (l.id != id) continue;
-        if (success) {
+        if (failure) |text| {
+            l.state = .failed;
+            setNotice("{s}: launch failed: {s}", .{ l.name(), text });
+        } else {
             for (global.running.items) |*r| {
                 if (std.ascii.eqlIgnoreCase(r.name, l.name())) r.status = .attached;
             }
             _ = global.launches.swapRemove(index);
-        } else {
-            l.state = .failed;
         }
         break;
     }
@@ -487,6 +534,7 @@ fn clickAttach(r: *Running) void {
     switch (r.button()) {
         .attach, .attach_failed => {
             r.attach = .attaching;
+            clearNotice();
             platform.attach(r.pid);
         },
         else => {},
@@ -544,6 +592,7 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     global.client = client;
     global.scale = scale;
     p.clear(layout.color.window, layout.window_alpha);
+    defer paintNotice(p);
     if (global.details) |*d| {
         if (d.game()) |game| return paintDetails(p, client, scale, d, game);
         global.details = null;
@@ -625,6 +674,22 @@ pub fn onPaint(p: *const platform.Painter, client: layout.XY, scale: f32) void {
     }
 }
 
+fn paintNotice(p: *const platform.Painter) void {
+    const text = global.notice orelse return;
+    const n = noticeLayout().?;
+    p.fill(n.rect, layout.color.failed);
+    p.textWrapped(text, n.text, layout.color.text);
+    for ([_]struct { rect: layout.Rect, label: []const u8 }{
+        .{ .rect = n.copy, .label = if (global.notice_copied) layout.notice_text.copied else layout.notice_text.copy },
+        .{ .rect = n.close, .label = layout.notice_text.close },
+    }) |b| {
+        const style = plainButton(b.label);
+        const hot = if (global.mouse) |m| b.rect.contains(m) else false;
+        p.fill(b.rect, if (hot) style.fill_hover else style.fill);
+        p.text(style.label, b.rect, style.ink, .center);
+    }
+}
+
 fn paintIcon(p: *const platform.Painter, game_name: []const u8, r: layout.Rect) void {
     if (gameIcon(game_name, r)) |icon| {
         p.drawIcon(icon, r);
@@ -698,19 +763,23 @@ fn plainButton(label: []const u8) layout.Button.Style {
 }
 
 fn copyText(which: layout.DetailsButton, text: []const u8) void {
+    if (copyToClipboard(text)) global.copied = which;
+}
+
+fn copyToClipboard(text: []const u8) bool {
     const units = std.unicode.calcWtf16LeLen(text) catch |err| {
         std.log.err("cannot copy '{s}': {t}", .{ text, err });
-        return;
+        return false;
     };
-    const clip = platform.ClipboardText.alloc(units + 1) orelse return;
+    const clip = platform.ClipboardText.alloc(units + 1) orelse return false;
     const len = std.unicode.wtf8ToWtf16Le(clip.buf, text) catch |err| {
         std.log.err("cannot copy '{s}': {t}", .{ text, err });
         clip.discard();
-        return;
+        return false;
     };
     clip.buf[len] = 0;
     clip.commit();
-    global.copied = which;
+    return true;
 }
 
 fn ensureMods(game_name: []const u8) !void {

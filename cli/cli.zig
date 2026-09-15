@@ -67,8 +67,9 @@ fn cmdAttach(arena: std.mem.Allocator, args: *std.process.ArgIterator, pid: u32)
             maybe_dll = args.next() orelse errExit("--dll requires an argument", .{});
         } else errExit("unknown cli option '{s}'", .{arg});
     }
-    const dll = maybe_dll orelse try injector.findDll(arena, dll_relative_dir);
-    try injector.attach(arena, dll, pid);
+    var err: injector.InjectError = undefined;
+    const dll = maybe_dll orelse injector.findDll(arena, dll_relative_dir, &err) catch errExit("{f}", .{err});
+    injector.attach(arena, dll, pid, &err) catch errExit("attach to pid {} failed: {f}", .{ pid, err });
     return 0;
 }
 
@@ -86,9 +87,10 @@ fn cmdStart(arena: std.mem.Allocator, args: *std.process.ArgIterator) !u8 {
             } else errExit("unknown cli option '{s}'", .{arg});
         }
     };
-    const dll = maybe_dll orelse try injector.findDll(arena, dll_relative_dir);
+    var err: injector.InjectError = undefined;
+    const dll = maybe_dll orelse injector.findDll(arena, dll_relative_dir, &err) catch errExit("{f}", .{err});
     if (args.next() != null) errExit("TODO: support extra start cmdline args to pass on to exe", .{});
-    try injector.startExe(arena, dll, exe);
+    injector.startExe(arena, dll, exe, &err) catch errExit("start '{s}' failed: {f}", .{ exe, err });
     return 0;
 }
 

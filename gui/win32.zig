@@ -22,9 +22,12 @@ const TextFormats = struct {
     dpi: u32,
     left: *win32.IDWriteTextFormat,
     center: *win32.IDWriteTextFormat,
+    wrapped: *win32.IDWriteTextFormat,
 };
 
-fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT) *win32.IDWriteTextFormat {
+const TextLines = enum { one, wrapped };
+
+fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT, lines: TextLines) *win32.IDWriteTextFormat {
     var format: *win32.IDWriteTextFormat = undefined;
     {
         const size_px: f32 = @as(f32, layout.font_points) * @as(f32, @floatFromInt(dpi)) / 72.0;
@@ -45,11 +48,17 @@ fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT) *win32.IDW
         if (hr < 0) win32.panicHresult("SetTextAlignment", hr);
     }
     {
-        const hr = format.SetParagraphAlignment(.CENTER);
+        const hr = format.SetParagraphAlignment(switch (lines) {
+            .one => .CENTER,
+            .wrapped => .NEAR,
+        });
         if (hr < 0) win32.panicHresult("SetParagraphAlignment", hr);
     }
     {
-        const hr = format.SetWordWrapping(.NO_WRAP);
+        const hr = format.SetWordWrapping(switch (lines) {
+            .one => .NO_WRAP,
+            .wrapped => .WRAP,
+        });
         if (hr < 0) win32.panicHresult("SetWordWrapping", hr);
     }
     {
@@ -125,7 +134,7 @@ fn exitCallback(context: ?*anyopaque, timed_out: win32.BOOLEAN) callconv(.winapi
 pub fn attach(pid: u32) void {
     const thread = std.Thread.spawn(.{}, attachThread, .{pid}) catch |err| {
         std.log.err("cannot start the attach thread for pid {}: {t}", .{ pid, err });
-        app.onAttachDone(pid, false);
+        app.onAttachDone(pid, failureText("starting the attach thread failed with {t}", .{err}));
         return;
     };
     thread.detach();
@@ -134,14 +143,31 @@ pub fn attach(pid: u32) void {
 fn attachThread(pid: u32) void {
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena_instance.deinit();
-    const success = if (mutiny.injector.attach(arena_instance.allocator(), global.dll_path, pid)) true else |err| blk: {
-        if (err != error.Reported) std.log.err("attach to pid {} failed: {t}", .{ pid, err });
-        break :blk false;
+    var err: mutiny.injector.InjectError = undefined;
+    const failure: ?[:0]u8 = if (mutiny.injector.attach(arena_instance.allocator(), global.dll_path, pid, &err)) null else |_| blk: {
+        std.log.err("attach to pid {} failed: {f}", .{ pid, err });
+        break :blk failureText("{f}", .{err});
     };
-    if (0 == win32.PostMessageW(global.hwnd, wm_attach_done, pid, @intFromBool(success))) win32.panicWin32(
+    if (0 == win32.PostMessageW(global.hwnd, wm_attach_done, pid, failureLparam(failure))) win32.panicWin32(
         "PostMessage(attach done)",
         win32.GetLastError(),
     );
+}
+
+fn failureText(comptime fmt: []const u8, args: anytype) [:0]u8 {
+    return std.fmt.allocPrintSentinel(app.failure_allocator, fmt, args, 0) catch |e| std.debug.panic(
+        "formatting a failure message: {t}",
+        .{e},
+    );
+}
+
+fn failureLparam(failure: ?[:0]u8) win32.LPARAM {
+    return @bitCast(@intFromPtr(if (failure) |text| text.ptr else null));
+}
+
+fn failureFromLparam(lparam: win32.LPARAM) ?[:0]u8 {
+    const ptr: ?[*:0]u8 = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    return if (ptr) |p| std.mem.span(p) else null;
 }
 
 pub const max_exepath = mutiny.appdata.max_exepath;
@@ -159,7 +185,7 @@ pub fn launch(id: u32, exe: []const u8) void {
     @memcpy(args.exe_buf[0..exe.len], exe);
     const thread = std.Thread.spawn(.{}, launchThread, .{args}) catch |err| {
         std.log.err("cannot start the launch thread for '{s}': {t}", .{ exe, err });
-        app.onLaunchDone(id, false);
+        app.onLaunchDone(id, failureText("starting the launch thread failed with {t}", .{err}));
         return;
     };
     thread.detach();
@@ -169,11 +195,12 @@ fn launchThread(args: LaunchArgs) void {
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena_instance.deinit();
     const exe = args.exe_buf[0..args.exe_len];
-    const success = if (mutiny.injector.startExe(arena_instance.allocator(), global.dll_path, exe)) true else |err| blk: {
-        if (err != error.Reported) std.log.err("launch '{s}' failed: {t}", .{ exe, err });
-        break :blk false;
+    var err: mutiny.injector.InjectError = undefined;
+    const failure: ?[:0]u8 = if (mutiny.injector.startExe(arena_instance.allocator(), global.dll_path, exe, &err)) null else |_| blk: {
+        std.log.err("launch '{s}' failed: {f}", .{ exe, err });
+        break :blk failureText("{f}", .{err});
     };
-    if (0 == win32.PostMessageW(global.hwnd, wm_launch_done, args.id, @intFromBool(success))) win32.panicWin32(
+    if (0 == win32.PostMessageW(global.hwnd, wm_launch_done, args.id, failureLparam(failure))) win32.panicWin32(
         "PostMessage(launch done)",
         win32.GetLastError(),
     );
@@ -280,10 +307,10 @@ pub fn main() void {
         );
         app.init(dir);
     }
-    global.dll_path = mutiny.injector.findDll(global.arena.allocator(), "dll") catch |err| switch (err) {
-        error.Reported => std.debug.panic("Mutiny.dll is not beside this exe, see the log", .{}),
-        else => |e| std.debug.panic("finding Mutiny.dll failed: {t}", .{e}),
-    };
+    {
+        var err: mutiny.injector.InjectError = undefined;
+        global.dll_path = mutiny.injector.findDll(global.arena.allocator(), "dll", &err) catch std.debug.panic("{f}", .{err});
+    }
     {
         const exe_dir = std.fs.selfExeDirPathAlloc(global.arena.allocator()) catch |err| std.debug.panic("finding my own directory failed: {t}", .{err});
         global.agent_prompt_path = std.fs.path.join(global.arena.allocator(), &.{ exe_dir, "mutiny-agent.md" }) catch |e| std.debug.panic("{t}", .{e});
@@ -660,11 +687,11 @@ fn wndProc(hwnd: win32.HWND, msg: u32, wparam: win32.WPARAM, lparam: win32.LPARA
             return 0;
         },
         wm_attach_done => {
-            app.onAttachDone(@intCast(wparam), lparam != 0);
+            app.onAttachDone(@intCast(wparam), failureFromLparam(lparam));
             return 0;
         },
         wm_launch_done => {
-            app.onLaunchDone(@intCast(wparam), lparam != 0);
+            app.onLaunchDone(@intCast(wparam), failureFromLparam(lparam));
             return 0;
         },
         wm_game_exited => {
@@ -730,12 +757,14 @@ fn paint(hwnd: win32.HWND) void {
             if (cached.dpi == dpi) break :blk cached;
             _ = cached.left.IUnknown.Release();
             _ = cached.center.IUnknown.Release();
+            _ = cached.wrapped.IUnknown.Release();
             global.text_formats = null;
         }
         global.text_formats = .{
             .dpi = dpi,
-            .left = createTextFormat(dpi, .LEADING),
-            .center = createTextFormat(dpi, .CENTER),
+            .left = createTextFormat(dpi, .LEADING, .one),
+            .center = createTextFormat(dpi, .CENTER, .one),
+            .wrapped = createTextFormat(dpi, .LEADING, .wrapped),
         };
         break :blk &global.text_formats.?;
     };
@@ -950,6 +979,14 @@ pub const Painter = struct {
             .center => p.text_formats.center,
         };
         p.target.DrawText(wide, @intCast(wide.len), format, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
+    }
+
+    pub fn textWrapped(p: *const Painter, utf8: []const u8, r: layout.Rect, rgb: layout.Rgb) void {
+        var buf: [layout.max_text_len + 1]u16 = undefined;
+        const wide = layout.toWide(utf8, &buf);
+        p.pushClip(r);
+        defer p.popClip();
+        p.target.DrawText(wide, @intCast(wide.len), p.text_formats.wrapped, &rectF(r), p.setColor(rgb), .{}, .NATURAL);
     }
 
     pub fn pushClip(p: *const Painter, r: layout.Rect) void {

@@ -1,24 +1,82 @@
+pub const InjectError = union(enum) {
+    os: Error,
+    denied: [:0]const u8,
+    already_attached,
+    unresponsive,
+    invalid_exe: []const u8,
+    exe_not_found,
+    dll_not_found: []const u8,
+    dll_load_failed,
+    dll_not_loaded,
+    no_localappdata,
+    game_path_too_long,
+    attach_failed,
+    attach_thread_exit: u32,
+    game_exited: u32,
+
+    pub fn format(e: InjectError, w: *std.Io.Writer) error{WriteFailed}!void {
+        switch (e) {
+            .os => |os| try os.format(w),
+            .denied => |what| try w.print(
+                "{s} was denied; anti-cheat such as Easy Anti-Cheat does this, so launch the game without it to attach",
+                .{what},
+            ),
+            .already_attached => try w.writeAll("Mutiny is already running in the game"),
+            .unresponsive => try w.writeAll("Mutiny's window in the game is not responding; it may be in the middle of a managed call, so restart the game"),
+            .invalid_exe => |reason| try w.print("the exe path {s}", .{reason}),
+            .exe_not_found => try w.writeAll("the exe does not exist"),
+            .dll_not_found => |path| try w.print("there is no " ++ dll_name ++ " at '{s}'", .{path}),
+            .dll_load_failed => try w.writeAll("loading " ++ dll_name ++ " inside the game failed"),
+            .dll_not_loaded => try w.writeAll(dll_name ++ " is not loaded in the game even after injecting it"),
+            .no_localappdata => try w.writeAll("there is no LOCALAPPDATA environment variable"),
+            .game_path_too_long => try w.writeAll("the path of the game's mutiny directory is too long"),
+            .attach_failed => try w.writeAll("Mutiny could not attach inside the game, see the game's mutiny log"),
+            .attach_thread_exit => |code| try w.print("the attach thread in the game exited with 0x{x}, see the game's mutiny log", .{code}),
+            .game_exited => |code| try w.print("the game exited with code {} before Mutiny attached", .{code}),
+        }
+    }
+
+    fn set(out_err: *InjectError, e: InjectError) error{Error} {
+        out_err.* = e;
+        return error.Error;
+    }
+
+    fn setAny(out_err: *InjectError, what: [:0]const u8, any: anyerror) error{Error} {
+        return out_err.set(.{ .os = .initAny(what, any) });
+    }
+
+    fn setWin32(out_err: *InjectError, what: [:0]const u8, code: win32.WIN32_ERROR) error{Error} {
+        return out_err.set(.{ .os = .initWin32(what, code) });
+    }
+
+    fn setRemote(out_err: *InjectError, what: [:0]const u8, code: win32.WIN32_ERROR) error{Error} {
+        return switch (code) {
+            .ERROR_ACCESS_DENIED => out_err.set(.{ .denied = what }),
+            else => out_err.setWin32(what, code),
+        };
+    }
+};
+
 pub fn startExe(
     arena: std.mem.Allocator,
     dll: []const u8,
     exe: []const u8,
-) !void {
-    const exe_wide = try std.unicode.utf8ToUtf16LeAllocZ(arena, exe);
+    out_err: *InjectError,
+) error{Error}!void {
+    const exe_wide = std.unicode.utf8ToUtf16LeAllocZ(arena, exe) catch |e| return out_err.setAny("converting the exe path", e);
     defer arena.free(exe_wide);
-    const name = getname.fromExe(exe_wide) catch |err| return fail("invalid exe '{f}' ({s})", .{
-        std.unicode.fmtUtf16Le(exe_wide), switch (err) {
-            error.Empty => "can't just be an empty string",
-            error.EndsInSeparator => "cannot end with a filesystem separator",
-            error.JustDotExe => "can't just be '.exe'",
-        },
-    });
+    const name = getname.fromExe(exe_wide) catch |err| return out_err.set(.{ .invalid_exe = switch (err) {
+        error.Empty => "is empty",
+        error.EndsInSeparator => "ends in a path separator",
+        error.JustDotExe => "is just '.exe'",
+    } });
     try go(arena, dll, .{ .start = .{
         .exe = exe_wide,
         .name = name,
-    } });
+    } }, out_err);
 }
-pub fn attach(arena: std.mem.Allocator, dll: []const u8, pid: u32) !void {
-    try go(arena, dll, .{ .attach = pid });
+pub fn attach(arena: std.mem.Allocator, dll: []const u8, pid: u32, out_err: *InjectError) error{Error}!void {
+    try go(arena, dll, .{ .attach = pid }, out_err);
 }
 
 const Kind = union(enum) {
@@ -30,14 +88,11 @@ const Kind = union(enum) {
     },
 };
 
-fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
+fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind, out_err: *InjectError) error{Error}!void {
     switch (kind) {
         .attach => |pid| switch (mutinyipc.checkLiveness(pid)) {
-            .serving => return fail("pid {} already has mutiny running in it", .{pid}),
-            .unresponsive => return fail(
-                "pid {} has a mutiny window that isn't responding, it may be in the middle of a managed call, restart the app",
-                .{pid},
-            ),
+            .serving => return out_err.set(.already_attached),
+            .unresponsive => return out_err.set(.unresponsive),
             .no_window => {},
         },
         .start => {},
@@ -46,17 +101,20 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
     // TODO: should we enforce that the DLL path is absolute so that it guarantees it isn't
     //       overriden by something else?
     std.fs.cwd().access(mutiny_dll_arg, .{}) catch |err| switch (err) {
-        error.FileNotFound => return fail("mutiny dll '{s}' not found", .{mutiny_dll_arg}),
-        else => |e| return e,
+        error.FileNotFound => return out_err.set(.{ .dll_not_found = mutiny_dll_arg }),
+        else => |e| return out_err.setAny("checking for " ++ dll_name, e),
     };
     // convert the mutiny DLL path to a real absolute path so that it can be loaded by the
     // game process regardless of it's CWD.
-    const mutiny_dll_realpath = std.fs.cwd().realpathAlloc(arena, mutiny_dll_arg) catch |err| return fail(
-        "convert mutiny dll path '{s}' to realpath failed with {s}",
-        .{ mutiny_dll_arg, @errorName(err) },
+    const mutiny_dll_realpath = std.fs.cwd().realpathAlloc(arena, mutiny_dll_arg) catch |e| return out_err.setAny(
+        "resolving the " ++ dll_name ++ " path",
+        e,
     );
     // no need to free
-    const mutiny_dll_realpath_w = try std.unicode.wtf8ToWtf16LeAllocZ(arena, mutiny_dll_realpath);
+    const mutiny_dll_realpath_w = std.unicode.wtf8ToWtf16LeAllocZ(arena, mutiny_dll_realpath) catch |e| return out_err.setAny(
+        "converting the " ++ dll_name ++ " path",
+        e,
+    );
     // no need to free
 
     const process: ProcessResult = blk: switch (kind) {
@@ -71,10 +129,10 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
                 },
                 0, // do not inherit handle,
                 pid,
-            ) orelse return fail("OpenProcess pid {} failed, error={f}", .{ pid, win32.GetLastError() });
+            ) orelse return out_err.setWin32("OpenProcess", win32.GetLastError());
             break :blk .{ .created = false, .pid = pid, .process = process, .maybe_suspended_thread = null };
         },
-        .start => |start| break :blk try createProcess(arena, start.name, start.exe),
+        .start => |start| break :blk try createProcess(arena, start.name, start.exe, out_err),
     };
     defer process.deinit();
     errdefer {
@@ -87,7 +145,7 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
     }
 
     const maybe_loaded: ?*u8 = switch (kind) {
-        .attach => findRemoteModule(process.pid),
+        .attach => try findRemoteModule(process.pid, out_err),
         .start => null,
     };
     const remote_base = blk: {
@@ -95,40 +153,39 @@ fn go(arena: std.mem.Allocator, mutiny_dll_arg: []const u8, kind: Kind) !void {
             std.log.info("Mutiny.dll already loaded in pid {}", .{process.pid});
             break :blk base;
         }
-        try injectDLL(process.process, mutiny_dll_realpath_w);
-        break :blk findRemoteModule(process.pid) orelse return fail(
-            "Mutiny.dll is not loaded in pid {} even after injecting it",
-            .{process.pid},
-        );
+        try injectDLL(process.process, mutiny_dll_realpath_w, out_err);
+        break :blk (try findRemoteModule(process.pid, out_err)) orelse return out_err.set(.dll_not_loaded);
     };
-    const attach_thread = try startAttachThread(process, remote_base, mutiny_dll_realpath_w);
+    const attach_thread = try startAttachThread(process, remote_base, mutiny_dll_realpath_w, out_err);
     defer win32.closeHandle(attach_thread);
 
     if (process.maybe_suspended_thread) |thread| {
         std.log.info("resuming new process thread...", .{});
         const suspend_count = win32.ResumeThread(thread);
-        if (suspend_count == -1) std.debug.panic(
-            "ResumeThread failed, error={}",
-            .{win32.GetLastError()},
-        );
+        if (suspend_count == -1) return out_err.setWin32("ResumeThread", win32.GetLastError());
         std.log.info("process thread resumed (suspend_count={})", .{suspend_count});
     }
 
-    try waitForAttach(process, attach_thread);
+    try waitForAttach(process, attach_thread, out_err);
     std.log.info("success", .{});
 }
 
-fn startAttachThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]const u16) !win32.HANDLE {
+fn startAttachThread(
+    process: ProcessResult,
+    remote_base: *u8,
+    dll_path: [:0]const u16,
+    out_err: *InjectError,
+) error{Error}!win32.HANDLE {
     const start_rva = blk: {
-        const local = win32.LoadLibraryW(dll_path) orelse win32.panicWin32(
-            "LoadLibrary(ourself)",
+        const local = win32.LoadLibraryW(dll_path) orelse return out_err.setWin32(
+            "loading " ++ dll_name ++ " into this process",
             win32.GetLastError(),
         );
         const local_start = win32.GetProcAddress(
             local,
             mutinyipc.attach_export_name,
-        ) orelse win32.panicWin32(
-            "GetProcAddress(" ++ mutinyipc.attach_export_name ++ ")",
+        ) orelse return out_err.setWin32(
+            "finding " ++ mutinyipc.attach_export_name ++ " in " ++ dll_name,
             win32.GetLastError(),
         );
         break :blk @intFromPtr(local_start) - @intFromPtr(local);
@@ -147,13 +204,13 @@ fn startAttachThread(process: ProcessResult, remote_base: *u8, dll_path: [:0]con
         @ptrFromInt(attach_timeout_ms),
         0,
         null,
-    ) orelse win32.panicWin32("CreateRemoteThread", win32.GetLastError());
+    ) orelse return out_err.setRemote("starting the attach thread in the game", win32.GetLastError());
     return thread;
 }
 
 const attach_timeout_ms = 10 * 1000;
 
-fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE) !void {
+fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE, out_err: *InjectError) error{Error}!void {
     const handles = [_]?win32.HANDLE{ attach_thread, process.process };
     switch (win32.WaitForMultipleObjects(handles.len, &handles, 0, win32.INFINITE)) {
         @intFromEnum(win32.WAIT_OBJECT_0) => {
@@ -164,11 +221,8 @@ fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE) !void {
             );
             switch (exit_code) {
                 mutinyipc.AttachResult.success => std.log.info("mutiny is attached to pid {}", .{process.pid}),
-                mutinyipc.AttachResult.fail => return fail("attach to pid {} failed, see the game's mutiny log", .{process.pid}),
-                else => return fail(
-                    "the attach thread in pid {} exited with 0x{x}, see the game's mutiny log",
-                    .{ process.pid, exit_code },
-                ),
+                mutinyipc.AttachResult.fail => return out_err.set(.attach_failed),
+                else => return out_err.set(.{ .attach_thread_exit = exit_code }),
             }
         },
         @intFromEnum(win32.WAIT_OBJECT_0) + 1 => {
@@ -177,26 +231,20 @@ fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE) !void {
                 "GetExitCodeProcess",
                 win32.GetLastError(),
             );
-            return fail(
-                "process {} exited with {} before mutiny attached",
-                .{ process.pid, exit_code },
-            );
+            return out_err.set(.{ .game_exited = exit_code });
         },
-        @intFromEnum(win32.WAIT_FAILED) => return fail(
-            "WaitForMultipleObjects failed, error={f}",
-            .{win32.GetLastError()},
-        ),
+        @intFromEnum(win32.WAIT_FAILED) => return out_err.setWin32("WaitForMultipleObjects", win32.GetLastError()),
         else => |result| std.debug.panic("WaitForMultipleObjects(INFINITE) returned {}", .{result}),
     }
 }
 
-fn findRemoteModule(pid: u32) ?*u8 {
+fn findRemoteModule(pid: u32, out_err: *InjectError) error{Error}!?*u8 {
     const modules = blk: while (true) {
         const snapshot = win32.CreateToolhelp32Snapshot(win32.TH32CS_SNAPMODULE, pid);
         if (snapshot != win32.INVALID_HANDLE_VALUE) break :blk snapshot;
         switch (win32.GetLastError()) {
             .ERROR_BAD_LENGTH => {},
-            else => |e| win32.panicWin32("CreateToolhelp32Snapshot", e),
+            else => |e| return out_err.setRemote("listing the game's modules", e),
         }
     };
     defer win32.closeHandle(modules);
@@ -205,19 +253,17 @@ fn findRemoteModule(pid: u32) ?*u8 {
     module.dwSize = @sizeOf(win32.MODULEENTRY32W);
     if (0 == win32.Module32FirstW(modules, &module)) switch (win32.GetLastError()) {
         .ERROR_NO_MORE_FILES => return null,
-        else => |e| win32.panicWin32("Module32First", e),
+        else => |e| return out_err.setWin32("Module32First", e),
     };
     while (true) {
         const name = std.mem.sliceTo(@as([*:0]const u16, @ptrCast(&module.szModule)), 0);
-        if (eqlAsciiIgnoreCase(name, mutiny_dll_name)) return module.modBaseAddr;
+        if (eqlAsciiIgnoreCase(name, dll_name)) return module.modBaseAddr;
         if (0 == win32.Module32NextW(modules, &module)) switch (win32.GetLastError()) {
             .ERROR_NO_MORE_FILES => return null,
-            else => |e| win32.panicWin32("Module32Next", e),
+            else => |e| return out_err.setWin32("Module32Next", e),
         };
     }
 }
-
-const mutiny_dll_name = "Mutiny.dll";
 
 fn eqlAsciiIgnoreCase(wide: []const u16, ascii: []const u8) bool {
     if (wide.len != ascii.len) return false;
@@ -241,7 +287,12 @@ const ProcessResult = struct {
     }
 };
 
-fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]const u16) !ProcessResult {
+fn createProcess(
+    arena: std.mem.Allocator,
+    name: []const u16,
+    game_exe: [:0]const u16,
+    out_err: *InjectError,
+) error{Error}!ProcessResult {
     const env_block: ?[*]u16 = blk: {
         const app_id = (steam.findAppId(arena, game_exe) catch |err| {
             std.log.warn(
@@ -250,19 +301,17 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
             );
             break :blk null;
         }) orelse break :blk null;
-        var id_buf: [10]u8 = undefined;
-        const id = std.fmt.bufPrint(&id_buf, "{d}", .{app_id}) catch unreachable;
-        var env = try std.process.getEnvMap(arena);
-        try env.put("SteamAppId", id);
-        try env.put("SteamGameId", id);
+        var id_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+        const id = id_buf[0..std.fmt.printInt(&id_buf, app_id, 10, .lower, .{})];
+        var env = std.process.getEnvMap(arena) catch |e| return out_err.setAny("reading the environment", e);
+        env.put("SteamAppId", id) catch |e| return out_err.setAny("setting SteamAppId", e);
+        env.put("SteamGameId", id) catch |e| return out_err.setAny("setting SteamGameId", e);
         std.log.info("steam app id {d}: SteamAppId is set so the game does not relaunch itself through Steam", .{app_id});
-        break :blk (try std.process.createWindowsEnvBlock(arena, &env)).ptr;
+        const block = std.process.createWindowsEnvBlock(arena, &env) catch |e| return out_err.setAny("building the environment", e);
+        break :blk block.ptr;
     };
 
-    const localappdata = appdata.get() orelse return fail(
-        "no LOCALAPPDATA environment variable",
-        .{},
-    );
+    const localappdata = appdata.get() orelse return out_err.set(.no_localappdata);
 
     // these sit beside this game's log and mods, so the injector and the injected
     // DLL agree on one directory per game
@@ -273,7 +322,7 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
         &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("stdout.txt") },
     )) {
         .ok => |p| p,
-        .too_long => return fail("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),
+        .too_long => return out_err.set(.game_path_too_long),
     };
     var stderr_path_buf: [appdata.max_path]u16 = undefined;
     const stderr_path = switch (appdata.format(
@@ -282,13 +331,13 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
         &.{ win32.L("mutiny"), win32.L("app"), name, win32.L("stderr.txt") },
     )) {
         .ok => |p| p,
-        .too_long => return fail("path for game '{f}' is too long", .{std.unicode.fmtUtf16Le(name)}),
+        .too_long => return out_err.set(.game_path_too_long),
     };
 
     // makeDirs puts back every character it terminates over, so stdout_path survives
     const game_dir_len = appdata.parentDirLen(stdout_path);
     std.debug.assert(game_dir_len > 0);
-    if (appdata.makeDirs(&stdout_path_buf, game_dir_len)) |err| win32.panicWin32("CreateDirectory", err);
+    if (appdata.makeDirs(&stdout_path_buf, game_dir_len)) |err| return out_err.setWin32("creating the game's mutiny directory", err);
 
     var security_attrs: win32.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
@@ -307,10 +356,7 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
             null,
         ),
     };
-    if (stdout_file.handle == win32.INVALID_HANDLE_VALUE) win32.panicWin32(
-        "CreateFileW (stdout)",
-        win32.GetLastError(),
-    );
+    if (stdout_file.handle == win32.INVALID_HANDLE_VALUE) return out_err.setWin32("creating stdout.txt", win32.GetLastError());
     defer stdout_file.close();
 
     security_attrs = .{
@@ -330,10 +376,7 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
             null,
         ),
     };
-    if (stderr_file.handle == win32.INVALID_HANDLE_VALUE) win32.panicWin32(
-        "CreateFileW (stdout)",
-        win32.GetLastError(),
-    );
+    if (stderr_file.handle == win32.INVALID_HANDLE_VALUE) return out_err.setWin32("creating stderr.txt", win32.GetLastError());
     defer stderr_file.close();
 
     if (true) {
@@ -392,8 +435,8 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
         &pi,
     );
     if (result == 0) switch (win32.GetLastError()) {
-        .ERROR_FILE_NOT_FOUND => return fail("executable '{f}' does not exist", .{std.unicode.fmtUtf16Le(game_exe)}),
-        else => |e| win32.panicWin32("CreateProcess", e),
+        .ERROR_FILE_NOT_FOUND, .ERROR_PATH_NOT_FOUND => return out_err.set(.exe_not_found),
+        else => |e| return out_err.setWin32("CreateProcess", e),
     };
     std.log.info("created game process (pid {})", .{pi.dwProcessId});
     return .{
@@ -404,7 +447,7 @@ fn createProcess(arena: std.mem.Allocator, name: []const u16, game_exe: [:0]cons
     };
 }
 
-fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
+fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16, out_err: *InjectError) error{Error}!void {
     const path_size = (dll_path.len + 1) * @sizeOf(u16);
     const remote_mem = win32.VirtualAllocEx(
         process,
@@ -412,10 +455,7 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         path_size,
         .{ .COMMIT = 1, .RESERVE = 1 },
         win32.PAGE_READWRITE,
-    ) orelse std.debug.panic(
-        "VirtualAllocEx ({} bytes) for game process failed, error={f}",
-        .{ path_size, win32.GetLastError() },
-    );
+    ) orelse return out_err.setRemote("allocating memory in the game", win32.GetLastError());
     defer if (0 == win32.VirtualFreeEx(
         process,
         remote_mem,
@@ -430,10 +470,7 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         dll_path_bytes.ptr,
         path_size,
         null,
-    )) std.debug.panic(
-        "WriteProcessMemory for dll path ({} bytes) failed, error={f}",
-        .{ path_size, win32.GetLastError() },
-    );
+    )) return out_err.setRemote("writing the game's memory", win32.GetLastError());
     const kernel32 = win32.GetModuleHandleW(win32.L("kernel32.dll")) orelse win32.panicWin32(
         "GetModuleHandle(kernel32)",
         win32.GetLastError(),
@@ -450,14 +487,11 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         remote_mem,
         0,
         null,
-    ) orelse win32.panicWin32(
-        "CreateRemoteThread",
-        win32.GetLastError(),
-    );
+    ) orelse return out_err.setRemote("starting a thread in the game", win32.GetLastError());
     defer win32.closeHandle(thread);
     switch (win32.WaitForSingleObject(thread, win32.INFINITE)) {
         @intFromEnum(win32.WAIT_OBJECT_0) => {},
-        @intFromEnum(win32.WAIT_FAILED) => win32.panicWin32("WaitForSingleObject(thread)", win32.GetLastError()),
+        @intFromEnum(win32.WAIT_FAILED) => return out_err.setWin32("waiting for LoadLibrary in the game", win32.GetLastError()),
         else => |result| {
             std.debug.panic("WaitForSingleObject(thread) returned {}", .{result});
         },
@@ -469,34 +503,28 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16) !void {
         win32.GetLastError(),
     );
 
-    if (exit_code == 0) return fail(
-        "{f}: _DllMainCRTStartup for process attach failed.",
-        .{std.unicode.fmtUtf16Le(dll_path)},
-    );
+    if (exit_code == 0) return out_err.set(.dll_load_failed);
     std.log.debug(
         "{f}: loaded at address 0x{x} (might be truncated)",
         .{ std.unicode.fmtUtf16Le(dll_path), exit_code },
     );
 }
 
-fn fail(comptime fmt: []const u8, args: anytype) error{Reported} {
-    std.log.err(fmt, args);
-    return error.Reported;
-}
-
 /// Where Mutiny.dll lives relative to the running exe: the CLI in bin\ passes "..\dll", the
-/// GUI at the appdata root passes "dll". Logged and `error.Reported` if it is not there.
-pub fn findDll(arena: std.mem.Allocator, relative_dir: []const u8) ![]const u8 {
-    const exe_dir = std.fs.selfExeDirPathAlloc(arena) catch |err| return fail(
-        "unable to locate our own directory to find " ++ dll_name ++ " ({s})",
-        .{@errorName(err)},
+/// GUI at the appdata root passes "dll".
+pub fn findDll(arena: std.mem.Allocator, relative_dir: []const u8, out_err: *InjectError) error{Error}![]const u8 {
+    const exe_dir = std.fs.selfExeDirPathAlloc(arena) catch |e| return out_err.setAny(
+        "locating this exe's directory to find " ++ dll_name,
+        e,
     );
     defer arena.free(exe_dir);
-    const path = try std.fs.path.resolve(arena, &.{ exe_dir, relative_dir, dll_name });
-    errdefer arena.free(path);
+    const path = std.fs.path.resolve(arena, &.{ exe_dir, relative_dir, dll_name }) catch |e| return out_err.setAny(
+        "building the " ++ dll_name ++ " path",
+        e,
+    );
     std.fs.cwd().access(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return fail("no " ++ dll_name ++ " at '{s}'", .{path}),
-        else => |e| return e,
+        error.FileNotFound => return out_err.set(.{ .dll_not_found = path }),
+        else => |e| return out_err.setAny("checking for " ++ dll_name, e),
     };
     std.log.info("found dll at '{s}'", .{path});
     return path;
@@ -511,3 +539,5 @@ const appdata = @import("appdata.zig");
 const getname = @import("getname.zig");
 const mutinyipc = @import("mutinyipc.zig");
 const steam = @import("steam.zig");
+
+const Error = @import("Error.zig");

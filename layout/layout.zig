@@ -82,12 +82,12 @@ pub const Button = enum {
         return switch (button) {
             .launch => .{ .label = "Launch", .fill = color.launch, .fill_hover = color.launch_hover, .ink = color.launch_ink, .enabled = true },
             .launching => .{ .label = "Launching…", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.muted, .enabled = false },
-            .launch_failed => .{ .label = "Launch failed · retry", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
+            .launch_failed => .{ .label = "Launch", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
             .attach => .{ .label = "Attach", .fill = color.accent, .fill_hover = color.accent_hover, .ink = color.accent_ink, .enabled = true },
             .attached => .{ .label = "Attached", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.ok, .enabled = false },
             .attaching => .{ .label = "Attaching…", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.muted, .enabled = false },
             .not_responding => .{ .label = "Not responding", .fill = color.button_disabled, .fill_hover = color.button_disabled, .ink = color.bad, .enabled = false },
-            .attach_failed => .{ .label = "Attach failed · retry", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
+            .attach_failed => .{ .label = "Attach", .fill = color.failed, .fill_hover = color.failed_hover, .ink = color.bad, .enabled = true },
         };
     }
 };
@@ -215,6 +215,46 @@ pub const Bar = struct {
     pub fn hitDropdown(bar: Bar, count: usize, p: XY) ?usize {
         for (0..count) |index| if (bar.dropdownItem(index).contains(p)) return index;
         return null;
+    }
+};
+
+pub const notice_text = struct {
+    pub const copy = "Copy";
+    pub const copied = "Copied";
+    pub const close = "✕";
+};
+
+pub const Notice = struct {
+    rect: Rect,
+    text: Rect,
+    copy: Rect,
+    close: Rect,
+    gap: i32,
+
+    pub const lines = 3;
+
+    pub fn init(client: XY, s: f32) Notice {
+        const margin = scale(points.margin, s);
+        const pad = scale(points.bar_pad, s);
+        const gap = scale(points.gap, s);
+        const line_height = scale(points.line_height, s);
+        const height = line_height * lines + pad * 2;
+        const rect = Rect.ltwh(margin, client.y - margin - height, @max(0, client.x - margin * 2), height);
+        const close = Rect.ltwh(rect.right - pad - line_height, rect.top + pad, line_height, line_height);
+        const copy_width = scale(points.details_row_button_width, s);
+        const copy = Rect.ltwh(close.left - scale(points.details_row_button_inset, s) - copy_width, close.top, copy_width, line_height);
+        const text = rect.inset(pad);
+        return .{
+            .rect = rect,
+            .text = .{ .left = text.left, .top = text.top, .right = @max(text.left, copy.left - gap), .bottom = text.bottom },
+            .copy = copy,
+            .close = close,
+            .gap = gap,
+        };
+    }
+
+    pub fn clientAbove(notice: Notice, client: XY, s: f32) XY {
+        return .{ .x = client.x, .y = @max(0, notice.rect.top - notice.gap + scale(points.margin, s)) };
     }
 };
 

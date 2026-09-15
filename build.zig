@@ -472,6 +472,13 @@ const test_games = [_]TestGame{
     },
     .{ .name = "Schedule I", .step = "schedule1", .steam_dir = "Schedule I", .runtime = .il2cpp },
     .{ .name = "Gnomium", .step = "gnome", .steam_dir = "Burglin' Gnomes", .runtime = .mono },
+    .{
+        .name = "Risk of Rain 2",
+        .step = "ror",
+        .steam_dir = "Risk of Rain 2",
+        .runtime = .mono,
+        .note = " (Unity 2021.3, the mono build 2021.3 through 2022.3 games ship)",
+    },
 };
 
 fn dependencyLibrary(d: *std.Build.Dependency, name: []const u8) *std.Build.Step.Compile {

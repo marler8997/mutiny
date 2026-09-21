@@ -37,6 +37,7 @@ fn onMutinyGui() callconv(.c) void {
 }
 
 pub fn main() !void {
+    @import("unhandled.zig").install();
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     // no need to deinit
     const arena = arena_instance.allocator();

@@ -14,6 +14,7 @@ const usage =
 ;
 
 pub fn main() !u8 {
+    mutiny.unhandled.install();
     return run() catch |err| switch (err) {
         error.Reported => 0xff,
         else => |e| e,

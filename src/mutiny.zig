@@ -20,6 +20,7 @@ pub const mutinymono = @import("mutinymono.zig");
 pub const scan = @import("scan.zig");
 pub const sections = @import("sections.zig");
 pub const steam = @import("steam.zig");
+pub const unhandled = @import("unhandled.zig");
 
 pub const Options = struct {
     onUpdate: fn () callconv(.c) void,

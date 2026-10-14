@@ -33,6 +33,8 @@ const msvc_cpp_magics = [_]usize{ 0x19930520, 0x19930521, 0x19930522 };
 
 fn filter(maybe_info: ?*win32.EXCEPTION_POINTERS) callconv(.winapi) i32 {
     const info: *std.os.windows.EXCEPTION_POINTERS = @ptrCast(@alignCast(maybe_info orelse return exception_continue_search));
+    // A Debug build's std.process.abort raises a breakpoint after a panic was already reported.
+    if (info.ExceptionRecord.ExceptionCode == @intFromEnum(win32.EXCEPTION_BREAKPOINT)) return exception_continue_search;
     var buf: [256]u8 = undefined;
     const stderr = std.debug.lockStderrWriter(&buf);
     defer std.debug.unlockStderrWriter();
@@ -45,28 +47,33 @@ fn report(w: *std.Io.Writer, record: *const std.os.windows.EXCEPTION_RECORD) err
     const code: u32 = @bitCast(record.ExceptionCode);
     try w.print("unhandled exception 0x{X:0>8}", .{code});
     if (code == msvc_cpp_exception) try w.writeAll(" (a C++ throw)");
-    try w.writeAll(" at ");
-    try writeAddress(w, @intFromPtr(record.ExceptionAddress));
+    const address = @intFromPtr(record.ExceptionAddress);
+    try w.print(" at 0x{x}", .{address});
+    // Flushed before anything that could fail, so the code and address always reach stderr.
+    try w.flush();
+    try writeModule(w, address);
     try w.writeAll("\n");
     if (code == msvc_cpp_exception) try writeCppType(w, record);
     try w.flush();
 }
 
-fn writeAddress(w: *std.Io.Writer, address: usize) error{WriteFailed}!void {
-    try w.print("0x{x}", .{address});
+fn writeModule(w: *std.Io.Writer, address: usize) error{WriteFailed}!void {
     var module: ?win32.HINSTANCE = null;
     if (0 == win32.GetModuleHandleExW(
         win32.GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | win32.GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         @ptrFromInt(address),
         &module,
     )) return w.print(" ({f})", .{Error.initWin32("GetModuleHandleExW", win32.GetLastError())});
-    var path_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
+    const offset = address - @intFromPtr(module.?);
+    // MAX_PATH, not PATH_MAX_WIDE: this runs on the faulting thread, whose stack may be small or
+    // nearly exhausted, and only the basename is printed.
+    var path_buf: [win32.MAX_PATH:0]u16 = undefined;
     const len = win32.GetModuleFileNameW(module, &path_buf, path_buf.len + 1);
-    if (len == 0) return w.print(" ({f})", .{Error.initWin32("GetModuleFileNameW", win32.GetLastError())});
-    if (len == path_buf.len + 1) return w.writeAll(" (the module path is longer than PATH_MAX_WIDE)");
+    if (len == 0) return w.print(" (+0x{x}, {f})", .{ offset, Error.initWin32("GetModuleFileNameW", win32.GetLastError()) });
+    if (len == path_buf.len + 1) return w.print(" (+0x{x}, the module path is longer than MAX_PATH)", .{offset});
     const path = path_buf[0..len];
     const name = path[if (std.mem.lastIndexOfScalar(u16, path, '\\')) |i| i + 1 else 0..];
-    try w.print(" ({f}+0x{x})", .{ std.unicode.fmtUtf16Le(name), address - @intFromPtr(module.?) });
+    try w.print(" ({f}+0x{x})", .{ std.unicode.fmtUtf16Le(name), offset });
 }
 
 fn writeCppType(w: *std.Io.Writer, record: *const std.os.windows.EXCEPTION_RECORD) error{WriteFailed}!void {

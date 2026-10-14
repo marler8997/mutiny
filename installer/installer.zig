@@ -88,7 +88,7 @@ pub fn main() void {
     {
         var awareness: win32.PROCESS_DPI_AWARENESS = undefined;
         const hr = win32.GetProcessDpiAwareness(null, &awareness);
-        if (hr < 0) std.debug.panic("GetProcessDpiAwareness failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) std.debug.panic("GetProcessDpiAwareness failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
         switch (awareness) {
             .PER_MONITOR_DPI_AWARE => {},
             else => |a| std.debug.panic("the process is {t}, the manifest should make it PER_MONITOR_DPI_AWARE", .{a}),
@@ -389,9 +389,9 @@ fn removeFromPath(dir: []const u8) void {
 }
 
 fn shortcutPath() []const u8 {
-    var folder: ?win32.PWSTR = null;
-    const hr = win32.SHGetKnownFolderPath(&win32.FOLDERID_Programs, @intFromEnum(win32.KF_FLAG_CREATE), null, &folder);
-    if (hr < 0) fail("SHGetKnownFolderPath(Programs) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+    var folder: ?[*:0]u16 = null;
+    const hr = win32.SHGetKnownFolderPath(&win32.FOLDERID_Programs, win32.KF_FLAG_CREATE, null, &folder);
+    if (hr.failed) fail("SHGetKnownFolderPath(Programs) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     defer win32.CoTaskMemFree(folder);
     return join(&.{ narrow(std.mem.span(folder.?)), shortcut_name });
 }
@@ -401,25 +401,25 @@ fn writeShortcut(install_dir: []const u8) void {
     const exe = join(&.{ install_dir, gui_exe });
     {
         const hr = win32.CoInitializeEx(null, win32.COINIT_APARTMENTTHREADED);
-        if (hr < 0) fail("CoInitializeEx failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) fail("CoInitializeEx failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
     var link: *win32.IShellLinkW = undefined;
     {
         const hr = win32.CoCreateInstance(win32.CLSID_ShellLink, null, win32.CLSCTX_INPROC_SERVER, win32.IID_IShellLinkW, @ptrCast(&link));
-        if (hr < 0) fail("CoCreateInstance(ShellLink) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) fail("CoCreateInstance(ShellLink) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
     defer _ = link.IUnknown.Release();
-    if (link.SetPath(wide(exe)) < 0) fail("IShellLink.SetPath failed", .{});
-    if (link.SetWorkingDirectory(wide(install_dir)) < 0) fail("IShellLink.SetWorkingDirectory failed", .{});
-    if (link.SetIconLocation(wide(exe), 0) < 0) fail("IShellLink.SetIconLocation failed", .{});
+    if (link.SetPath(wide(exe)).failed) fail("IShellLink.SetPath failed", .{});
+    if (link.SetWorkingDirectory(wide(install_dir)).failed) fail("IShellLink.SetWorkingDirectory failed", .{});
+    if (link.SetIconLocation(wide(exe), 0).failed) fail("IShellLink.SetIconLocation failed", .{});
     var file: *win32.IPersistFile = undefined;
     {
         const hr = link.IUnknown.QueryInterface(win32.IID_IPersistFile, @ptrCast(&file));
-        if (hr < 0) fail("QueryInterface(IPersistFile) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) fail("QueryInterface(IPersistFile) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
     defer _ = file.IUnknown.Release();
     const hr = file.Save(wide(path), 1);
-    if (hr < 0) fail("save the shortcut '{s}' failed, hresult=0x{x}", .{ path, @as(u32, @bitCast(hr)) });
+    if (hr.failed) fail("save the shortcut '{s}' failed, hresult=0x{x}", .{ path, @as(u32, @bitCast(hr)) });
     std.log.info("wrote the shortcut '{s}'", .{path});
 }
 

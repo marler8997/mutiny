@@ -107,7 +107,7 @@ fn threadMain(param: ?*anyopaque) callconv(.winapi) u32 {
         }
         const timeout_ms: u32 = if (mods_watch.handle == null) mods_dir_retry_ms else win32.INFINITE;
 
-        switch (win32.WaitForMultipleObjects(handle_count, &handles, 0, timeout_ms)) {
+        switch (@intFromEnum(win32.WaitForMultipleObjects(handle_count, &handles, 0, timeout_ms))) {
             @intFromEnum(win32.WAIT_OBJECT_0) => {},
             @intFromEnum(win32.WAIT_OBJECT_0) + 1 => mods_watch.onChanged(),
             @intFromEnum(win32.WAIT_TIMEOUT) => mods_watch.open(),

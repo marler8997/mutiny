@@ -41,34 +41,34 @@ fn createTextFormat(dpi: u32, alignment: win32.DWRITE_TEXT_ALIGNMENT, lines: Tex
             win32.L(""),
             &format,
         );
-        if (hr < 0) win32.panicHresult("CreateTextFormat", hr);
+        if (hr.failed) win32.panicHresult("CreateTextFormat", hr);
     }
     {
         const hr = format.SetTextAlignment(alignment);
-        if (hr < 0) win32.panicHresult("SetTextAlignment", hr);
+        if (hr.failed) win32.panicHresult("SetTextAlignment", hr);
     }
     {
         const hr = format.SetParagraphAlignment(switch (lines) {
             .one => .CENTER,
             .wrapped => .NEAR,
         });
-        if (hr < 0) win32.panicHresult("SetParagraphAlignment", hr);
+        if (hr.failed) win32.panicHresult("SetParagraphAlignment", hr);
     }
     {
         const hr = format.SetWordWrapping(switch (lines) {
             .one => .NO_WRAP,
             .wrapped => .WRAP,
         });
-        if (hr < 0) win32.panicHresult("SetWordWrapping", hr);
+        if (hr.failed) win32.panicHresult("SetWordWrapping", hr);
     }
     {
         var ellipsis: *win32.IDWriteInlineObject = undefined;
         const create_hr = global.dwrite_factory.CreateEllipsisTrimmingSign(format, &ellipsis);
-        if (create_hr < 0) win32.panicHresult("CreateEllipsisTrimmingSign", create_hr);
+        if (create_hr.failed) win32.panicHresult("CreateEllipsisTrimmingSign", create_hr);
         defer _ = ellipsis.IUnknown.Release();
         const trimming: win32.DWRITE_TRIMMING = .{ .granularity = .CHARACTER, .delimiter = 0, .delimiterCount = 0 };
         const hr = format.SetTrimming(&trimming, ellipsis);
-        if (hr < 0) win32.panicHresult("SetTrimming", hr);
+        if (hr.failed) win32.panicHresult("SetTrimming", hr);
     }
     return format;
 }
@@ -240,7 +240,7 @@ pub fn main() void {
     {
         var awareness: win32.PROCESS_DPI_AWARENESS = undefined;
         const hr = win32.GetProcessDpiAwareness(null, &awareness);
-        if (hr < 0) std.debug.panic("GetProcessDpiAwareness failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) std.debug.panic("GetProcessDpiAwareness failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
         switch (awareness) {
             .PER_MONITOR_DPI_AWARE => {},
             else => |a| std.debug.panic("the process is {t}, the manifest should make it PER_MONITOR_DPI_AWARE", .{a}),
@@ -249,11 +249,11 @@ pub fn main() void {
 
     {
         const hr = win32.DWriteCreateFactory(.SHARED, win32.IID_IDWriteFactory, @ptrCast(&global.dwrite_factory));
-        if (hr < 0) win32.panicHresult("DWriteCreateFactory", hr);
+        if (hr.failed) win32.panicHresult("DWriteCreateFactory", hr);
     }
     {
         const hr = win32.CoInitializeEx(null, win32.COINIT_APARTMENTTHREADED);
-        if (hr < 0) win32.panicHresult("CoInitializeEx", hr);
+        if (hr.failed) win32.panicHresult("CoInitializeEx", hr);
     }
     {
         const hr = win32.CoCreateInstance(
@@ -263,7 +263,7 @@ pub fn main() void {
             win32.IID_IWICImagingFactory,
             @ptrCast(&global.wic_factory),
         );
-        if (hr < 0) win32.panicHresult("CoCreateInstance(WICImagingFactory)", hr);
+        if (hr.failed) win32.panicHresult("CoCreateInstance(WICImagingFactory)", hr);
     }
 
     var apps_path_buf: [mutiny.appdata.max_path]u16 = undefined;
@@ -318,10 +318,10 @@ pub fn main() void {
 
     const hinstance = win32.GetModuleHandleW(null);
     {
-        const small_x = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CXSMICON), 96);
-        const small_y = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CYSMICON), 96);
-        const large_x = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CXICON), 96);
-        const large_y = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CYICON), 96);
+        const small_x = win32.GetSystemMetricsForDpi(win32.SM_CXSMICON, 96);
+        const small_y = win32.GetSystemMetricsForDpi(win32.SM_CYSMICON, 96);
+        const large_x = win32.GetSystemMetricsForDpi(win32.SM_CXICON, 96);
+        const large_y = win32.GetSystemMetricsForDpi(win32.SM_CYICON, 96);
         const small = win32.LoadImageW(hinstance, @ptrFromInt(1), .ICON, small_x, small_y, win32.LR_SHARED) orelse
             std.debug.panic("LoadImage for small icon failed, error={f}", .{win32.GetLastError()});
         const large = win32.LoadImageW(hinstance, @ptrFromInt(1), .ICON, large_x, large_y, win32.LR_SHARED) orelse
@@ -370,7 +370,7 @@ pub fn main() void {
             &dark,
             @sizeOf(win32.BOOL),
         );
-        if (hr < 0) std.log.warn(
+        if (hr.failed) std.log.warn(
             "DwmSetWindowAttribute(dark mode) failed, hresult=0x{x}",
             .{@as(u32, @bitCast(hr))},
         );
@@ -415,7 +415,7 @@ pub fn main() void {
     }
 
     paint(hwnd);
-    _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
+    _ = win32.ShowWindow(hwnd, win32.SW_SHOWNORMAL);
 
     var handles = [_]?win32.HANDLE{watch};
     while (true) {
@@ -470,46 +470,46 @@ pub fn askSavePath(dir: []const u8, title: []const u8, buf: []u8) ?[]const u8 {
     var dialog: *win32.IFileSaveDialog = undefined;
     {
         const hr = win32.CoCreateInstance(win32.CLSID_FileSaveDialog, null, win32.CLSCTX_INPROC_SERVER, win32.IID_IFileSaveDialog, @ptrCast(&dialog));
-        if (hr < 0) win32.panicHresult("CoCreateInstance(FileSaveDialog)", hr);
+        if (hr.failed) win32.panicHresult("CoCreateInstance(FileSaveDialog)", hr);
     }
     defer _ = dialog.IUnknown.Release();
     {
         const hr = dialog.IFileDialog.SetOptions(.{ .OVERWRITEPROMPT = 1, .NOCHANGEDIR = 1, .PATHMUSTEXIST = 1 });
-        if (hr < 0) win32.panicHresult("IFileDialog.SetOptions", hr);
+        if (hr.failed) win32.panicHresult("IFileDialog.SetOptions", hr);
     }
     {
         var title_w: [max_title_len + 1]u16 = undefined;
         const hr = dialog.IFileDialog.SetTitle(layout.toWide(title, &title_w));
-        if (hr < 0) win32.panicHresult("IFileDialog.SetTitle", hr);
+        if (hr.failed) win32.panicHresult("IFileDialog.SetTitle", hr);
     }
     {
         var dir_w: [max_exepath + 2]u16 = undefined;
         const dir_z = layout.toWide(dir, &dir_w);
         var folder: *win32.IShellItem = undefined;
         const hr = win32.SHCreateItemFromParsingName(dir_z, null, win32.IID_IShellItem, @ptrCast(&folder));
-        if (hr < 0) {
+        if (hr.failed) {
             std.log.err("SHCreateItemFromParsingName '{s}' failed, hresult=0x{x}", .{ dir, @as(u32, @bitCast(hr)) });
             return null;
         }
         defer _ = folder.IUnknown.Release();
         const set_hr = dialog.IFileDialog.SetFolder(folder);
-        if (set_hr < 0) win32.panicHresult("IFileDialog.SetFolder", set_hr);
+        if (set_hr.failed) win32.panicHresult("IFileDialog.SetFolder", set_hr);
     }
     {
         const hr = dialog.IFileDialog.IModalWindow.Show(global.hwnd);
         if (hr == @as(win32.HRESULT, @bitCast(@as(u32, 0x800704C7)))) return null;
-        if (hr < 0) win32.panicHresult("IFileDialog.Show", hr);
+        if (hr.failed) win32.panicHresult("IFileDialog.Show", hr);
     }
     var item: ?*win32.IShellItem = null;
     {
         const hr = dialog.IFileDialog.GetResult(&item);
-        if (hr < 0) win32.panicHresult("IFileDialog.GetResult", hr);
+        if (hr.failed) win32.panicHresult("IFileDialog.GetResult", hr);
     }
     defer _ = item.?.IUnknown.Release();
-    var name: ?win32.PWSTR = null;
+    var name: ?[*:0]u16 = null;
     {
         const hr = item.?.GetDisplayName(win32.SIGDN_FILESYSPATH, &name);
-        if (hr < 0) win32.panicHresult("IShellItem.GetDisplayName", hr);
+        if (hr.failed) win32.panicHresult("IShellItem.GetDisplayName", hr);
     }
     defer win32.CoTaskMemFree(name);
     const wide = std.mem.span(name.?);
@@ -597,7 +597,7 @@ fn shellOpen(program: ?[*:0]const u16, path: []const u8) void {
         program orelse path_z,
         if (program == null) null else path_z,
         null,
-        @bitCast(win32.SW_SHOWNORMAL),
+        win32.SW_SHOWNORMAL,
     );
     if (@intFromPtr(result) <= 32) std.log.err("ShellExecute '{s}' failed with {}", .{ path, @intFromPtr(result) });
 }
@@ -614,9 +614,9 @@ fn dpiScale(dpi: u32) f32 {
 
 fn setWindowIcons(hwnd: win32.HWND, dpi: u32) void {
     const hinstance = win32.GetModuleHandleW(null);
-    const sizes = [_]struct { which: u32, metric: i32 }{
-        .{ .which = win32.ICON_SMALL, .metric = @intFromEnum(win32.SM_CXSMICON) },
-        .{ .which = win32.ICON_BIG, .metric = @intFromEnum(win32.SM_CXICON) },
+    const sizes = [_]struct { which: u32, metric: win32.SYSTEM_METRICS_INDEX }{
+        .{ .which = win32.ICON_SMALL, .metric = win32.SM_CXSMICON },
+        .{ .which = win32.ICON_BIG, .metric = win32.SM_CXICON },
     };
     for (sizes) |size| {
         const px = win32.GetSystemMetricsForDpi(size.metric, dpi);
@@ -810,48 +810,48 @@ const D2d = struct {
                 null,
                 null,
             );
-            if (hr < 0) win32.panicHresult("D3D11CreateDevice", hr);
+            if (hr.failed) win32.panicHresult("D3D11CreateDevice", hr);
         }
         var dxgi_device: *win32.IDXGIDevice = undefined;
         {
             const hr = d3d_device.IUnknown.QueryInterface(win32.IID_IDXGIDevice, @ptrCast(&dxgi_device));
-            if (hr < 0) win32.panicHresult("QueryInterface(IDXGIDevice)", hr);
+            if (hr.failed) win32.panicHresult("QueryInterface(IDXGIDevice)", hr);
         }
         defer _ = dxgi_device.IUnknown.Release();
         var d2d_device: *win32.ID2D1Device = undefined;
         {
             const hr = win32.D2D1CreateDevice(dxgi_device, null, @ptrCast(&d2d_device));
-            if (hr < 0) win32.panicHresult("D2D1CreateDevice", hr);
+            if (hr.failed) win32.panicHresult("D2D1CreateDevice", hr);
         }
         var res_dc: *win32.ID2D1DeviceContext = undefined;
         {
             const hr = d2d_device.CreateDeviceContext(win32.D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &res_dc);
-            if (hr < 0) win32.panicHresult("CreateDeviceContext", hr);
+            if (hr.failed) win32.panicHresult("CreateDeviceContext", hr);
         }
         var brush: *win32.ID2D1SolidColorBrush = undefined;
         {
             const black: win32.D2D_COLOR_F = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
             const hr = res_dc.ID2D1RenderTarget.CreateSolidColorBrush(&black, null, &brush);
-            if (hr < 0) win32.panicHresult("CreateSolidColorBrush", hr);
+            if (hr.failed) win32.panicHresult("CreateSolidColorBrush", hr);
         }
         var dcomp: *win32.IDCompositionDesktopDevice = undefined;
         {
             const hr = win32.DCompositionCreateDevice2(&d2d_device.IUnknown, win32.IID_IDCompositionDesktopDevice, @ptrCast(&dcomp));
-            if (hr < 0) win32.panicHresult("DCompositionCreateDevice2", hr);
+            if (hr.failed) win32.panicHresult("DCompositionCreateDevice2", hr);
         }
         var target: *win32.IDCompositionTarget = undefined;
         {
             const hr = dcomp.CreateTargetForHwnd(hwnd, 1, @ptrCast(&target));
-            if (hr < 0) win32.panicHresult("CreateTargetForHwnd", hr);
+            if (hr.failed) win32.panicHresult("CreateTargetForHwnd", hr);
         }
         var visual: *win32.IDCompositionVisual2 = undefined;
         {
             const hr = dcomp.IDCompositionDevice2.CreateVisual(@ptrCast(&visual));
-            if (hr < 0) win32.panicHresult("CreateVisual", hr);
+            if (hr.failed) win32.panicHresult("CreateVisual", hr);
         }
         {
             const hr = target.SetRoot(&visual.IDCompositionVisual);
-            if (hr < 0) win32.panicHresult("SetRoot", hr);
+            if (hr.failed) win32.panicHresult("SetRoot", hr);
         }
         return .{
             .d3d_device = d3d_device,
@@ -891,11 +891,11 @@ const D2d = struct {
                 win32.DXGI_ALPHA_MODE_PREMULTIPLIED,
                 @ptrCast(&surface),
             );
-            if (hr < 0) win32.panicHresult("CreateSurface", hr);
+            if (hr.failed) win32.panicHresult("CreateSurface", hr);
         }
         {
             const hr = d2d.visual.IDCompositionVisual.SetContent(&surface.IUnknown);
-            if (hr < 0) win32.panicHresult("SetContent", hr);
+            if (hr.failed) win32.panicHresult("SetContent", hr);
         }
         d2d.surface = surface;
         d2d.surface_size = size;
@@ -907,7 +907,7 @@ const D2d = struct {
         var offset: win32.POINT = undefined;
         {
             const hr = d2d.surface.?.BeginDraw(null, win32.IID_ID2D1DeviceContext, @ptrCast(&dc), &offset);
-            if (hr < 0) win32.panicHresult("IDCompositionSurface.BeginDraw", hr);
+            if (hr.failed) win32.panicHresult("IDCompositionSurface.BeginDraw", hr);
         }
         dc.ID2D1RenderTarget.SetDpi(96, 96);
         dc.ID2D1RenderTarget.SetTextAntialiasMode(.GRAYSCALE);
@@ -932,11 +932,11 @@ const D2d = struct {
         {
             const hr = d2d.surface.?.EndDraw();
             if (hr == win32.D2DERR_RECREATE_TARGET or hr == win32.DXGI_ERROR_DEVICE_REMOVED) return error.RecreateTarget;
-            if (hr < 0) win32.panicHresult("IDCompositionSurface.EndDraw", hr);
+            if (hr.failed) win32.panicHresult("IDCompositionSurface.EndDraw", hr);
         }
         {
             const hr = d2d.dcomp.IDCompositionDevice2.Commit();
-            if (hr < 0) win32.panicHresult("Commit", hr);
+            if (hr.failed) win32.panicHresult("Commit", hr);
         }
     }
 };
@@ -1002,7 +1002,7 @@ pub const Painter = struct {
             if (icon.d2d) |old| _ = old.IUnknown.Release();
             var bitmap: *win32.ID2D1Bitmap = undefined;
             const hr = p.target.CreateBitmapFromWicBitmap(&icon.source.IWICBitmapSource, null, &bitmap);
-            if (hr < 0) win32.panicHresult("CreateBitmapFromWicBitmap", hr);
+            if (hr.failed) win32.panicHresult("CreateBitmapFromWicBitmap", hr);
             icon.d2d = bitmap;
             icon.generation = global.target_generation;
         }
@@ -1029,7 +1029,7 @@ pub const Icon = struct {
                 std.log.info("'{s}' has no icon", .{exe});
                 return null;
             }
-            if (hr < 0) {
+            if (hr.failed) {
                 std.log.err("SHDefExtractIcon for '{s}' (size {}) failed, hresult=0x{x}", .{ exe, size, @as(u32, @bitCast(hr)) });
                 return null;
             }
@@ -1043,14 +1043,14 @@ pub const Icon = struct {
         var bitmap: ?*win32.IWICBitmap = null;
         {
             const hr = global.wic_factory.CreateBitmapFromHICON(hicon, &bitmap);
-            if (hr < 0) win32.panicHresult("CreateBitmapFromHICON", hr);
+            if (hr.failed) win32.panicHresult("CreateBitmapFromHICON", hr);
         }
         defer _ = bitmap.?.IUnknown.Release();
 
         var converter: ?*win32.IWICFormatConverter = null;
         {
             const hr = global.wic_factory.CreateFormatConverter(&converter);
-            if (hr < 0) win32.panicHresult("CreateFormatConverter", hr);
+            if (hr.failed) win32.panicHresult("CreateFormatConverter", hr);
         }
         {
             const hr = converter.?.Initialize(
@@ -1061,7 +1061,7 @@ pub const Icon = struct {
                 0,
                 .itmapPaletteTypeCustom,
             );
-            if (hr < 0) win32.panicHresult("IWICFormatConverter.Initialize", hr);
+            if (hr.failed) win32.panicHresult("IWICFormatConverter.Initialize", hr);
         }
         return .{ .source = converter.? };
     }

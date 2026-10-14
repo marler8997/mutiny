@@ -184,17 +184,17 @@ fn attachMutex() ?win32.HANDLE {
 fn claimMutex(timeout_ms: u32) ?win32.HANDLE {
     const mutex = attachMutex() orelse return null;
     switch (win32.WaitForSingleObject(mutex, timeout_ms)) {
-        @intFromEnum(win32.WAIT_OBJECT_0) => {},
-        @intFromEnum(win32.WAIT_ABANDONED) => std.log.info("the previous attach thread died holding the mutex, taking over", .{}),
-        @intFromEnum(win32.WAIT_TIMEOUT) => {
+        win32.WAIT_OBJECT_0 => {},
+        win32.WAIT_ABANDONED => std.log.info("the previous attach thread died holding the mutex, taking over", .{}),
+        win32.WAIT_TIMEOUT => {
             std.log.err("another attach is still in progress after {} ms", .{timeout_ms});
             return null;
         },
-        @intFromEnum(win32.WAIT_FAILED) => {
+        win32.WAIT_FAILED => {
             std.log.err("wait on the attach mutex failed, error={f}", .{win32.GetLastError()});
             return null;
         },
-        else => |result| std.debug.panic("WaitForSingleObject returned {d}", .{result}),
+        else => |result| std.debug.panic("WaitForSingleObject returned {d}", .{@intFromEnum(result)}),
     }
     return mutex;
 }

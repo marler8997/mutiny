@@ -212,7 +212,7 @@ const attach_timeout_ms = 10 * 1000;
 
 fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE, out_err: *InjectError) error{Error}!void {
     const handles = [_]?win32.HANDLE{ attach_thread, process.process };
-    switch (win32.WaitForMultipleObjects(handles.len, &handles, 0, win32.INFINITE)) {
+    switch (@intFromEnum(win32.WaitForMultipleObjects(handles.len, &handles, 0, win32.INFINITE))) {
         @intFromEnum(win32.WAIT_OBJECT_0) => {
             var exit_code: u32 = undefined;
             if (0 == win32.GetExitCodeThread(attach_thread, &exit_code)) win32.panicWin32(
@@ -234,7 +234,7 @@ fn waitForAttach(process: ProcessResult, attach_thread: win32.HANDLE, out_err: *
             return out_err.set(.{ .game_exited = exit_code });
         },
         @intFromEnum(win32.WAIT_FAILED) => return out_err.setWin32("WaitForMultipleObjects", win32.GetLastError()),
-        else => |result| std.debug.panic("WaitForMultipleObjects(INFINITE) returned {}", .{result}),
+        else => |result| std.debug.panic("WaitForMultipleObjects(INFINITE) returned {d}", .{result}),
     }
 }
 
@@ -490,10 +490,10 @@ fn injectDLL(process: win32.HANDLE, dll_path: [:0]const u16, out_err: *InjectErr
     ) orelse return out_err.setRemote("starting a thread in the game", win32.GetLastError());
     defer win32.closeHandle(thread);
     switch (win32.WaitForSingleObject(thread, win32.INFINITE)) {
-        @intFromEnum(win32.WAIT_OBJECT_0) => {},
-        @intFromEnum(win32.WAIT_FAILED) => return out_err.setWin32("waiting for LoadLibrary in the game", win32.GetLastError()),
+        win32.WAIT_OBJECT_0 => {},
+        win32.WAIT_FAILED => return out_err.setWin32("waiting for LoadLibrary in the game", win32.GetLastError()),
         else => |result| {
-            std.debug.panic("WaitForSingleObject(thread) returned {}", .{result});
+            std.debug.panic("WaitForSingleObject(thread) returned {d}", .{@intFromEnum(result)});
         },
     }
 

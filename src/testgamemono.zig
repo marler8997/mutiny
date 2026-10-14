@@ -80,7 +80,7 @@ pub export fn wWinMain(
     if (global.mono_state == .loaded) {
         if (0 == win32.SetTimer(hwnd, tick_timer_id, tick_ms, null)) win32.panicWin32("SetTimer", win32.GetLastError());
     }
-    _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
+    _ = win32.ShowWindow(hwnd, win32.SW_SHOWNORMAL);
     var msg: win32.MSG = undefined;
     while (win32.GetMessageW(&msg, null, 0, 0) != 0) {
         _ = win32.TranslateMessage(&msg);

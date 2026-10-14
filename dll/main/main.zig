@@ -98,16 +98,16 @@ pub fn ioThreadId() u32 {
 
 fn ensureIoThread() bool {
     if (global.io_thread) |thread| switch (win32.WaitForSingleObject(thread, 0)) {
-        @intFromEnum(win32.WAIT_TIMEOUT) => return true,
-        @intFromEnum(win32.WAIT_OBJECT_0) => {
+        win32.WAIT_TIMEOUT => return true,
+        win32.WAIT_OBJECT_0 => {
             std.log.err("the io thread died, starting another", .{});
             win32.closeHandle(thread);
             global.io_thread = null;
             global.io_thread_id.store(0, .monotonic);
         },
         else => |result| std.debug.panic(
-            "WaitForSingleObject on the io thread returned {} (error={f})",
-            .{ result, win32.GetLastError() },
+            "WaitForSingleObject on the io thread returned {d} (error={f})",
+            .{ @intFromEnum(result), win32.GetLastError() },
         ),
     };
     return spawnIoThread();

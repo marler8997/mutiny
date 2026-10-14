@@ -94,10 +94,10 @@ pub fn show(spec: Spec) Result {
     {
         const dark: win32.BOOL = 1;
         const hr = win32.DwmSetWindowAttribute(hwnd, win32.DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, @sizeOf(win32.BOOL));
-        if (hr < 0) std.log.warn("DwmSetWindowAttribute(dark mode) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) std.log.warn("DwmSetWindowAttribute(dark mode) failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
     }
     place(hwnd, win32.dpiFromHwnd(hwnd));
-    _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
+    _ = win32.ShowWindow(hwnd, win32.SW_SHOWNORMAL);
 
     var msg: win32.MSG = undefined;
     while (!global.done) {
@@ -207,8 +207,8 @@ fn layoutFor(spec: Spec, dpi: u32) Layout {
     };
 }
 
-fn colorref(rgb: layout.Rgb) u32 {
-    return @as(u32, rgb.r) | (@as(u32, rgb.g) << 8) | (@as(u32, rgb.b) << 16);
+fn colorref(rgb: layout.Rgb) win32.COLORREF {
+    return .rgb(rgb.r, rgb.g, rgb.b);
 }
 
 fn fill(hdc: win32.HDC, r: win32.RECT, rgb: layout.Rgb) void {
@@ -221,7 +221,7 @@ fn text(hdc: win32.HDC, utf8: []const u8, r: win32.RECT, rgb: layout.Rgb, center
     var buf: [layout.max_text_len + 1]u16 = undefined;
     const wide = layout.toWide(utf8, &buf);
     if (wide.len == 0) return;
-    if (win32.CLR_INVALID == win32.SetTextColor(hdc, colorref(rgb))) win32.panicWin32("SetTextColor", win32.GetLastError());
+    if (win32.COLORREF.invalid == win32.SetTextColor(hdc, colorref(rgb))) win32.panicWin32("SetTextColor", win32.GetLastError());
     var bounds = r;
     if (0 == win32.DrawTextW(hdc, wide, @intCast(wide.len), &bounds, .{
         .SINGLELINE = 1,
@@ -243,15 +243,15 @@ fn font(dpi: u32) win32.HFONT {
         0,
         0,
         0,
-        @intCast(win32.FW_NORMAL),
+        @intCast(@intFromEnum(win32.FW_NORMAL)),
         0,
         0,
         0,
-        win32.DEFAULT_CHARSET,
-        win32.OUT_DEFAULT_PRECIS,
-        win32.CLIP_DEFAULT_PRECIS,
-        win32.CLEARTYPE_QUALITY,
-        .DONTCARE,
+        @intFromEnum(win32.DEFAULT_CHARSET),
+        @intFromEnum(win32.OUT_DEFAULT_PRECIS),
+        @as(u8, @bitCast(win32.CLIP_DEFAULT_PRECIS)),
+        @intFromEnum(win32.CLEARTYPE_QUALITY),
+        @intFromEnum(win32.FF_DONTCARE),
         win32.L("Segoe UI"),
     ) orelse win32.panicWin32("CreateFont", win32.GetLastError());
     global.font = f;

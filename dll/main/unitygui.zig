@@ -1,6 +1,13 @@
 const global = struct {
     var state: State = .pending;
     var panel: Panel = .{};
+    var toggle: PanelToggle = .{};
+    var bound_label: BoundLabel = .{};
+};
+
+const BoundLabel = struct {
+    key: ?KeyCode = null,
+    text: dotnet.GcHandleV2 = .null,
 };
 
 const Rect = extern struct {
@@ -37,6 +44,7 @@ const Gui = struct {
     event_button: *const dotnet.Method,
     event_mouse_position: *const dotnet.Method,
     event_use: *const dotnet.Method,
+    event_key_code: ?*const dotnet.Method,
     set_matrix: ?*const dotnet.Method,
     scale: f32,
     fill_style: dotnet.GcHandleV2,
@@ -44,12 +52,16 @@ const Gui = struct {
     title: dotnet.GcHandleV2,
     expanded: dotnet.GcHandleV2,
     collapsed: dotnet.GcHandleV2,
+    bind_idle: dotnet.GcHandleV2,
+    bind_waiting: dotnet.GcHandleV2,
 };
 
 const EventType = enum(i32) {
     mouse_down = 0,
     mouse_up = 1,
     mouse_drag = 3,
+    key_down = 4,
+    key_up = 5,
     repaint = 7,
     _,
 };
@@ -91,6 +103,7 @@ const name_column: f32 = 120;
 const checkbox_size: f32 = 14;
 const checkbox_inset: f32 = (line_height - checkbox_size) / 2;
 const checkbox_column: f32 = checkbox_size + margin;
+const bind_width: f32 = 200;
 const title = "Mutiny";
 
 pub fn draw(dotnet_funcs: *const Funcs) void {
@@ -111,8 +124,21 @@ pub fn draw(dotnet_funcs: *const Funcs) void {
     const event_type: EventType = @enumFromInt(context.unbox(i32, gui.event_type, event) orelse return);
     switch (event_type) {
         .repaint, .mouse_down, .mouse_up, .mouse_drag => {},
+        .key_down, .key_up => {
+            const event_key_code = gui.event_key_code orelse return;
+            const key: KeyCode = @enumFromInt(context.unbox(i32, event_key_code, event) orelse return);
+            const handled = switch (event_type) {
+                .key_down => global.toggle.keyDown(key),
+                .key_up => global.toggle.keyUp(key),
+                else => unreachable,
+            };
+            if (handled == .consumed) context.use(event);
+            if (global.toggle.hidden()) global.panel.drag = null;
+            return;
+        },
         _ => return,
     }
+    if (global.toggle.hidden()) return;
     context.applyScale();
 
     var count: usize = 0;
@@ -134,10 +160,16 @@ pub fn draw(dotnet_funcs: *const Funcs) void {
         .width = button_size,
         .height = button_size,
     };
+    const bind: ?Rect = if (panel.minimized or gui.event_key_code == null) null else .{
+        .x = box.x + box.width - bind_width - button_inset,
+        .y = box.y + button_inset,
+        .width = bind_width,
+        .height = button_size,
+    };
 
     switch (event_type) {
         .repaint => {
-            paint(&context, panel, box, button);
+            paint(&context, panel, box, button, bind);
             const position = context.unbox([2]f32, gui.event_mouse_position, event) orelse return;
             if (box.contains(position[0], position[1])) paintCursor(&context, position[0], position[1]);
         },
@@ -149,6 +181,9 @@ pub fn draw(dotnet_funcs: *const Funcs) void {
             switch (event_type) {
                 .mouse_down => if (button.contains(x, y)) {
                     panel.minimized = !panel.minimized;
+                    context.use(event);
+                } else if (bind != null and bind.?.contains(x, y)) {
+                    global.toggle.clickBind();
                     context.use(event);
                 } else if (if (panel.minimized) null else toggleAt(box, x, y)) |mod| {
                     const enable = !mod.enabled();
@@ -171,11 +206,11 @@ pub fn draw(dotnet_funcs: *const Funcs) void {
                 else => unreachable,
             }
         },
-        _ => unreachable,
+        .key_down, .key_up, _ => unreachable,
     }
 }
 
-fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
+fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect, bind: ?Rect) void {
     const gui = context.gui;
     context.fill(box, .background);
     context.outline(box);
@@ -183,6 +218,18 @@ fn paint(context: *Context, panel: *const Panel, box: Rect, button: Rect) void {
     context.label(.{ .x = button.x + 4, .y = button.y, .width = button_size, .height = button_size }, if (panel.minimized) gui.collapsed else gui.expanded);
     context.label(.{ .x = button.x + button_size + button_inset, .y = box.y, .width = box.width - button_size - button_inset * 3, .height = title_height }, gui.title);
     if (panel.minimized) return;
+
+    if (bind) |rect| {
+        const text = switch (global.toggle.state) {
+            .unbound => gui.bind_idle,
+            .binding => gui.bind_waiting,
+            .bound => |bound| context.boundLabel(bound.key) orelse return,
+        };
+        context.outline(rect);
+        context.color(if (global.toggle.state == .binding) .mod_name else .white);
+        context.label(.{ .x = rect.x + 4, .y = rect.y, .width = rect.width - 8, .height = rect.height }, text);
+        context.color(.white);
+    }
 
     var y = box.y + title_height + margin;
     var it = mods.modIterator();
@@ -313,6 +360,22 @@ const Context = struct {
         return .{ .name = mod.label.name, .status = mod.label.status };
     }
 
+    fn boundLabel(context: *Context, key: KeyCode) ?dotnet.GcHandleV2 {
+        const bound = &global.bound_label;
+        if (bound.key != key) {
+            const prefix = "Toggle key: ";
+            var buf: [prefix.len + KeyCode.max_name_len]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, prefix ++ "{f}", .{key}) catch |err| switch (err) {
+                error.NoSpaceLeft => unreachable,
+            };
+            if (bound.text != .null) context.dotnet_funcs.gchandle_free(bound.text);
+            bound.* = .{};
+            bound.text = newString(context.dotnet_funcs, text) orelse return null;
+            bound.key = key;
+        }
+        return bound.text;
+    }
+
     fn unbox(context: *Context, comptime T: type, method: *const dotnet.Method, obj: *const dotnet.Object) ?T {
         const boxed = context.call(method, obj, null) orelse return null;
         const value: *align(1) const T = @ptrCast(context.dotnet_funcs.object_unbox(boxed));
@@ -414,6 +477,10 @@ fn resolve(dotnet_funcs: *const Funcs) ResolveError!Gui {
         std.log.info("unity gui: dpi {d}, panel scale {d}", .{ dpi, s });
         break :blk s;
     };
+    const event_key_code = dotnet_funcs.class_get_method_from_name(event_class, "get_keyCode", 0) orelse blk: {
+        std.log.info("unity gui: no Event.keyCode, the panel has no toggle key", .{});
+        break :blk null;
+    };
     const set_matrix = if (scale == 1) null else dotnet_funcs.class_get_method_from_name(gui_class, "set_matrix", 1) orelse blk: {
         std.log.info("unity gui: no GUI.matrix, panel drawn unscaled", .{});
         break :blk null;
@@ -428,6 +495,7 @@ fn resolve(dotnet_funcs: *const Funcs) ResolveError!Gui {
         .event_button = dotnet_funcs.class_get_method_from_name(event_class, "get_button", 0) orelse return error.NoEventMethod,
         .event_mouse_position = dotnet_funcs.class_get_method_from_name(event_class, "get_mousePosition", 0) orelse return error.NoEventMethod,
         .event_use = dotnet_funcs.class_get_method_from_name(event_class, "Use", 0) orelse return error.NoEventMethod,
+        .event_key_code = event_key_code,
         .set_matrix = set_matrix,
         .scale = scale,
         .fill_style = dotnet_funcs.gchandle_new(style, false),
@@ -435,6 +503,8 @@ fn resolve(dotnet_funcs: *const Funcs) ResolveError!Gui {
         .title = try resolveString(dotnet_funcs, title),
         .expanded = try resolveString(dotnet_funcs, "\u{25BC}"),
         .collapsed = try resolveString(dotnet_funcs, "\u{25B6}"),
+        .bind_idle = try resolveString(dotnet_funcs, "Bind toggle key"),
+        .bind_waiting = try resolveString(dotnet_funcs, "Press a key (Esc cancels)"),
     };
 }
 
@@ -587,3 +657,5 @@ const dotnet = mutiny.dotnet;
 const mods = @import("mods.zig");
 
 const Mod = @import("Mod.zig");
+const PanelToggle = @import("PanelToggle.zig");
+const KeyCode = @import("keys.zig").KeyCode;

@@ -357,6 +357,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "mutiny", .root = "src/mutiny.zig" },
         .{ .name = "layout", .root = "layout/layout.zig" },
         .{ .name = "il", .root = "il/il.zig" },
+        .{ .name = "paneltoggle", .root = "dll/main/PanelToggle.zig" },
     };
     for (unit_tests) |unit| {
         const t = b.addTest(.{

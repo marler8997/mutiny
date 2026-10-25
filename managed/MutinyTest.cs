@@ -73,6 +73,8 @@ namespace MutinyTest
 
         public static System.TimeSpan SpanField = System.TimeSpan.FromTicks(7);
         public static System.DayOfWeek DayField = System.DayOfWeek.Friday;
+        public static string StringField = "static";
+        public static string NullStringField = null;
 
         public static Instances Instance = Instances.New();
     }
@@ -93,6 +95,7 @@ namespace MutinyTest
 
         public Instances Inner;
         public System.TimeSpan SpanField = System.TimeSpan.FromTicks(9);
+        private string privateString = "private";
 
         public static Instances New() { return new Instances { Inner = new Instances() }; }
         public static Instances NullInstance() { return null; }

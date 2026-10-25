@@ -299,6 +299,19 @@ pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
             \\@Assert(@IsNull(Test.NullI32Array()))
             \\if (0) { @Discard(ints[99]) }
         );
+        try Vm.testMod(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var Boolean = @Class(mscorlib.System.Boolean)
+            \\var CultureInfo = @Class(mscorlib.System.Globalization.CultureInfo)
+            \\var Test = @TestClass()
+            \\var invariant = CultureInfo.get_InvariantCulture()
+            \\@Assert(Test.Overload(Boolean.TrueString) == 2)
+            \\@Assert(Test.Overload(invariant.iso2lang) == 2)
+            \\@Assert(Boolean.TrueString.get_Length() == 4)
+            \\var s = Boolean.FalseString
+            \\set s = invariant.iso3lang
+            \\@Exit(Boolean.TrueString, " ", invariant.iso2lang, " ", s)
+        , .{ .result = "True iv IVL" });
         try Vm.testBadCode(dotnet_funcs,
             \\var Test = @TestClass()
             \\var ints = Test.I32Array()

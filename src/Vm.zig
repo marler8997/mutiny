@@ -1028,7 +1028,6 @@ fn evalExprSuffix(
                 .string_literal,
                 .enum_literal,
                 // .c_string,
-                .managed_string,
                 .script_function,
                 .class_method,
                 => vm.setError(.{ .no_field = .{
@@ -1107,7 +1106,7 @@ fn evalExprSuffix(
                         .kind = .{ .object = class },
                     } });
                 },
-                .object => {
+                .object, .managed_string => {
                     const gc_handle, const end = vm.readValue(dotnet.GcHandleV2, value_addr);
                     std.debug.assert(end.eql(vm.mem.top()));
                     const obj = gchandleTarget(vm.dotnet_funcs, gc_handle, vm.handle_tracker);
@@ -1590,7 +1589,8 @@ fn pushMonoField(
         } });
         return vm.pushMonoObject(.valuetype, boxed);
     };
-    var value = MarshalValue.initUndefined(vm.dotnet_funcs.type_get_type(field_type)) orelse return vm.setError(.{ .not_implemented2 = .{
+    const field_kind = vm.dotnet_funcs.type_get_type(field_type);
+    var value = MarshalValue.initUndefined(field_kind) orelse return vm.setError(.{ .not_implemented2 = .{
         .pos = id_extent.start,
         .msg = "class field of this type",
     } });
@@ -1602,7 +1602,20 @@ fn pushMonoField(
             value.getPtr(),
         ),
     }
-    try vm.pushMarshalValue(class, &value);
+    switch (value) {
+        .maybe_object => |maybe_object| if (maybe_object) |object| {
+            try vm.pushMonoObject(MonoObjectType.init(field_kind).?, object);
+        } else {
+            const field_class = typeClass(vm.dotnet_funcs, field_type) orelse return vm.setError(.{ .not_implemented_for_kind = .{
+                .pos = id_extent.start,
+                .what = "a null field whose type has no class",
+                .kind = field_kind,
+            } });
+            (try vm.push(Type)).* = .null_object;
+            (try vm.push(*const dotnet.Class)).* = field_class;
+        },
+        else => try vm.pushMarshalValue(class, &value),
+    }
 }
 
 fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Object) error{Vm}!void {
@@ -4521,7 +4534,7 @@ fn badCodeTests(dotnet_funcs: *const Funcs) !void {
         \\var String = @Class(mscorlib.System.String)
         \\var s = String.Empty
         \\set s.Empty = 0
-    , "4: cannot access static field 'Empty' on an object, need a class");
+    , "4: field access on a managed string not implemented");
     // il2cpp doesn't have Decimal.Parse
     if (dotnet_funcs.kind != .il2cpp) try testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")
@@ -5029,6 +5042,19 @@ fn goodCodeTests(dotnet_funcs: *const Funcs) !void {
         \\@Assert(span._ticks == 8)
         \\@Assert(Statics.SpanField._ticks == 7)
     );
+    if (have_mutiny_test_dll) try testMod(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Test = @Class(t.Test)
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\var inst = Statics.Instance
+        \\@Assert(@IsNull(Statics.NullStringField))
+        \\@Assert(Test.Overload(Statics.NullStringField) == 2)
+        \\@Assert(Test.Overload(Statics.StringField) == 2)
+        \\@Assert(Test.Overload(inst.privateString) == 2)
+        \\var s = Statics.StringField
+        \\set s = inst.Inner.privateString
+        \\@Exit(Statics.StringField, " ", s)
+    , .{ .result = "static private" });
     if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)

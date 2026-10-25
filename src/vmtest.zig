@@ -309,6 +309,38 @@ pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
             \\@Assert(@IsNull(Test.NullI32Array()))
             \\if (0) { @Discard(ints[99]) }
         );
+        try Vm.testCode(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var String = @Class(mscorlib.System.String)
+            \\var Test = @TestClass()
+            \\var depth = 0
+            \\var t = String.Empty.GetType()
+            \\loop
+            \\    if (@IsNull(t)) { break }
+            \\    set depth = depth + 1
+            \\    set t = t.get_BaseType()
+            \\continue
+            \\@Assert(depth == 2)
+            \\@Assert(@IsNull(t))
+            \\set t = String.Empty.GetType()
+            \\@Assert(@NotNull(t))
+            \\var target = Test.NullObject()
+            \\@Assert(@IsNull(target))
+            \\set target = Test.NullObject()
+            \\@Assert(@IsNull(target))
+            \\set target = Test.ObjectArray()[0]
+            \\@Assert(@NotNull(target))
+            \\@Assert(Test.TicksOf(target) == 5)
+            \\set target = Test.NullObject()
+            \\@Assert(@IsNull(target))
+            \\var s = Test.NullString()
+            \\@Assert(@IsNull(s))
+            \\set s = String.Empty
+            \\@Assert(@NotNull(s))
+            \\@Assert(s.get_Length() == 0)
+            \\set s = Test.NullString()
+            \\@Assert(@IsNull(s))
+        );
         try Vm.testMod(dotnet_funcs,
             \\var mscorlib = @Assembly("mscorlib")
             \\var Boolean = @Class(mscorlib.System.Boolean)

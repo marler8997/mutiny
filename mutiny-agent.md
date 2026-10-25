@@ -443,6 +443,7 @@ var key = .Space            // it can be stored; it only becomes a value when pa
 var c = hits[i]             // index a one-dimensional array (read only)
 var pos = player.get_position()   // a struct (Vector3, LayerMask, ...) is held as an object
 Physics.Linecast(pos, c.get_position(), mask)   // objects and structs can be passed back in
+set p = p.get_parent()      // an object or string variable can become null and back again
 ```
 
 Things that will surprise you:

@@ -825,20 +825,32 @@ fn set(vm: *Vm, ref: *const Reference, value: *const Value) error{Vm}!void {
     switch (ref.*) {
         .symbol_entry => |*entry| {
             const symbol_type, const symbol_value_addr = vm.readValue(Type, entry.type_addr);
-            if (value.getType() != symbol_type) return vm.setError(.{ .assign_type = .{
+            const value_type = value.getType();
+            const nullable = switch (symbol_type) {
+                .object, .managed_string => value_type == .null_object,
+                .null_object => value_type == .object or value_type == .managed_string,
+                else => false,
+            };
+            if (value_type != symbol_type and !nullable) return vm.setError(.{ .assign_type = .{
                 .id_extent = entry.id_extent,
                 .dst = symbol_type,
-                .src = value.getType(),
+                .src = value_type,
             } });
+            comptime std.debug.assert(@sizeOf(dotnet.GcHandleV2) == @sizeOf(*const dotnet.Class));
             switch (value.*) {
                 .integer => |int| vm.mem.toPointer(i64, symbol_value_addr).* = int,
                 .float => |f| vm.mem.toPointer(f64, symbol_value_addr).* = f,
                 .object, .managed_string => |handle| {
-                    const slot = vm.mem.toPointer(dotnet.GcHandleV2, symbol_value_addr);
                     const target = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
                     const new_handle = gchandleNew(vm.dotnet_funcs, target, vm.handle_tracker);
-                    gchandleFree(vm.dotnet_funcs, slot.*, vm.handle_tracker);
-                    slot.* = new_handle;
+                    if (symbol_type != .null_object) gchandleFree(vm.dotnet_funcs, vm.mem.toPointer(dotnet.GcHandleV2, symbol_value_addr).*, vm.handle_tracker);
+                    vm.mem.toPointer(Type, entry.type_addr).* = value_type;
+                    vm.mem.toPointer(dotnet.GcHandleV2, symbol_value_addr).* = new_handle;
+                },
+                .null_object => |class| {
+                    if (symbol_type != .null_object) gchandleFree(vm.dotnet_funcs, vm.mem.toPointer(dotnet.GcHandleV2, symbol_value_addr).*, vm.handle_tracker);
+                    vm.mem.toPointer(Type, entry.type_addr).* = .null_object;
+                    vm.mem.toPointer(*const dotnet.Class, symbol_value_addr).* = class;
                 },
                 else => return vm.setError(.{ .not_implemented_for_type = .{
                     .pos = entry.id_extent.start,

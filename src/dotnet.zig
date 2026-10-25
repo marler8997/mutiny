@@ -65,6 +65,9 @@ pub const shared = struct {
     pub const class_get_method_from_name = fn (*const Class, [*:0]const u8, param_count: c_int) callconv(.c) ?*const Method;
     pub const class_get_field_from_name = fn (*const Class, [*:0]const u8) callconv(.c) ?*const ClassField;
     pub const class_is_assignable_from = fn (klass: *const Class, oklass: *const Class) callconv(.c) bool;
+    pub const class_get_element_class = fn (*const Class) callconv(.c) *const Class;
+
+    pub const array_element_size = fn (array_class: *const Class) callconv(.c) i32;
 
     pub const field_get_flags = fn (*const ClassField) callconv(.c) ClassFieldFlags;
     pub const field_get_name = fn (*const ClassField) callconv(.c) [*:0]const u8;
@@ -123,6 +126,9 @@ pub const mono = struct {
     pub const gchandle_get_target_v2 = fn (handle: GcHandleV2) callconv(.c) *const Object;
     pub const string_new_len = fn (*const Domain, text: [*]const u8, len: c_uint) callconv(.c) ?*const String;
     pub const object_new = fn (*const Domain, *const Class) callconv(.c) ?*const Object;
+    pub const value_box = fn (*const Domain, *const Class, data: *const anyopaque) callconv(.c) ?*const Object;
+    pub const array_length = fn (array: *const Object) callconv(.c) usize;
+    pub const array_addr_with_size = fn (array: *const Object, size: c_int, index: usize) callconv(.c) [*]u8;
     pub const type_get_object = fn (*const Domain, *const Type) callconv(.c) ?*const Object;
     pub const image_open_from_data = fn (
         data: [*]const u8,
@@ -197,6 +203,12 @@ pub const il2cpp = struct {
     pub const gchandle_free = fn (handle: GcHandleV1) callconv(.c) void;
     pub const gchandle_get_target = fn (handle: GcHandleV1) callconv(.c) *const Object;
     pub const object_new = fn (*const Class) callconv(.c) ?*const Object;
+    pub const value_box = fn (*const Class, data: *const anyopaque) callconv(.c) ?*const Object;
+    pub const array_length = fn (array: *const Object) callconv(.c) u32;
+    pub const array_object_header_size = fn () callconv(.c) u32;
+    pub const array_class_get = fn (element_class: *const Class, rank: u32) callconv(.c) ?*const Class;
+    pub const array_new = fn (element_class: *const Class, length: usize) callconv(.c) ?*const Object;
+    pub const gc_wbarrier_set_field = fn (obj: *const Object, target: *?*anyopaque, value: ?*anyopaque) callconv(.c) void;
     pub const string_new_len = fn (text: [*]const u8, len: c_uint) callconv(.c) ?*const String;
     pub const class_is_enum = fn (*const Class) callconv(.c) bool;
     pub const class_is_valuetype = fn (*const Class) callconv(.c) bool;
@@ -282,6 +294,24 @@ pub fn gchandle_get_target(f: anytype, handle: GcHandleV2) ?*const Object {
     return switch (f.kind) {
         .mono => |m| m.gchandle.get_target(handle),
         .il2cpp => |i| i.gchandle_get_target(.fromV2(handle)),
+    };
+}
+pub fn value_box(f: anytype, class: *const Class, data: *const anyopaque) ?*const Object {
+    return switch (f.kind) {
+        .mono => |m| m.value_box(f.domain_get().?, class, data),
+        .il2cpp => |i| i.value_box(class, data),
+    };
+}
+pub fn array_length(f: anytype, array: *const Object) usize {
+    return switch (f.kind) {
+        .mono => |m| m.array_length(array),
+        .il2cpp => |i| i.array_length(array),
+    };
+}
+pub fn array_element_addr(f: anytype, array: *const Object, element_size: i32, index: usize) [*]const u8 {
+    return switch (f.kind) {
+        .mono => |m| m.array_addr_with_size(array, element_size, index),
+        .il2cpp => |i| @as([*]const u8, @ptrCast(array)) + i.array_object_header_size() + index * @as(usize, @intCast(element_size)),
     };
 }
 pub fn type_get_object(f: anytype, t: *const Type) ?*const Object {

@@ -749,6 +749,10 @@ fn evalReference(vm: *Vm, start: usize) error{Vm}!struct { Reference, usize } {
             const token = lex.next(vm.text, offset);
             switch (token.tag) {
                 .period => break :blk token.end,
+                .l_bracket => return vm.setError(.{ .not_implemented2 = .{
+                    .pos = token.start,
+                    .msg = "setting an array element",
+                } }),
                 else => return .{ ref, offset },
             }
         };
@@ -881,6 +885,7 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
             } });
             const value_addr = vm.mem.top();
             try vm.pushMonoField(class, mono_field, obj, field.extent);
+            try vm.refuseStructCopy(value_addr, id_extent);
             ref.* = try vm.refFromValue(value_addr, id_extent);
         },
         .class_field => |*field| {
@@ -892,9 +897,21 @@ fn dot(vm: *Vm, ref: *Reference, id_extent: Extent) error{Vm}!void {
             } });
             const value_addr = vm.mem.top();
             try vm.pushMonoField(class, mono_field, null, field.extent);
+            try vm.refuseStructCopy(value_addr, id_extent);
             ref.* = try vm.refFromValue(value_addr, id_extent);
         },
     }
+}
+
+fn refuseStructCopy(vm: *Vm, type_addr: Memory.Addr, id_extent: Extent) error{Vm}!void {
+    const value_type, const handle_addr = vm.readValue(Type, type_addr);
+    if (value_type != .object) return;
+    const handle, _ = vm.readValue(dotnet.GcHandleV2, handle_addr);
+    const class = vm.dotnet_funcs.object_get_class(gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker));
+    if (vm.dotnet_funcs.class_is_valuetype(class)) return vm.setError(.{ .not_implemented2 = .{
+        .pos = id_extent.start,
+        .msg = "setting a field of a struct that is itself a field",
+    } });
 }
 
 fn refFromValue(vm: *Vm, type_addr: Memory.Addr, id_extent: Extent) error{Vm}!Reference {
@@ -963,7 +980,34 @@ fn evalExprSuffix(
     const suffix_op_token = lex.next(vm.text, suffix_start);
     return switch (suffix_op_token.tag) {
         .l_bracket => {
-            return vm.setError(.{ .not_implemented = "array index" });
+            const index_addr = vm.mem.top();
+            const index_first_token = lex.next(vm.text, suffix_op_token.end);
+            const after_index = try vm.evalExpr(index_first_token) orelse return vm.setError(.{ .unexpected_token = .{
+                .expected = "an index expression after '['",
+                .token = index_first_token,
+            } });
+            const after_bracket = try vm.eat().eatToken(after_index, .r_bracket, "a close bracket ']' to end the index");
+            if (index_addr.eql(vm.mem.top())) return vm.setError(.{ .unexpected_type = .{
+                .pos = index_first_token.start,
+                .expected = "an integer index",
+                .actual = null,
+            } });
+            var index_value = vm.pop(index_addr);
+            defer index_value.discard(vm.dotnet_funcs, vm.handle_tracker);
+            const index = switch (index_value) {
+                .integer => |i| i,
+                else => return vm.setError(.{ .unexpected_type = .{
+                    .pos = index_first_token.start,
+                    .expected = "an integer index",
+                    .actual = index_value.getType(),
+                } }),
+            };
+            if (expr_addr.eql(vm.mem.top())) return vm.setError(.{ .static_error = .{
+                .pos = suffix_op_token.start,
+                .string = "cannot index nothing",
+            } });
+            try vm.indexArray(expr_addr, suffix_op_token.start, index);
+            return after_bracket;
         },
         .period => {
             const id_extent = blk: {
@@ -1165,9 +1209,8 @@ fn callMethod(
     {
         var next_arg_addr = args_addr;
         for (0..args.count) |arg_index| {
-            const arg_type, const value_addr = vm.readValue(Type, next_arg_addr);
-            _, next_arg_addr = vm.readAnyValue(arg_type, value_addr);
-            arg_kinds[arg_index] = ArgKind.of(arg_type);
+            const arg_value, next_arg_addr = vm.read(next_arg_addr);
+            arg_kinds[arg_index] = ArgKind.of(vm.dotnet_funcs, arg_value, vm.handle_tracker);
         }
     }
     const method = try vm.resolveMethod(class, method_id_extent, method_id.slice(), &arg_kinds, args.count);
@@ -1184,7 +1227,7 @@ fn callMethod(
             "method has no return type?", // impossible right?
         ),
     };
-    var managed_args_buf: [max_arg_count]*anyopaque = undefined;
+    var managed_args_buf: [max_arg_count]?*anyopaque = undefined;
     var managed_arg_storage: [max_arg_count]MarshalValue = undefined;
 
     var next_arg_addr = args_addr;
@@ -1269,6 +1312,13 @@ fn callMethod(
                 managed_arg_storage[arg_index] = .{ .i8 = value };
                 break :blk managed_arg_storage[arg_index].getPtr();
             },
+            .object => |handle| {
+                const obj = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
+                const param_class = typeClass(vm.dotnet_funcs, paramType(vm.dotnet_funcs, method, arg_index).?).?;
+                if (vm.dotnet_funcs.class_is_valuetype(param_class)) break :blk vm.dotnet_funcs.object_unbox(obj);
+                break :blk @constCast(obj);
+            },
+            .null_object => break :blk null,
             else => |a| return vm.setError(.{ .not_implemented_for_type = .{
                 .pos = after_lparen,
                 .what = "passing an argument",
@@ -1342,6 +1392,9 @@ const MonoObjectType = enum {
     valuetype,
     class,
     object,
+    szarray,
+    array,
+    genericinst,
 
     pub fn init(kind: dotnet.TypeKind) ?MonoObjectType {
         return switch (kind) {
@@ -1364,7 +1417,10 @@ const MonoObjectType = enum {
             .valuetype => .valuetype,
             .class => .class,
             .object => .object,
-            .byref, .@"var", .array, .genericinst, .typedbyref, .i, .u, .fnptr, .szarray, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => null,
+            .szarray => .szarray,
+            .array => .array,
+            .genericinst => .genericinst,
+            .byref, .@"var", .typedbyref, .i, .u, .fnptr, .mvar, .cmod_reqd, .cmod_opt, .internal, .modifier, .sentinel, .pinned, .@"enum" => null,
             _ => null,
         };
     }
@@ -1519,7 +1575,22 @@ fn pushMonoField(
         };
     };
 
-    var value = MarshalValue.initUndefined(vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.field_get_type(field))) orelse return vm.setError(.{ .not_implemented2 = .{
+    const field_type = vm.dotnet_funcs.field_get_type(field);
+    if (typeClass(vm.dotnet_funcs, field_type)) |field_class| if (vm.dotnet_funcs.class_is_valuetype(field_class)) {
+        if (flags.literal) return vm.setError(.{ .not_implemented2 = .{
+            .pos = id_extent.start,
+            .msg = "a const field of struct type",
+        } });
+        const boxed = vm.dotnet_funcs.field_get_value_object(field, switch (method) {
+            .static => null,
+            .instance => |obj| obj,
+        }) orelse return vm.setError(.{ .static_error = .{
+            .pos = id_extent.start,
+            .string = "boxing the field's value returned null",
+        } });
+        return vm.pushMonoObject(.valuetype, boxed);
+    };
+    var value = MarshalValue.initUndefined(vm.dotnet_funcs.type_get_type(field_type)) orelse return vm.setError(.{ .not_implemented2 = .{
         .pos = id_extent.start,
         .msg = "class field of this type",
     } });
@@ -1573,7 +1644,7 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
             (try vm.push(Type)).* = .managed_string;
             (try vm.push(dotnet.GcHandleV2)).* = handle;
         },
-        .class, .valuetype, .object => {
+        .class, .valuetype, .object, .szarray, .array, .genericinst => {
             const handle = gchandleNew(vm.dotnet_funcs, object, vm.handle_tracker);
             errdefer gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
             (try vm.push(Type)).* = .object;
@@ -1581,6 +1652,76 @@ fn pushMonoObject(vm: *Vm, object_type: MonoObjectType, object: *const dotnet.Ob
         },
         inline else => |t| return vm.setError(.{ .not_implemented = "a managed value of type " ++ @tagName(t) }),
     }
+}
+
+fn indexArray(vm: *Vm, array_addr: Memory.Addr, pos: usize, index: i64) error{Vm}!void {
+    const array_type, const value_addr = vm.readValue(Type, array_addr);
+    switch (array_type) {
+        .object => {},
+        .null_object => return vm.setError(.{ .null_index_access = .{ .pos = pos } }),
+        else => return vm.setError(.{ .index_non_array = .{ .pos = pos, .kind = .{ .type = array_type } } }),
+    }
+    const handle, const end = vm.readValue(dotnet.GcHandleV2, value_addr);
+    std.debug.assert(end.eql(vm.mem.top()));
+    const array = gchandleTarget(vm.dotnet_funcs, handle, vm.handle_tracker);
+    const array_class = vm.dotnet_funcs.object_get_class(array);
+    if (vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.class_get_type(array_class)) != .szarray) return vm.setError(.{
+        .index_non_array = .{ .pos = pos, .kind = .{ .class = array_class } },
+    });
+    const length = vm.dotnet_funcs.array_length(array);
+    if (index < 0 or @as(u64, @intCast(index)) >= length) return vm.setError(.{ .index_out_of_range = .{
+        .pos = pos,
+        .index = index,
+        .length = length,
+    } });
+    const element_class = vm.dotnet_funcs.class_get_element_class(array_class);
+    const element_addr = vm.dotnet_funcs.array_element_addr(
+        array,
+        vm.dotnet_funcs.array_element_size(array_class),
+        @intCast(index),
+    );
+    const element = try vm.readArrayElement(element_class, element_addr, pos);
+    gchandleFree(vm.dotnet_funcs, handle, vm.handle_tracker);
+    _ = vm.mem.discardFrom(array_addr);
+    switch (element) {
+        .value => |*value| try vm.pushMarshalValue(element_class, value),
+        .string => |str| try vm.pushMonoObject(.string, str),
+        .boxed => |boxed| try vm.pushMonoObject(.valuetype, boxed),
+    }
+}
+
+const ArrayElement = union(enum) {
+    value: MarshalValue,
+    string: *const dotnet.Object,
+    boxed: *const dotnet.Object,
+};
+
+fn readArrayElement(vm: *Vm, element_class: *const dotnet.Class, addr: [*]const u8, pos: usize) error{Vm}!ArrayElement {
+    const kind = vm.dotnet_funcs.type_get_type(vm.dotnet_funcs.class_get_type(element_class));
+    switch (kind) {
+        .boolean, .i1, .u1, .i2, .u2, .i4, .u4, .i8, .u8, .r4, .r8 => {
+            var value = MarshalValue.initUndefined(kind).?;
+            switch (value) {
+                inline else => |*typed| typed.* = @as(*align(1) const @TypeOf(typed.*), @ptrCast(addr)).*,
+            }
+            return .{ .value = value };
+        },
+        .string, .class, .object, .szarray, .array, .valuetype, .genericinst => {},
+        else => return vm.setError(.{ .not_implemented_for_kind = .{
+            .pos = pos,
+            .what = "an array element",
+            .kind = kind,
+        } }),
+    }
+    if (vm.dotnet_funcs.class_is_valuetype(element_class)) return .{
+        .boxed = vm.dotnet_funcs.value_box(element_class, addr) orelse return vm.setError(.{ .static_error = .{
+            .pos = pos,
+            .string = "boxing the array element returned null",
+        } }),
+    };
+    const maybe_object = @as(*align(1) const ?*dotnet.Object, @ptrCast(addr)).*;
+    if (kind == .string) if (maybe_object) |str| return .{ .string = str };
+    return .{ .value = .{ .maybe_object = maybe_object } };
 }
 
 fn pushValueFromAddr(vm: *Vm, src_type_addr: Memory.Addr) error{Vm}!void {
@@ -2103,6 +2244,7 @@ fn evalBuiltin(
                 .class => 0,
                 .null_object => 1,
                 .object => 0,
+                .managed_string => 0,
                 else => return vm.setError(.{
                     .arg_type = .{
                         // NOTE: this position is pointing to the builtin, not the arg
@@ -2126,6 +2268,7 @@ fn evalBuiltin(
                 .class => 1,
                 .null_object => 0,
                 .object => 1,
+                .managed_string => 1,
                 else => return vm.setError(.{
                     .arg_type = .{
                         // NOTE: this position is pointing to the builtin, not the arg
@@ -2840,6 +2983,10 @@ const VmEat = struct {
                 const token = lex.next(vm.text, offset);
                 switch (token.tag) {
                     .period => break :blk token.end,
+                    .l_bracket => return vm.setError(.{ .not_implemented2 = .{
+                        .pos = token.start,
+                        .msg = "setting an array element",
+                    } }),
                     else => return offset,
                 }
             };
@@ -2883,7 +3030,12 @@ const VmEat = struct {
         const suffix_op_token = lex.next(vm.text, suffix_start);
         return switch (suffix_op_token.tag) {
             .l_bracket => {
-                return vm.setError(.{ .not_implemented = "array index" });
+                const index_first_token = lex.next(vm.text, suffix_op_token.end);
+                const after_index = try vm.evalExpr(index_first_token) orelse return vm.setError(.{ .unexpected_token = .{
+                    .expected = "an index expression after '['",
+                    .token = index_first_token,
+                } });
+                return try vm.eatToken(after_index, .r_bracket, "a close bracket ']' to end the index");
             },
             .period => {
                 const id_token = lex.next(vm.text, suffix_op_token.end);
@@ -2983,25 +3135,40 @@ const VmEat = struct {
 
 const max_arg_count = 100;
 
-const ArgKind = enum {
+const ArgKind = union(enum) {
     integer,
     float,
     string,
     enum_literal,
+    object: *const dotnet.Class,
+    null_object: *const dotnet.Class,
     other,
-    fn of(t: Type) ArgKind {
-        return switch (t) {
+    fn of(funcs: *const Funcs, value: Value, maybe_tracker: ?*HandleTracker) ArgKind {
+        return switch (value) {
             .integer => .integer,
             .float => .float,
             .string_literal, .managed_string => .string,
             .enum_literal => .enum_literal,
+            .object => |handle| .{ .object = funcs.object_get_class(gchandleTarget(funcs, handle, maybe_tracker)) },
+            .null_object => |class| .{ .null_object = class },
             else => .other,
         };
     }
-    pub fn format(kind: ArgKind, writer: *std.Io.Writer) error{WriteFailed}!void {
-        try writer.writeAll(@tagName(kind));
+    fn write(kind: ArgKind, funcs: *const Funcs, writer: *std.Io.Writer) error{WriteFailed}!void {
+        switch (kind) {
+            .object => |class| try writer.writeAll(std.mem.span(funcs.class_get_name(class))),
+            .null_object => |class| try writer.print("null {s}", .{funcs.class_get_name(class)}),
+            else => try writer.writeAll(@tagName(kind)),
+        }
     }
 };
+
+fn typeClass(funcs: *const Funcs, t: *const dotnet.Type) ?*const dotnet.Class {
+    return switch (funcs.type_get_type(t)) {
+        .valuetype, .class, .object, .string, .szarray, .array, .genericinst => funcs.class_from_type(t),
+        else => null,
+    };
+}
 
 const Fit = enum {
     exact,
@@ -3023,6 +3190,16 @@ const Fit = enum {
             },
             .string => if (param == .string) .exact else .no,
             .enum_literal => .no,
+            .object => |class| {
+                const param_class = typeClass(funcs, param_type) orelse return .no;
+                if (funcs.class_is_valuetype(param_class)) return if (param_class == class) .exact else .no;
+                return if (funcs.class_is_assignable_from(param_class, class)) .exact else .no;
+            },
+            .null_object => |class| {
+                const param_class = typeClass(funcs, param_type) orelse return .no;
+                if (funcs.class_is_valuetype(param_class)) return .no;
+                return if (funcs.class_is_assignable_from(param_class, class)) .exact else .no;
+            },
             .other => .no,
         };
     }
@@ -3704,6 +3881,21 @@ pub const Error = union(enum) {
             object: *const dotnet.Class,
         },
     },
+    null_index_access: struct {
+        pos: usize,
+    },
+    index_non_array: struct {
+        pos: usize,
+        kind: union(enum) {
+            type: Type,
+            class: *const dotnet.Class,
+        },
+    },
+    index_out_of_range: struct {
+        pos: usize,
+        index: i64,
+        length: usize,
+    },
     new_failed: struct {
         pos: usize,
         class: *const dotnet.Class,
@@ -3985,7 +4177,8 @@ const ErrorFmt = struct {
                     name,
                 });
                 for (o.arg_kinds[0..o.arg_count], 0..) |kind, i| {
-                    try writer.print("{s}{f}", .{ if (i == 0) "" else ", ", kind });
+                    if (i != 0) try writer.writeAll(", ");
+                    try kind.write(f.dotnet_funcs, writer);
                 }
                 try writer.print(") on class '{s}', candidates:", .{f.dotnet_funcs.class_get_name(o.class)});
                 var level: ?*const dotnet.Class = o.class;
@@ -3999,10 +4192,14 @@ const ErrorFmt = struct {
                         for (0..count) |i| {
                             if (i != 0) try writer.writeAll(", ");
                             const param_type = paramType(f.dotnet_funcs, method, i).?;
+                            const param_kind = f.dotnet_funcs.type_get_type(param_type);
+                            const maybe_class = if (param_kind == .string) null else typeClass(f.dotnet_funcs, param_type);
                             if (paramEnum(f.dotnet_funcs, param_type)) |enum_class| {
                                 try writer.print("{s}", .{f.dotnet_funcs.class_get_name(enum_class)});
+                            } else if (maybe_class) |class| {
+                                try writer.print("{s}", .{f.dotnet_funcs.class_get_name(class)});
                             } else {
-                                try writer.print("{t}", .{f.dotnet_funcs.type_get_type(param_type)});
+                                try writer.print("{t}", .{param_kind});
                             }
                         }
                         try writer.writeAll(")");
@@ -4046,6 +4243,24 @@ const ErrorFmt = struct {
                     f.lineNum(e.field_extent.start),
                     f.text[e.field_extent.start..e.field_extent.end],
                 },
+            ),
+            .null_index_access => |e| try writer.print(
+                "{d}: index accessed on NULL object",
+                .{f.lineNum(e.pos)},
+            ),
+            .index_non_array => |e| switch (e.kind) {
+                .type => |t| try writer.print(
+                    "{d}: cannot index {s}, only a one-dimensional array",
+                    .{ f.lineNum(e.pos), t.what() },
+                ),
+                .class => |class| try writer.print(
+                    "{d}: cannot index an object of class '{s}', only a one-dimensional array",
+                    .{ f.lineNum(e.pos), f.dotnet_funcs.class_get_name(class) },
+                ),
+            },
+            .index_out_of_range => |e| try writer.print(
+                "{d}: index {d} is out of range for an array of length {d}",
+                .{ f.lineNum(e.pos), e.index, e.length },
             ),
             .new_failed => |n| try writer.print("{d}: new failed", .{
                 f.lineNum(n.pos),
@@ -4783,12 +4998,47 @@ fn goodCodeTests(dotnet_funcs: *const Funcs) !void {
         \\@Assert(@IsNull(Statics.NullArray))
     );
     // TODO: should we use "@TestClass()" so we can test these with il2cpp?
-    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
         \\var Statics = @Class(t.MutinyTest.Statics)
         \\var arr = Statics.I32Array
-        \\@Discard(arr[0])
-    , "array index not implemented");
+        \\@Assert(arr[0] == 10)
+        \\@Assert(arr[arr.get_Length() - 1] == 30)
+        \\@Assert(Statics.I32Array[1] == 20)
+        \\var strs = Statics.StringArray
+        \\@Log("strs[1] is ", strs[1])
+        \\@Assert(@NotNull(strs[0]))
+    );
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\@Discard(Statics.NullArray[0])
+    , "3: index accessed on NULL object");
+    if (have_mutiny_test_dll) try testCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Test = @Class(t.Test)
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\@Assert(Statics.SpanField._ticks == 7)
+        \\@Assert(Test.TicksOf(Statics.SpanField) == 7)
+        \\@Assert(@NotNull(Statics.DayField))
+        \\var inst = Statics.Instance
+        \\@Assert(inst.SpanField._ticks == 9)
+        \\@Assert(Test.TicksOf(inst.Inner.SpanField) == 9)
+        \\var span = Statics.SpanField
+        \\set span._ticks = 8
+        \\@Assert(span._ticks == 8)
+        \\@Assert(Statics.SpanField._ticks == 7)
+    );
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\set Statics.Instance.SpanField._ticks = 1
+    , "3: setting a field of a struct that is itself a field not implemented");
+    if (have_mutiny_test_dll) try testBadCode(dotnet_funcs,
+        \\var t = @Assembly("MutinyTest")
+        \\var Statics = @Class(t.MutinyTest.Statics)
+        \\@Discard(Statics.StringArray[2])
+    , "3: index 2 is out of range for an array of length 2");
     // TODO: should we use "@TestClass()" so we can test these with il2cpp?
     if (have_mutiny_test_dll) try testCode(dotnet_funcs,
         \\var t = @Assembly("MutinyTest")
@@ -4961,6 +5211,10 @@ pub const Funcs = struct {
     class_get_fields: *const dotnet.shared.class_get_fields,
     class_get_methods: *const dotnet.shared.class_get_methods,
     class_get_field_from_name: *const dotnet.shared.class_get_field_from_name,
+    class_get_type: *const dotnet.shared.class_get_type,
+    class_get_element_class: *const dotnet.shared.class_get_element_class,
+    class_is_assignable_from: *const dotnet.shared.class_is_assignable_from,
+    array_element_size: *const dotnet.shared.array_element_size,
     field_get_flags: *const dotnet.shared.field_get_flags,
     field_get_name: *const dotnet.shared.field_get_name,
     field_get_type: *const dotnet.shared.field_get_type,
@@ -4989,6 +5243,11 @@ pub const Funcs = struct {
             gchandle: dotnet.MonoGcHandle,
             string_new_len: *const dotnet.mono.string_new_len,
             class_is_enum: *const dotnet.mono.class_is_enum,
+            class_is_valuetype: *const dotnet.mono.class_is_valuetype,
+            value_box: *const dotnet.mono.value_box,
+            array_length: *const dotnet.mono.array_length,
+            array_addr_with_size: *const dotnet.mono.array_addr_with_size,
+            field_get_value_object: *const dotnet.mono.field_get_value_object,
         },
         il2cpp: struct {
             runtime_class_init: *const dotnet.il2cpp.runtime_class_init,
@@ -5005,11 +5264,21 @@ pub const Funcs = struct {
             gchandle_get_target: *const dotnet.il2cpp.gchandle_get_target,
             string_new_len: *const dotnet.il2cpp.string_new_len,
             class_is_enum: *const dotnet.il2cpp.class_is_enum,
+            class_is_valuetype: *const dotnet.il2cpp.class_is_valuetype,
+            value_box: *const dotnet.il2cpp.value_box,
+            array_length: *const dotnet.il2cpp.array_length,
+            array_object_header_size: *const dotnet.il2cpp.array_object_header_size,
+            field_get_value_object: *const dotnet.il2cpp.field_get_value_object,
         },
     },
 
     pub const string_new_len = dotnet.string_new_len;
     pub const class_is_enum = dotnet.class_is_enum;
+    pub const class_is_valuetype = dotnet.class_is_valuetype;
+    pub const value_box = dotnet.value_box;
+    pub const array_length = dotnet.array_length;
+    pub const array_element_addr = dotnet.array_element_addr;
+    pub const field_get_value_object = dotnet.field_get_value_object;
     pub const gchandle_new = dotnet.gchandle_new;
     pub const gchandle_free = dotnet.gchandle_free;
     pub const gchandle_get_target = dotnet.gchandle_get_target;

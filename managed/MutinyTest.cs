@@ -32,6 +32,20 @@ public class Test
     public static int EchoEnum(System.DayOfWeek v) { return (int)v; }
     public static int OverloadIntEnum(int v) { return 1; }
     public static int OverloadIntEnum(System.DayOfWeek v) { return 2; }
+
+    public static long TicksOf(System.TimeSpan v) { return v.Ticks; }
+    public static long AddTicks(System.TimeSpan a, System.TimeSpan b, int c) { return a.Ticks + b.Ticks + c; }
+    public static object EchoObject(object v) { return v; }
+    public static int TypeOrString(System.Type v) { return 1; }
+    public static int TypeOrString(string v) { return 2; }
+    public static int OverloadBoxed(object v) { return 1; }
+    public static int OverloadBoxed(System.TimeSpan v) { return 2; }
+
+    public static int[] I32Array() { return new int[] { 10, 20, 30 }; }
+    public static string[] StringArray() { return new string[] { "a", "b" }; }
+    public static object[] ObjectArray() { return new object[] { System.TimeSpan.FromTicks(5), null }; }
+    public static System.TimeSpan[] TimeSpanArray() { return new System.TimeSpan[] { System.TimeSpan.FromTicks(1), System.TimeSpan.FromTicks(2) }; }
+    public static int[] NullI32Array() { return null; }
 }
 
 namespace MutinyTest
@@ -57,6 +71,9 @@ namespace MutinyTest
         public static string[] StringArray = new string[] { "a", "b" };
         public static int[] NullArray = null;
 
+        public static System.TimeSpan SpanField = System.TimeSpan.FromTicks(7);
+        public static System.DayOfWeek DayField = System.DayOfWeek.Friday;
+
         public static Instances Instance = Instances.New();
     }
 
@@ -75,6 +92,7 @@ namespace MutinyTest
         public double F64Field = 3.25;
 
         public Instances Inner;
+        public System.TimeSpan SpanField = System.TimeSpan.FromTicks(9);
 
         public static Instances New() { return new Instances { Inner = new Instances() }; }
         public static Instances NullInstance() { return null; }

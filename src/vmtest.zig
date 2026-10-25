@@ -217,6 +217,141 @@ pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
             .mono => "2: no overload matches for Overload(other) on class 'Test', candidates: Overload(i4) Overload(string) Overload(r8)",
             .il2cpp => "2: no overload matches for Overload(other) on class 'Object', candidates: Overload(i4) Overload(string) Overload(r8)",
         });
+        try Vm.testCode(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+            \\var String = @Class(mscorlib.System.String)
+            \\var Test = @TestClass()
+            \\var second = TimeSpan.FromSeconds(1)
+            \\@Assert(Test.TicksOf(second) == 10000000)
+            \\@Assert(Test.TicksOf(TimeSpan.FromSeconds(2)) == 20000000)
+            \\@Assert(Test.AddTicks(second, TimeSpan.FromSeconds(2), 5) == 30000005)
+            \\var echoed = Test.EchoObject(second)
+            \\@Assert(Test.TicksOf(echoed) == 10000000)
+            \\@Assert(@IsNull(Test.EchoObject(Test.NullObject())))
+            \\var type = String.Empty.GetType()
+            \\@Assert(Test.TypeOrString("x") == 2)
+            \\@Assert(Test.TypeOrString(String.Empty) == 2)
+            \\@Assert(Test.TypeOrString(type) == 1)
+            \\@Assert(Test.OverloadBoxed(type) == 1)
+            \\@Assert(Test.TicksOf(TimeSpan.Zero) == 0)
+            \\@Assert(TimeSpan.MaxValue._ticks == 9223372036854775807)
+        );
+        try Vm.testBadCode(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+            \\set TimeSpan.Zero._ticks = 1
+        , "3: setting a field of a struct that is itself a field not implemented");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.TicksOf(Test.NullObject()))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: no overload matches for TicksOf(null Object) on class 'Test', candidates: TicksOf(TimeSpan)",
+            .il2cpp => "2: no overload matches for TicksOf(null Object) on class 'Object', candidates: TicksOf(TimeSpan)",
+        });
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.TypeOrString(Test.ObjectArray()))
+        , switch (dotnet_funcs.kind) {
+            .mono => "2: no overload matches for TypeOrString(Object[]) on class 'Test', candidates: TypeOrString(Type) TypeOrString(string)",
+            .il2cpp => "2: no overload matches for TypeOrString(Object[]) on class 'Object', candidates: TypeOrString(Type) TypeOrString(string)",
+        });
+        try Vm.testBadCode(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+            \\var Test = @TestClass()
+            \\@Discard(Test.OverloadBoxed(TimeSpan.FromSeconds(1)))
+        , switch (dotnet_funcs.kind) {
+            .mono => "4: ambiguous overloads for OverloadBoxed(TimeSpan) on class 'Test', candidates: OverloadBoxed(Object) OverloadBoxed(TimeSpan)",
+            .il2cpp => "4: ambiguous overloads for OverloadBoxed(TimeSpan) on class 'Object', candidates: OverloadBoxed(Object) OverloadBoxed(TimeSpan)",
+        });
+        try Vm.testCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Assert(ints[0] == 10)
+            \\@Assert(ints[2] == 30)
+            \\var i = 1
+            \\@Assert(ints[i] == 20)
+            \\@Assert(ints[i + 1] == 30)
+            \\@Assert(Test.I32Array()[1] == 20)
+            \\var sum = 0
+            \\var n = 0
+            \\loop
+            \\    if (n == 3) { break }
+            \\    set sum = sum + ints[n]
+            \\    set n = n + 1
+            \\continue
+            \\@Assert(sum == 60)
+            \\var strs = Test.StringArray()
+            \\@Assert(Test.TypeOrString(strs[1]) == 2)
+            \\@Assert(@NotNull(strs[0]))
+            \\@Assert(@IsNull(Test.NullString()))
+            \\@Log("strs[0] is ", strs[0])
+            \\var objs = Test.ObjectArray()
+            \\@Assert(@NotNull(objs[0]))
+            \\@Assert(Test.TicksOf(objs[0]) == 5)
+            \\@Assert(@IsNull(objs[1]))
+            \\@Assert(@IsNull(Test.EchoObject(objs[1])))
+            \\var spans = Test.TimeSpanArray()
+            \\@Assert(Test.TicksOf(spans[0]) == 1)
+            \\@Assert(Test.TicksOf(spans[1]) == 2)
+            \\@Assert(Test.AddTicks(spans[0], spans[1], 0) == 3)
+            \\@Assert(@IsNull(Test.NullI32Array()))
+            \\if (0) { @Discard(ints[99]) }
+        );
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Discard(ints[3])
+        , "3: index 3 is out of range for an array of length 3");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Discard(ints[0 - 1])
+        , "3: index -1 is out of range for an array of length 3");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Discard(ints[1.5])
+        , "3: expected an integer index but got a float");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Discard(ints[@Nothing()])
+        , "3: expected an integer index but got nothing");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test.NullI32Array()[0])
+        , "2: index accessed on NULL object");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\@Discard(Test[0])
+        , "2: cannot index a class, only a one-dimensional array");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var mscorlib = @Assembly("mscorlib")
+            \\var TimeSpan = @Class(mscorlib.System.TimeSpan)
+            \\@Discard(TimeSpan.FromSeconds(1)[0])
+        , "3: cannot index an object of class 'TimeSpan', only a one-dimensional array");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\@Discard(ints[0)
+        , "3: syntax error: expected a close bracket ']' to end the index but got a close paren ')'");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\if (0) { @Discard(ints[0) }
+        , "3: syntax error: expected a close bracket ']' to end the index but got a close paren ')'");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\set ints[0] = 1
+        , "3: setting an array element not implemented");
+        try Vm.testBadCode(dotnet_funcs,
+            \\var Test = @TestClass()
+            \\var ints = Test.I32Array()
+            \\if (0) { set ints[0] = 1 }
+        , "3: setting an array element not implemented");
     }
     try Vm.testBadCode(dotnet_funcs,
         \\var mscorlib = @Assembly("mscorlib")

@@ -272,8 +272,8 @@ if (item.Value < def.DefaultValue) {
 }
 ```
 
-Schedule I, no arrest - a `loop` over a list the game keeps, with `get_Count` and `get_Item`
-standing in for `.Count` and `[i]`:
+Schedule I, no arrest - a `loop` over a `List` the game keeps. `[i]` indexes arrays only, so a
+`List` uses its own `get_Count` and `get_Item` methods:
 
 ```
 @Section(.update)
@@ -439,6 +439,10 @@ fn name(a, b) { @Log(a) }   // functions
 
 Input.GetKeyDown(.Space)    // enum literal: `.Name`, resolved against the parameter's enum
 var key = .Space            // it can be stored; it only becomes a value when passed to .NET
+
+var c = hits[i]             // index a one-dimensional array (read only)
+var pos = player.get_position()   // a struct (Vector3, LayerMask, ...) is held as an object
+Physics.Linecast(pos, c.get_position(), mask)   // objects and structs can be passed back in
 ```
 
 Things that will surprise you:
@@ -458,6 +462,14 @@ Things that will surprise you:
   `const`.
 - **A statement whose value is unused is an error.** If you call a method that returns something
   and you don't want it, wrap it: `@Discard(obj.Method())`.
+- **`[i]` works on arrays only, and only for reading.** `hits[i]` on a `Collider[]` gives an
+  object, on an `int[]` an integer, on a `Vector3[]` a struct object. An index outside the array
+  is an error naming the index and the length. A `List<T>` is not an array: use its
+  `get_Count()` and `get_Item(i)`. `set arr[i] = x` is not implemented.
+- **A struct is a copy.** A struct value (`Vector3`, `LayerMask`, `TimeSpan`, ...) from a method,
+  a field or an array element is a boxed copy. `var p = t.get_position()` then `set p.x = 0`
+  changes `p` and nothing else, so write it back with the setter (`t.set_position(p)`).
+  `set obj.structField.x = 0` is an error for the same reason: it would only change a copy.
 - **You cannot reach a class straight off an assembly.** Call `@Class` first:
 
   ```
@@ -514,8 +526,8 @@ BinaryOpComparison  <- "==" / "!=" / "<" / "<=" / ">" / ">="
 NUMBER              <- "1" (integer) / "1.5" (float)
 ```
 
-`ExprSuffix`'s `LBRACKET Expr RBRACKET` is array indexing — it parses but is **not implemented**,
-so indexing fails at runtime. Everything else above works.
+`ExprSuffix`'s `LBRACKET Expr RBRACKET` is array indexing, on one-dimensional arrays with an
+integer index. Everything above works.
 
 A `Statement` that is a bare `Expr` is only legal if the expression produces no value; wrap
 anything that returns something in `@Discard`.
@@ -546,7 +558,7 @@ memory — see the rules below on argument types.
 | `@Log(...)` | any number of anything | concatenates them; an error in a mod |
 | `@Exit(...)` | any number of anything | ends the run; with arguments, the concatenation is the run's outcome: in a mod this frame's result (logged only when it changes), elsewhere a log line |
 | `@ToString(v)` | anything | |
-| `@IsNull(v)` / `@NotNull(v)` | anything | return an integer 0 or 1 |
+| `@IsNull(v)` / `@NotNull(v)` | an object, string, class or assembly | return an integer 0 or 1 |
 | `@Assert(v)` | an integer | |
 | `@Discard(v)` | anything | the only way to throw away a return value |
 | `@HasField(obj, "name")` | an object and a **string literal** | integer 1 if the object's class has a field with that name, else 0 |
@@ -566,7 +578,17 @@ These are not style advice. Each one is a way to take the game down.
    `Foo(int)` next to `Foo(long)` cannot be called with an integer literal today. An integer is
    also accepted by a `float`/`double` parameter, but only when no exact candidate exists.
    An enum parameter takes an enum literal only: `GetKeyDown(.Space)`, never `GetKeyDown(32)`.
-   Objects cannot be passed as arguments yet.
+   An object fits a parameter whose class it is (or derives from), so a `Collider` fits
+   `Component` and anything fits `object`. A struct fits only a parameter of exactly its own
+   type: a `Vector3` fits `Vector3`, and also `object`. A null object fits a reference
+   parameter its declared class could be assigned to, never a struct. That makes
+   `Foo(object)` beside `Foo(Transform)` *ambiguous* for a `Transform`: there is no
+   "most specific" rule, so such a method cannot be called with that argument today. A string
+   fits a `string` parameter, not `object`, so `GetComponent("Name")` and
+   `GetComponent(type)` each pick their own overload. Get a `System.Type` from
+   `System.Type.GetType("ClassName, Assembly-CSharp")`, or `obj.GetType()`.
+   `ref`/`out` parameters (`RaycastHit&` in the decomp) cannot be passed; pick an overload
+   without them.
 
 2. **Argument values are checked against the declared parameter type.** `float`, `double`, and
    every integer width convert correctly, and a value that doesn't fit stops the script with a

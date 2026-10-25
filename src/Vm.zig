@@ -1328,9 +1328,19 @@ fn callMethod(
     std.debug.assert(next_arg_addr.eql(vm.mem.top()));
 
     var maybe_exception: ?*const dotnet.Object = null;
+    const this: ?*const dotnet.Object = if (maybe_object) |object| blk: {
+        const declaring_class = vm.dotnet_funcs.method_get_class(method) orelse std.debug.panic(
+            "method_get_class returned null for {s}",
+            .{method_id.slice()},
+        );
+        break :blk if (vm.dotnet_funcs.class_is_valuetype(declaring_class))
+            @ptrCast(vm.dotnet_funcs.object_unbox(object))
+        else
+            object;
+    } else null;
     const maybe_result = vm.dotnet_funcs.runtime_invoke(
         method,
-        maybe_object,
+        this,
         if (args.count == 0) null else @ptrCast(&managed_args_buf),
         &maybe_exception,
     );
@@ -5246,6 +5256,7 @@ pub const Funcs = struct {
     field_get_type: *const dotnet.shared.field_get_type,
     field_get_value: *const dotnet.shared.field_get_value,
     field_set_value: *const dotnet.shared.field_set_value,
+    method_get_class: *const dotnet.shared.method_get_class,
     method_get_flags: *const dotnet.shared.method_get_flags,
     method_get_name: *const dotnet.shared.method_get_name,
     type_get_type: *const dotnet.shared.type_get_type,

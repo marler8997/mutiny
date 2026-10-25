@@ -236,6 +236,16 @@ pub fn run(funcs: *const Funcs, unity_version: ?UnityVersion) !void {
             \\@Assert(Test.OverloadBoxed(type) == 1)
             \\@Assert(Test.TicksOf(TimeSpan.Zero) == 0)
             \\@Assert(TimeSpan.MaxValue._ticks == 9223372036854775807)
+            \\@Assert(second.get_Ticks() == 10000000)
+            \\@Assert(second.get_Seconds() == 1)
+            \\@Assert(second.get_TotalSeconds() == 1)
+            \\@Assert(TimeSpan.FromSeconds(3).get_Ticks() == 30000000)
+            \\@Assert(second.Add(TimeSpan.FromSeconds(2)).get_Ticks() == 30000000)
+            \\@Assert(second.Negate()._ticks == 0 - 10000000)
+            \\@Assert(echoed.get_Ticks() == 10000000)
+            \\@Assert(TimeSpan.MaxValue.get_Ticks() == 9223372036854775807)
+            \\@Assert(second.ToString().get_Length() == 8)
+            \\@Assert(@NotNull(second.GetType()))
         );
         try Vm.testBadCode(dotnet_funcs,
             \\var mscorlib = @Assembly("mscorlib")

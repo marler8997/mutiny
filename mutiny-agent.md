@@ -470,6 +470,8 @@ Things that will surprise you:
   a field or an array element is a boxed copy. `var p = t.get_position()` then `set p.x = 0`
   changes `p` and nothing else, so write it back with the setter (`t.set_position(p)`).
   `set obj.structField.x = 0` is an error for the same reason: it would only change a copy.
+  A struct's own methods and getters work on it like an object's (`b.get_center()`,
+  `v.get_normalized()`).
 - **A string is a string wherever it comes from.** A method's return value, a field (private
   ones too, like `tree._characterName`) and an array element all give a string that `@Log`,
   `@Exit` and `string` parameters accept, and you can call its methods (`name.get_Length()`).

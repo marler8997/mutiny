@@ -26,6 +26,7 @@ const global = struct {
 
     var bootstrap_state: std.atomic.Value(BootstrapState) = .init(.pending);
     var io_thread_id: std.atomic.Value(u32) = .init(0);
+    var main_thread_id: std.atomic.Value(u32) = .init(0);
     var io_thread: ?win32.HANDLE = null;
     var runtime: RuntimeState = .{ .find_lib = .{} };
     var update_hook: UpdateHookState = .pending;
@@ -284,6 +285,7 @@ fn subclassUpdate() enum { keep_calling, done } {
             }
             const window = &ctx.first_candidate.?;
             std.log.info("found unity window 0x{x} on thread {}", .{ @intFromPtr(window.hwnd), window.tid });
+            global.main_thread_id.store(window.tid, .monotonic);
             global.subclass.hwnd = window.hwnd;
             global.subclass.state = .{ .subclass = .{} };
             continue :state global.subclass.state;
@@ -701,6 +703,35 @@ fn bootstrapIl2cpp(
     try il2cppclass.subclassSelfTest(class_funcs, assemblies[0..assembly_count], layouts, unity_version);
     std.log.info("il2cpp: FromIl2CppType hook installed, MonoBehaviour subclass built", .{});
     try il2cppclass.instantiate(class_funcs, assemblies[0..assembly_count]);
+}
+
+// Keeps this in step with the type the tests call it through.
+comptime {
+    const declared: detour.DetourInstallFunction = &DetourInstall;
+    _ = declared;
+}
+
+export fn DetourInstall(
+    target: usize,
+    hook: usize,
+    out_trampoline: *usize,
+) callconv(.c) detour.DetourInstallResult {
+    const main_thread_id = global.main_thread_id.load(.monotonic);
+    if (main_thread_id == 0) return .not_ready;
+    const current_thread_id = win32.GetCurrentThreadId();
+    if (current_thread_id != main_thread_id) {
+        std.log.err(
+            "DetourInstall(0x{x}, 0x{x}) called on thread {} but the main thread is {}",
+            .{ target, hook, current_thread_id, main_thread_id },
+        );
+        return .wrong_thread;
+    }
+    const installed = detour.installManaged(target, hook) catch |err| {
+        std.log.err("DetourInstall(0x{x}, 0x{x}) failed: {t}", .{ target, hook, err });
+        return .failed;
+    };
+    out_trampoline.* = installed.trampoline;
+    return .ok;
 }
 
 // Note: this is called on EVERY game update, which can happen hundreds of times

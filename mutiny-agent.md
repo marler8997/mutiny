@@ -314,6 +314,11 @@ if (pm.get_IsGrounded() == 0) {
 ```
 
 
+A script can't hook a method so your code runs in its place. If the player needs that, they
+can write a compiled mod: `Mutiny.dll` exports `DetourInstall` for it. See "Compiled Mods" in
+https://github.com/marler8997/mutiny/blob/master/README.md before writing one, because a bad
+hook crashes the game.
+
 ## Finding the right code
 
 `mutiny decomp <Name>` keeps `%LOCALAPPDATA%\mutiny\app\<Name>\decomp\` up to date with the

@@ -142,6 +142,7 @@ pub const mono = struct {
         status: *MonoImageOpenStatus,
     ) callconv(.c) ?*const Assembly;
     pub const add_internal_call = fn (name: [*:0]const u8, method: *const anyopaque) callconv(.c) void;
+    pub const compile_method = fn (*const Method) callconv(.c) ?*anyopaque;
     pub const class_is_enum = fn (*const Class) callconv(.c) c_int;
     pub const class_is_valuetype = fn (*const Class) callconv(.c) c_int;
     pub const class_get_nesting_type = fn (*const Class) callconv(.c) ?*const Class;

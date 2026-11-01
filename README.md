@@ -82,3 +82,54 @@ To turn a mod off, untick it in the in-game panel, run `mutiny <PID> disable-mod
 delete the file. A mod that changes something the game won't put back on its own can undo
 itself with a `@Section(.disable)` part, which runs once when the mod is turned off, deleted or
 edited; `mutiny-agent.md` has the details.
+
+# Compiled Mods
+
+Scripts are the quickest way to explore a game and try ideas. When a mod outgrows them, Mutiny can
+help with compiled code too: `Mutiny.dll` exports `DetourInstall`, which hooks a method so your code
+runs in its place, and gives you a way to call the original.
+
+`Mutiny.dll` is injected, so it may not be loaded yet when your code starts. Look it up at runtime
+with `GetModuleHandle` and `GetProcAddress`, and retry on a later frame until it's there.
+[`managed/DetourExample.cs`](managed/DetourExample.cs) is a complete example of a C# mod using it on
+mono.
+
+```
+uint32 DetourInstall(uintptr target, uintptr hook, uintptr *out_trampoline)    (cdecl)
+```
+
+This hooks the compiled code at `target` so it jumps to `hook`. Call it on the main thread, and don't
+target code that other threads run, because the patch is not atomic. A hook can't be removed. All the
+arguments must be valid: a bad one crashes the game. It answers:
+
+| Value | Meaning |
+|---|---|
+| 0, ok | `out_trampoline` is the address that runs the original. |
+| 1, not ready | The main thread isn't known yet and nothing changed. Ask again on a later frame. |
+| 2, wrong thread | A bug in the caller. Retrying can't help. |
+| 3, failed | Mutiny's log says why, and nothing changed. Retrying can't help. |
+
+The hook overwrites the instructions that cover the first 14 bytes of `target`, and those then run from
+elsewhere, where there's no information for the runtime to handle a fault or unwind through a call. So
+it fails on a target that:
+
+- could fault or make a call in those instructions, typically a method that does little else
+- ends within them
+- has a branch that lands in the middle of them
+- starts with a jump, because it's already patched or just a thunk
+
+It also fails if those instructions can't be relocated, or if there's no memory to relocate them to.
+
+**On mono**, write the hook in managed code, with the method's signature. An exception can't unwind
+through a native frame, so if the original throws beneath a native hook, the game dies.
+
+**On il2cpp**, a compiled C# mod has no way to load, so write the hook in native code, with the method's
+signature plus a last `const MethodInfo *` parameter to pass on to the original. Find `target` in the
+method's `MethodInfo`, whose first field is the code. An exception from the original unwinds through the
+hook, as long as the compiler generated unwind information for it. Methods often share code on il2cpp,
+about 30% of them in the games we've measured, so a hook also catches any method sharing its target's
+code.
+
+**Don't hook a generic method.** Mono aborts the game if you ask for the code of an open one. The code
+of a closed one can be shared with other instantiations, which the hook would also catch, and on mono
+it takes a hidden context in r10 that a hook doesn't preserve for the original.

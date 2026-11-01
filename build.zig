@@ -30,6 +30,15 @@ pub fn build(b: *std.Build) void {
         "rebuild managed/MutinyTest.dll if MutinyTest.cs changed",
     ).dependOn(&test_dll.step);
 
+    const detour_example_dll = UpdateDll.create(b, .{
+        .source_path = "managed/DetourExample.cs",
+        .out_path = "managed/DetourExample.dll",
+    });
+    b.step(
+        "update-detour-example-dll",
+        "rebuild managed/DetourExample.dll if DetourExample.cs changed",
+    ).dependOn(&detour_example_dll.step);
+
     const unity_stub_dll = UpdateDll.create(b, .{
         .source_path = "managed/UnityEngine.CoreModule.cs",
         .out_path = "managed/UnityEngine.CoreModule.dll",
@@ -373,6 +382,49 @@ pub fn build(b: *std.Build) void {
         unittest_step.dependOn(&run.step);
     }
 
+    {
+        const t = b.addTest(.{ .name = "unittest-zydis", .root_module = zydis.sanitized });
+        const run = b.addRunArtifact(t);
+        b.step(t.name, "").dependOn(&run.step);
+        unittest_step.dependOn(&run.step);
+    }
+
+    if (target.result.os.tag == .windows) {
+        const exe = b.addExecutable(.{
+            .name = "detourexporttest",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/detourexporttest.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "win32", .module = win32_mod },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.addArtifactArg(mutiny_native_dll);
+        b.step("unittest-detourexport", "").dependOn(&run.step);
+        unittest_step.dependOn(&run.step);
+    }
+
+    if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .windows) {
+        const t = b.addTest(.{
+            .name = "unittest-detour",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/detour.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zydis", .module = zydis.sanitized },
+                    .{ .name = "win32", .module = win32_mod },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(t);
+        b.step(t.name, "").dependOn(&run.step);
+        unittest_step.dependOn(&run.step);
+    }
+
     const test_step = b.step("test", "");
     test_step.dependOn(unittest_step);
 
@@ -386,6 +438,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zydis", .module = zydis.sanitized },
                 .{ .name = "mutiny_test_dll", .module = b.createModule(.{
                     .root_source_file = test_dll.path(),
+                }) },
+                .{ .name = "detour_example_dll", .module = b.createModule(.{
+                    .root_source_file = detour_example_dll.path(),
                 }) },
                 .{ .name = "mutiny_mono_dll", .module = mutiny_mono_dll_mod },
                 .{ .name = "unity_core_stub_dll", .module = unity_core_stub_mod },
@@ -423,6 +478,8 @@ pub fn build(b: *std.Build) void {
                 dotnet_test.addArg(b.fmt("{s}\\{s}_Data\\il2cpp_data", .{ game_dir, game.name }));
             },
         }
+        dotnet_test.addArg("--mutiny-dll");
+        dotnet_test.addArtifactArg(mutiny_native_dll);
         b.step(
             dotnet_test.step.name,
             b.fmt(

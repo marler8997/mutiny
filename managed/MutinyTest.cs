@@ -101,6 +101,76 @@ namespace MutinyTest
         public static Instances NullInstance() { return null; }
     }
 
+    // Targets for dotnet-test's detour test. NoInlining keeps every call going through the method's
+    // entry point, and each target has to compile to at least the 14 bytes the hook overwrites.
+    public static class DetourFixture
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int Target(int v)
+        {
+            int result = v;
+            for (int i = 0; i < 3; i++) result += i;
+            return result;
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int Replacement(int v)
+        {
+            return Original(v) + 1000;
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int Original(int v)
+        {
+            throw new System.InvalidOperationException("detour stub was not redirected");
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int CallTarget(int v) { return Target(v); }
+
+        public const int ThrownByOriginal = 1;
+        public const int ThrownByReplacement = 2;
+        public const int Caught = -1;
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int ThrowingTarget(int v)
+        {
+            if (v == ThrownByOriginal) throw new System.InvalidOperationException("thrown by the original");
+            return v;
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int ThrowingReplacement(int v)
+        {
+            if (v == ThrownByReplacement) throw new System.InvalidOperationException("thrown by the replacement");
+            return ThrowingOriginal(v);
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static int ThrowingOriginal(int v)
+        {
+            throw new System.InvalidOperationException("detour stub was not redirected");
+        }
+        public static int CatchFromThrowingTarget(int v)
+        {
+            try { return ThrowingTarget(v); }
+            catch (System.InvalidOperationException) { return Caught; }
+        }
+
+        public class Box { public long X; public long Y; }
+
+        // Compiles to a null check early in the prologue, which DetourInstall has to refuse to move.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static long NullCheckTarget(Box b) { return b.Y + b.X; }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static long NullCheckReplacement(Box b) { return NullCheckOriginal(b); }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        public static long NullCheckOriginal(Box b)
+        {
+            throw new System.InvalidOperationException("detour stub was not redirected");
+        }
+        public static int CatchFromNullCheckTarget(int unused)
+        {
+            try { return (int)NullCheckTarget(null); }
+            catch (System.NullReferenceException) { return Caught; }
+        }
+    }
+
     public class Base
     {
         public int BaseMethod() { return 7; }
